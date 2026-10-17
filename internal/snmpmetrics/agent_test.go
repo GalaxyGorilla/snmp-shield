@@ -31,9 +31,33 @@ func testAgent(t *testing.T, community string) (*Agent, string) {
 	}, []prometheus.Counter{c1, c2}, nil, zap.NewNop())
 	addr := freeUDPPort(t)
 	stop := make(chan struct{})
-	go func() { _ = a.Serve(addr, stop) }()
-	t.Cleanup(func() { close(stop) })
-	waitBound(t, addr)
+	ready := make(chan struct{})
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- a.Serve(addr, stop, ready)
+		close(runErr)
+	}()
+	select {
+	case <-ready:
+	case err, ok := <-runErr:
+		if !ok {
+			t.Fatal("snmp metrics agent exited during startup without an error")
+		}
+		t.Fatalf("snmp metrics agent exited during startup: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for snmp metrics agent startup")
+	}
+	t.Cleanup(func() {
+		close(stop)
+		select {
+		case err, ok := <-runErr:
+			if ok && err != nil {
+				t.Errorf("snmp metrics agent exited with error: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("snmp metrics agent did not stop within 5 seconds")
+		}
+	})
 	return a, addr
 }
 
@@ -46,22 +70,6 @@ func freeUDPPort(t *testing.T) string {
 	addr := pc.LocalAddr().String()
 	_ = pc.Close()
 	return addr
-}
-
-func waitBound(t *testing.T, addr string) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		// A garbage datagram is silently dropped by the agent; the probe
-		// just checks that *some* socket owns the address.
-		if conn, err := net.ListenPacket("udp", addr); err == nil {
-			_ = conn.Close()
-			time.Sleep(20 * time.Millisecond)
-			continue
-		}
-		return
-	}
-	t.Fatalf("snmp metrics agent did not bind %s", addr)
 }
 
 // buildGet builds a v2c GET (or GETNEXT) datagram for oids.

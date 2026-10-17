@@ -121,8 +121,9 @@ func (a *Agent) SetTunnelUp(up bool, endpoint string) {
 }
 
 // Serve binds the SNMP listener on addr and answers GET/GETNEXT until
-// stop is closed. It is intended to run in its own goroutine.
-func (a *Agent) Serve(addr string, stop <-chan struct{}) error {
+// stop is closed. When supplied, ready is closed after the listener is bound.
+// It is intended to run in its own goroutine.
+func (a *Agent) Serve(addr string, stop <-chan struct{}, ready ...chan<- struct{}) error {
 	pc, err := net.ListenPacket("udp", addr)
 	if err != nil {
 		return fmt.Errorf("snmp metrics listen: %w", err)
@@ -130,6 +131,9 @@ func (a *Agent) Serve(addr string, stop <-chan struct{}) error {
 	a.mu.Lock()
 	a.listener = pc.(*net.UDPConn)
 	a.mu.Unlock()
+	if len(ready) > 0 && ready[0] != nil {
+		close(ready[0])
+	}
 
 	go func() {
 		<-stop

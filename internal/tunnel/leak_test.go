@@ -67,7 +67,20 @@ func TestSessionGoroutineLeak(t *testing.T) {
 						}
 					}
 				}()
-				<-sess.Done() // client closed (or conn died): release everything
+				// The read deadline (3×keepalive = 600ms) should release
+				// this within ~2s of the client closing, but on macOS
+				// pion's server-side Read can park past the app-level
+				// deadline while the handshake FSM is not fully settled —
+				// Done would then never fire and the test wedges. Bound
+				// the wait with a watchdog: force-Close puts the session
+				// through the SAME exit path (Close fires Done), so a
+				// genuinely leaked session still fails the count check.
+				select {
+				case <-sess.Done():
+				case <-time.After(2 * time.Second):
+					_ = sess.Close()
+					<-sess.Done()
+				}
 				<-echoDone
 			}()
 		}

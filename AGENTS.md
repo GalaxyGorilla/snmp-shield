@@ -65,6 +65,7 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | Notification filtering (`notifications.filter`: allow/deny OID prefixes; YAML + `--filter-oid`/`--filter-action` flags) | done (tested, unit + e2e: passthrough relay, USM gateway w/ gosnmp TrapListener; config validation) |
 | HA (manager tunnel failover `tunnel.dial_addrs` sticky walk; keepalive dead-peer detection 3 misses × 3×keepalive; session Done()/per-session cancel; USM cross-engine Report adoption; live `keepalive_secs`/`max_reconnect_backoff_secs` + Reconnects/TunnelUp metrics) | done (tested, failover e2e + dead-peer net.Pipe + config/flags tests; smoke + all 3 interop suites re-run green) |
 | USM two-proxy chain in-Go e2e tests (`internal/usm/translate_manager_e2e_test.go`: full manager+agent translator chain over a pipe shim, fake v2c agent; discovery/GET, trap relay+filter, agent-notif→sink, inform round trip) + **inform relay bug fix** (manager-side informs were never answered) | done (tested, -race -count 2) |
+| msg fuzz tests (`internal/msg/fuzz_test.go`: 7 Go-native fuzz targets — Peek/SplitV1V2c/ParsePDU/SplitV1Trap/ParseV3/UnwrapScopedPDU/TrapOID/DecodeOID; regression corpus in `testdata/fuzz/`) + **2 parser panic fixes** (berOctetStringLike empty-buffer, ParseV3 declared-length overflow) | done (tested, all targets fuzzed 30s green; corpus runs in every `go test`) |
 
 ### Gateway modes (single proxy, no second proxy required)
 
@@ -426,6 +427,24 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   And: `msg.ParseV3`'s `m.PDU` is the ciphertext TLV (tag 0x04) for
   priv-flagged messages until `unwrapV3` decrypts in place — check the
   inner PDU type on the unwrapped `plain` TLV, not `m2.PDU[0]`.
+- **msg fuzzing** (`internal/msg/fuzz_test.go`): 7 Go-native fuzz
+  targets cover every parser entry point (Peek, SplitV1V2c, ParsePDU,
+  SplitV1Trap, ParseV3, UnwrapScopedPDU, TrapOID, DecodeOID) with
+  invariants (version ∈ {0,1}, TLVs inside datagram, TSM ⇒ empty
+  secParams, DecodeOID round-trip vs a canonicalOID reference).
+  Run longer locally: `go test ./internal/msg -run '^$' -fuzz 'Fuzz'
+  -fuzztime 30s`. Crashers land in `internal/msg/testdata/fuzz/` and
+  run as normal test cases in every `go test`. Fuzzing found two
+  wire-reachable panic classes (both fixed, pinned by corpus):
+  (a) **empty-buffer tag read in the error-formatting path** —
+  `berOctetStringLike` formatted `buf[0]` into the error message when
+  the buffer was empty (v1 trap PDU with empty content); panics kill
+  the trap-listener goroutine. (b) **declared-length overflow past the
+  outer buffer in TLV-advance arithmetic** — `berContent` only checks
+  its own input, so callers computing `tag+lenOctets+content` offsets
+  (ParseV3 header advance) must re-check against the OUTER buffer.
+  General rule: any slice arithmetic combining a parsed length with
+  parsed content needs a bounds check against the original datagram.
 - **Notification filtering** (`internal/notifyfilter`, `notifications.filter`):
   one filter (action allow|deny + dotted OID prefixes) applies at the
   **clear-notification ingress points only** (the 6 `handleClearTrap`/

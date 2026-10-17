@@ -90,7 +90,11 @@ func ParseV3(data []byte) (*V3Message, error) {
 		return nil, err
 	}
 	// advance rest past the msgHeader TLV (tag + length octets + content)
-	rest = rest[1+encLenLen(rest[1:])+len(hdrContent):]
+	hdrTLVLen := 1 + encLenLen(rest[1:]) + len(hdrContent)
+	if hdrTLVLen > len(rest) {
+		return nil, errBadV3
+	}
+	rest = rest[hdrTLVLen:]
 	h := hdrContent
 	if m.Header.MsgID, h, err = berInteger(h); err != nil {
 		return nil, err

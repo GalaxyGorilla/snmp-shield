@@ -333,7 +333,10 @@ func appendUintTLV(dst []byte, tag byte, v uint32) []byte {
 // berOctetStringLike parses a TLV with the given tag, treating the content
 // as opaque bytes (works for OCTET STRING, OID, IpAddress, TimeTicks...).
 func berOctetStringLike(tag byte, buf []byte) ([]byte, []byte, error) {
-	if len(buf) == 0 || buf[0] != tag {
+	if len(buf) == 0 {
+		return nil, nil, fmt.Errorf("msg: expected tag 0x%02x, buffer empty", tag)
+	}
+	if buf[0] != tag {
 		return nil, nil, fmt.Errorf("msg: expected tag 0x%02x, got 0x%02x", tag, buf[0])
 	}
 	l, rest, err := berLen(buf[1:])

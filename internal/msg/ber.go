@@ -27,7 +27,9 @@ func AppendTLV(dst []byte, tag byte, content []byte) []byte {
 }
 
 // AppendInteger appends an INTEGER TLV. Zero encodes as one 0x00 octet;
-// negative values sign-extend with 0xff.
+// values are encoded in minimal two's-complement form: a leading 0x00
+// octet is required when the top content byte has the high bit set
+// (otherwise strict parsers such as net-snmp read the value as negative).
 func AppendInteger(dst []byte, v int32) []byte {
 	var content []byte
 	switch {
@@ -41,6 +43,11 @@ func AppendInteger(dst []byte, v int32) []byte {
 			i++
 		}
 		content = be[i:]
+		// two's complement: positive value whose top bit is set needs a
+		// leading 0x00 so the encoding stays positive
+		if content[0]&0x80 != 0 {
+			content = append([]byte{0}, content...)
+		}
 	default: // v < 0
 		be := binary.BigEndian.AppendUint32(nil, uint32(v))
 		i := 0
@@ -61,7 +68,13 @@ func AppendUint32(dst []byte, v uint32) []byte {
 	for i < len(be)-1 && be[i] == 0 {
 		i++
 	}
-	return AppendTLV(dst, 0x02, be[i:])
+	content := be[i:]
+	// two's complement: top bit set needs a leading 0x00 so the encoding
+	// stays positive for strict parsers
+	if content[0]&0x80 != 0 {
+		content = append([]byte{0}, content...)
+	}
+	return AppendTLV(dst, 0x02, content)
 }
 
 // AppendOctetString appends an OCTET STRING TLV.

@@ -246,7 +246,9 @@ func mustOID(d string) []byte {
 // (enterprise.0.specific for enterpriseSpecific(6), else the standard trap
 // for generic 0-5), the original varbinds, and — when proxy is true — the
 // snmpTrapAddress.0 / snmpTrapCommunity.0 / snmpTrapEnterprise.0 bindings.
-// It returns the encoded varbind SEQUENCE content for a v2 Trap-PDU.
+// It returns the raw varbind-list content (like V1Trap.Varbinds): the
+// varbind SEQUENCE wrapper is added by BuildPDU, so callers must pass this
+// straight into BuildPDU's varbinds argument.
 func V1TrapToV2(t V1Trap, community []byte, proxy bool) ([]byte, error) {
 	var trapsOID []byte
 	if t.Generic == 6 {
@@ -271,11 +273,7 @@ func V1TrapToV2(t V1Trap, community []byte, proxy bool) ([]byte, error) {
 		ent := enterpriseOfSnmpTrapOID(t)
 		vb = appendVarbind(vb, OIDSnmpTrapEnterprise, 0x06, ent)
 	}
-	// wrap in SEQUENCE
-	var out []byte
-	out = append(out, 0x30)
-	out = AppendLength(out, len(vb))
-	return append(out, vb...), nil
+	return vb, nil
 }
 
 // enterpriseOfSnmpTrapOID reconstructs the v1 enterprise parameter from the

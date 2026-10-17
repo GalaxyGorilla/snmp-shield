@@ -210,11 +210,11 @@ func (a *AgentTranslator) handleTunnelRequest(f *tunnel.Frame) {
 		a.dropOrReport(hdr, m, f.CorrID, ErrUnknownEngine)
 		return
 	}
-	// timeliness (RFC 3414 3.2 step 4)
-	if err := a.clock.AcceptInbound(m.USM.Boots, m.USM.Time); err != nil {
-		a.dropOrReport(hdr, m, f.CorrID, ErrNotInTime)
-		return
-	}
+	// timeliness (RFC 3414 3.2 step 5): enforced after digest
+	// verification below, so an AUTHENTICATED higher-boots claim can be
+	// adopted as a logical reboot (HA pair state sync) instead of being
+	// rejected forever.
+	timeErr := a.clock.AcceptInbound(m.USM.Boots, m.USM.Time)
 
 	c, ok := a.prof.Lookup(m.USM.UserName)
 	if !ok {
@@ -234,7 +234,11 @@ func (a *AgentTranslator) handleTunnelRequest(f *tunnel.Frame) {
 		return
 	}
 
-	// authentication: verify digest (zeroed params) when flag set
+	// authentication: verify digest (zeroed params) when flag set.
+	// verified stays false for NoAuth messages: they carry no digest, so
+	// nothing about them is authenticated (and they must never drive the
+	// HA boots adoption below).
+	verified := false
 	if wantAuth {
 		off, ok2 := locateAuthParams(f.Payload, m)
 		if !ok2 {
@@ -243,6 +247,24 @@ func (a *AgentTranslator) handleTunnelRequest(f *tunnel.Frame) {
 		}
 		if err := Verify(c.p.AuthProtocol, f.Payload, c.authKey, m.USM.AuthParams, off); err != nil {
 			a.dropOrReport(hdr, m, f.CorrID, ErrBadAuth)
+			return
+		}
+		verified = true
+	}
+
+	// Timeliness AFTER digest verification: a verified HIGHER boots
+	// claim is a logical reboot (HA failover with a shared engineID but
+	// separate engine stores) — adopt it, re-anchor the engine clock and
+	// serve. Any other stale/out-of-window claim is rejected exactly as
+	// before. Unverified claims (NoAuthNoPriv, or any failed digest)
+	// never adopt: pre-auth rejection and replay protection unchanged.
+	if timeErr != nil {
+		if verified && m.USM.Boots > a.clock.Boots() {
+			a.clock.AdoptInbound(m.USM.Boots, m.USM.Time)
+			a.log.Info("usm agent: adopting higher engine boots (HA failover)",
+				zap.Uint32("boots", m.USM.Boots))
+		} else {
+			a.dropOrReport(hdr, m, f.CorrID, ErrNotInTime)
 			return
 		}
 	}

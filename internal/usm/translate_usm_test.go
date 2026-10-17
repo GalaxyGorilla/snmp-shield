@@ -132,10 +132,15 @@ func (s *testShim) Subscribe(uint8) (<-chan *tunnel.Frame, func()) {
 
 func (s *testShim) Send(context.Context, uint8, uint8, uint16, []byte) error { return nil }
 
-// TestReportAdoptsDifferentEngine pins the HA cross-engine adoption rule:
-// a Report from a DIFFERENT engineID is always adopted (failover to a
-// second agent-side proxy replica with its own engine), while same-engine
-// anti-rollback still rejects decreasing boots/time.
+// TestReportAdoptsDifferentEngine pins the HA pair-state sync rule: a
+// Report from a DIFFERENT engineID is always adopted (failover to a
+// second agent-side proxy replica with its own engine), and a same-engine
+// Report follows the wire even when boots/time regress (failover between
+// replicas sharing one engineID: the new active replica announces its
+// lower persisted boots in every Report). Real anti-rollback lives on the
+// engine side — the authoritative engine rejects stale boots/time on
+// authenticated requests with a notInTime Report carrying its CURRENT
+// state, which re-syncs this cache.
 func TestReportAdoptsDifferentEngine(t *testing.T) {
 	store, err := cache.Open("")
 	if err != nil {
@@ -188,15 +193,27 @@ func TestReportAdoptsDifferentEngine(t *testing.T) {
 		t.Fatalf("expected remote engine id 03 after second adoption, got % x", got)
 	}
 
-	// Same-engine anti-rollback: lower boots from the SAME engine is
-	// rejected.
+	// Same-engine Report with LOWER boots (the failed-over replica's
+	// announcement): adopted — the manager's cache follows the wire so
+	// it re-targets the new active replica instead of staying stuck on
+	// the dead peer's state.
 	m.handleReport(buildReport([]byte{0x03}, 0, 1))
 	m.engineMu.Lock()
 	got = append([]byte{}, m.remote.id...)
 	boots := m.remote.boots
 	m.engineMu.Unlock()
-	if !bytes.Equal(got, []byte{0x03}) || boots != 1 {
-		t.Fatalf("same-engine rollback must be rejected: id % x boots %d", got, boots)
+	if !bytes.Equal(got, []byte{0x03}) || boots != 0 {
+		t.Fatalf("same-engine boots regression must follow the wire: id % x boots %d", got, boots)
+	}
+
+	// A same-engine Report with identical state is a no-op (no wake,
+	// no rewrite) — the exact-match guard.
+	m.handleReport(buildReport([]byte{0x03}, 0, 1))
+	m.engineMu.Lock()
+	boots = m.remote.boots
+	m.engineMu.Unlock()
+	if boots != 0 {
+		t.Fatalf("identical Report must not change state: boots %d", boots)
 	}
 }
 

@@ -33,7 +33,7 @@ long-haul segment between them.
 | First capability | **Passthrough tunnel**, then USM/TSM message security |
 | SNMP versions | v2c and v3 are priority; v1 tolerated on clear leg |
 | Config | YAML file per instance, role via subcommand |
-| HA | Manager dials a list (`tunnel.dial_addrs`, sticky last-known-good); dead peers detected via keepalive (3 misses × 3×keepalive) and per-session work is cancelled through `Session.Done()`; USM manager adopts Reports from ANY engineID (failover), same-engine anti-rollback preserved |
+| HA | Manager dials a list (`tunnel.dial_addrs`, sticky last-known-good); dead peers detected via keepalive (3 misses × 3×keepalive) and per-session work is cancelled through `Session.Done()`; replicas sharing one engineID converge on the highest seen engine state: digest-verified higher boots adopted as logical reboot, manager adopts Reports from ANY engineID and follows the wire for same-engine boots/time changes |
 
 ## 3. Status / Roadmap
 
@@ -70,9 +70,9 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | internal/proxy wiring e2e tests (`internal/proxy/proxy_test.go`: white-box runAgent/runManager/runGateway over real PSK-DTLS loopback; passthrough + usm-translate two-proxy chains, USM + TSM gateways driven by gosnmp/DTLS clients, parseEngineID) + **2 prod fixes pinned**: TSM gateway accept loop returned "listener closed" error on clean shutdown (pion returns its own sentinel, not net.ErrClosed) and passthrough Manager `m.conn` read races its deferred nil-write (serveClearRequests/awaitResponse now read under socksMu) | done (tested, -race -count 2; proxy 0% → ~72% coverage) |
 | crypto primitive unit tests (`internal/usm/crypto_test.go`: protocol parsers, key lengths, RFC 3414 A.3 password-to-key vectors, Blumenthal/Reeder priv-key extensions, digest/sign/verify round trips + aliasing, DES salt counter) + cmd flags/os.Args coverage (`main_test.go`: gateway branches, psk-ciphersuites + filter flags, parsePskCiphersuites, run() version/help/genpsk/unknown) | done (tested, -race -count 2; crypto.go ~100%, cmd 24% → 57%) |
 | Manager-securing single proxy: **usm-manager mode** (`security.mode: usm-manager`, gateway role; `internal/usm/manager_gateway.go`: clear v1/v2c traps/informs at `trap_listen_addr` → v3 USM authPriv notifications toward `trap_sink_addr`, own authoritative engine + first user; inform responses relayed back to the device) | done (tested, gosnmp TrapListener sink incl. auto-inform-response, trap/inform/v1/filter tests, -race -count 2) |
-| Meaningful challenge tests (adversarial/edge-case tests beyond happy paths, added where they find real issues) + pragmatic polish | done (tested, `internal/usm/gateway_challenge_test.go` + `internal/tunnel/challenge_test.go`: stale boots rejected w/ usmStatsNotInTimeWindows report, tampered digest rejected w/ usmStatsWrongDigests, non-reportable silent drop, GetBulk relay, garbage-datagram robustness, wrong-PSK handshake rejection; polish: removed unreachable GetBulk-on-v1 downgrade in gateway.go — `downstreamFor` always returns v2c) |
-| HA pair state sync (shared/merged engineBoots between failover replicas so USM clients don't reset engine clocks after a failover) | backlog |
-| Notify filtering for the usm-manager manager-side notification path (filter v3 notifications before they reach `trap_sink_addr`) | backlog |
+| Meaningful challenge tests (adversarial/edge-case tests beyond happy paths, added where they find real issues) + pragmatic polish | done (tested, `internal/usm/gateway_challenge_test.go` + `internal/tunnel/challenge_test.go`: stale engineTime rejected w/ usmStatsNotInTimeWindows report, tampered digest rejected w/ usmStatsWrongDigests, non-reportable silent drop, GetBulk relay, garbage-datagram robustness, wrong-PSK handshake rejection; polish: removed unreachable GetBulk-on-v1 downgrade in gateway.go — `downstreamFor` always returns v2c) |
+| HA pair state sync (failover replicas sharing one engineID converge: digest-verified higher-boots claims adopted as logical reboot via `cache.EngineClock.AdoptInbound`; manager discovery cache follows the wire for same-engine Report regressions) | done (tested, `internal/usm/ha_sync_test.go` wire tests + cache unit test; smoke + all 3 interop suites re-run green) |
+| Notify filtering for the usm-manager manager-side notification path | done (already implemented at birth: `ManagerGateway.handleClearTrap` filters clear notifications before the v3 wrap toward `trap_sink_addr`, `TestManagerGatewayFilter` covers it; the v3 notification is generated from that ingress so the hook covers the whole path) |
 | Static analysis (staticcheck + govulncheck toolset, pragmatic: fix only meaningful findings) | done (tested, staticcheck zero findings — dead code removed, pion/dtls v3.1.4 upgrade for GO-2026-6165, options-API migration; govulncheck clean) |
 
 ### Gateway modes (single proxy, no second proxy required)
@@ -394,7 +394,9 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
 - Engine state: `cache.EngineClock` generates or adopts an engineID,
   increments boots per start (persisted JSON in `security.engine_store` —
   REQUIRED, boots must never decrease), engineTime = seconds since start.
-  Inbound timeliness per RFC 3414 §3.2 (±150 s window, anti-rollback).
+  Inbound timeliness per RFC 3414 §3.2 (±150 s window, anti-rollback);
+  a digest-verified HIGHER boots claim is adopted as a logical reboot
+  (HA pair state sync, see below).
 - **HA (tunnel failover + dead-peer detection)**:
   - Manager dials a list: `tunnel.dial_addrs` (YAML, most preferred
     first; supersedes `tunnel.dial_addr`, which still works as the
@@ -420,8 +422,25 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   - USM manager adopts a Report from ANY engineID (`handleReport`
     cross-engine rule): after failover, requests to the stale engineID
     are answered by the new replica's unknownEngineID Report and
-    discovery switches automatically. Same-engine boots/time
-    anti-rollback is unchanged.
+    discovery switches automatically. A same-engine Report also follows
+    the wire even when boots/time regress (the failed-over replica's
+    announcement); real anti-rollback lives engine-side — the
+    authoritative engine rejects stale requests with a notInTime Report
+    carrying its CURRENT state, which re-syncs this cache.
+  - **HA pair state sync** (`cache.EngineClock.AdoptInbound`): replicas
+    sharing `security.engine_id` but keeping separate engine stores have
+    different boots; the failover replica's LOWER persisted boots would
+    otherwise be stuck rejecting the old higher claims forever. Fix: in
+    `translate_agent.go handleTunnelRequest` + `gateway.go
+    handleFrontRequest`, the timeliness check is deferred until AFTER
+    digest verification, and a verified HIGHER boots claim is adopted as
+    a logical reboot (RFC 3414), re-anchoring engineTime to the claimed
+    timeline and persisting the merged state. Unverified claims
+    (NoAuthNoPriv or any failed digest — `verified` is only set after an
+    actual `Verify`) never adopt: pre-auth rejection and same-boots
+    replay protection unchanged. Tests: `internal/usm/ha_sync_test.go`
+    (failover serves, unverified rejected w/ usmStatsNotInTimeWindows,
+    manager Report follow-the-wire) + cache unit test.
   - Metrics now wired: `Reconnects` counter + `TunnelUp` gauge set by
     the session on reconnect/drop.
 - **USM inform relay (bug fix, pinned by e2e)**: in usm-translate mode,
@@ -536,17 +555,25 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   ingress.
 - **Challenge-test semantics** (`internal/usm/gateway_challenge_test.go`,
   `internal/tunnel/challenge_test.go`): the security gate is pinned
-  adversarially on the wire — stale boots/time claims are rejected with a
+  adversarially on the wire — same-boots out-of-window engineTime claims
+  are rejected with a
   Report whose varbind carries usmStatsNotInTimeWindows (counter suffix
   2), tampered PDUs (one flipped byte) with usmStatsWrongDigests (suffix
   5); WITHOUT the Reportable flag the same attacks are dropped in
-  complete silence (RFC 3414 §4). Hostile datagrams (empty, truncated
+  complete silence (RFC 3414 §4). (A stale-boots attack is pointless
+  since the HA state-sync rule: a verified HIGHER boots claim is a
+  legitimate logical reboot and is adopted — stale-time on the same
+  boots is the reproducible rejection.) Hostile datagrams (empty,
+  truncated
   headers, huge declared lengths, non-BER noise) never kill the front
   listener. Wrong-PSK DTLS clients fail the handshake (Connect error).
   Gotchas for similar tests: `msg.Peek` returns PDUType 0 for v3
   datagrams (the scopedPDU is opaque) — assert the Report's PDU type via
   `msg.ParseV3(dg).PDU[0]`; a fake agent that only answers GET (0xA0)
-  makes GetBulk tests time out — echo GET/GETNEXT/GETBULK.
+  makes GetBulk tests time out — echo GET/GETNEXT/GETBULK; gosnmp
+  derives the auth/priv MsgFlags from the SecurityParameters' protocols
+  (SHA/AES set the bits even when you pass NoAuthNoPriv — a genuine
+  NoAuthNoPriv wire message needs empty protocols).
 - **Notification filtering** (`internal/notifyfilter`, `notifications.filter`):
   one filter (action allow|deny + dotted OID prefixes) applies at the
   **clear-notification ingress points only** (the 6 `handleClearTrap`/

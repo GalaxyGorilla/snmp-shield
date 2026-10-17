@@ -190,6 +190,38 @@ func (ec *EngineClock) AcceptInbound(boots, t uint32) error {
 	}
 }
 
+// AdoptInbound merges an AUTHENTICATED (digest-verified) inbound
+// (boots, time) pair into this engine's state. It is the HA pair-state
+// sync primitive: when two replicas share an engineID (failover pair,
+// separate engine stores), the replica that takes over has a LOWER
+// persisted boots than the formerly-active peer. Managers keep sending
+// the old (higher) boots; per RFC 3414 a boots increase is a logical
+// reboot, so the higher claim is adopted, engineTime is re-anchored to
+// the claimed timeline and the merged state is persisted. Claims that
+// are not strictly higher are ignored — anti-rollback is preserved
+// (lower boots can never move this engine backwards, and same-boots
+// replay stays governed by the AcceptInbound time window).
+func (ec *EngineClock) AdoptInbound(boots, t uint32) {
+	ec.mu.Lock()
+	defer ec.mu.Unlock()
+	if boots <= ec.boots {
+		return
+	}
+	ec.boots = boots
+	// Re-anchor engineTime so the manager's timeline (seconds since the
+	// peer's boot) lines up with ours; subsequent messages on that
+	// timeline pass the AcceptInbound window.
+	ec.startedAt = time.Now().Add(-time.Duration(t) * time.Second)
+	if ec.store != nil {
+		_ = ec.store.SaveEngine(&Engine{
+			EngineID:  append([]byte{}, ec.engineID...),
+			Boots:     boots,
+			LastBoots: boots,
+			StartedAt: ec.startedAt,
+		})
+	}
+}
+
 // GenerateEngineID builds a random 11-byte engine ID per RFC 3414:
 // 0x80 | 0x00 ... with random local bytes. Format: first octet 0x80
 // (enterprise-dependent high bits), then 10 random bytes.

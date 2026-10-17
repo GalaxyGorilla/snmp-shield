@@ -53,8 +53,8 @@ func challengeGateway(t *testing.T, front, agent int) (*GatewayTranslator, func(
 }
 
 // TestGatewayStaleEngineTimeRejected: an authenticated request claiming
-// a wrong engineBoots must be rejected with a usmStatsNotInTimeWindows
-// Report and never forwarded.
+// an out-of-window engineTime (same boots) must be rejected with a
+// usmStatsNotInTimeWindows Report and never forwarded.
 func TestGatewayStaleEngineTimeRejected(t *testing.T) {
 	const front, agent = 12616, 11716
 	frontAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(front))
@@ -83,9 +83,13 @@ func TestGatewayStaleEngineTimeRejected(t *testing.T) {
 	defer stop()
 	waitBoundForChallenge(t, frontAddr)
 
-	// boots MISMATCH (claimed boots = boots+5): always rejected by
-	// AcceptInbound regardless of the engine's wall clock.
-	raw := craftV3GET(t, tr.clock.EngineID(), tr.clock.Boots()+5, 1, 42)
+	// The gateway clock is fresh (boots=1, engineTime ~0). A failover
+	// manager sends its OLD higher boots with a valid digest — per RFC
+	// 3414 that is a logical reboot and the HA state-sync rule adopts it
+	// (verified traffic only). The stale claim here is therefore a
+	// same-boots out-of-window engineTime (now+3600), which stays
+	// rejected by the timeliness window.
+	raw := craftV3GET(t, tr.clock.EngineID(), tr.clock.Boots(), tr.clock.Time()+3600, 42)
 	addr, err := net.ResolveUDPAddr("udp", frontAddr)
 	if err != nil {
 		t.Fatal(err)
@@ -205,7 +209,13 @@ func TestGatewayNonReportableSilentDrop(t *testing.T) {
 	defer stop()
 	waitBoundForChallenge(t, frontAddr)
 
-	raw := craftV3GETFlags(t, tr.clock.EngineID(), tr.clock.Boots()+5, 1, 44,
+	// The stale-time attack WITHOUT the Reportable flag: same-boots
+	// out-of-window engineTime (now+3600) — rejected in complete
+	// silence (no Report, no forwarding). (A higher-boots attack would
+	// be pointless anyway: without the Reportable flag it is also
+	// dropped, and with a valid digest it would be a legitimate HA
+	// failover that the state-sync rule adopts.)
+	raw := craftV3GETFlags(t, tr.clock.EngineID(), tr.clock.Boots(), tr.clock.Time()+3600, 44,
 		gosnmp.AuthPriv) // no Reportable flag
 
 	addr, _ := net.ResolveUDPAddr("udp", frontAddr)

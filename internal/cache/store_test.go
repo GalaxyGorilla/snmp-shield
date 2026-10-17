@@ -232,6 +232,62 @@ func TestEngineClockReplayAfterRestart(t *testing.T) {
 	}
 }
 
+func TestEngineClockAdoptInbound(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "engine.json")
+	s, _ := Open(p)
+	c, err := NewEngineClock(s, nil, testLogger(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := c.EngineID()
+	if c.Boots() != 1 {
+		t.Fatalf("fresh clock should be boots=1, got %d", c.Boots())
+	}
+
+	// Adopting a LOWER or equal boots is a no-op (anti-rollback).
+	c.AdoptInbound(0, 5)
+	c.AdoptInbound(1, 99999)
+	if c.Boots() != 1 {
+		t.Fatalf("lower/equal boots must not adopt, boots=%d", c.Boots())
+	}
+
+	// Adopting a HIGHER boots (the failed-over peer's state, logical
+	// reboot per RFC 3414) moves the engine forward and re-anchors
+	// engineTime to the claimed timeline.
+	c.AdoptInbound(7, 100)
+	if c.Boots() != 7 {
+		t.Fatalf("higher boots must adopt, boots=%d", c.Boots())
+	}
+	if c.Time() < 100 || c.Time() > 105 {
+		t.Fatalf("engineTime should be re-anchored to ~100 after adoption, got %d", c.Time())
+	}
+	if string(c.EngineID()) != string(id) {
+		t.Fatalf("adoption must not change the engineID: %x vs %x", id, c.EngineID())
+	}
+
+	// The merged state is persisted (a restart must not reset boots).
+	c2, err := NewEngineClock(s, nil, testLogger(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c2.Boots() != 8 {
+		t.Fatalf("adopted boots must persist across restart: boots=%d, want 8 (7+1)", c2.Boots())
+	}
+	if string(c2.EngineID()) != string(id) {
+		t.Fatalf("engineID must stay stable across the adopt+restart: %x vs %x", id, c2.EngineID())
+	}
+
+	// A message on the adopted timeline passes AcceptInbound (that is
+	// the whole point: managers keep sending the peer's timeline).
+	if err := c.AcceptInbound(7, 101); err != nil {
+		t.Fatalf("post-adopt message on the peer timeline must be accepted, got %v", err)
+	}
+	// ...and a pre-adopt replay (old lower boots) still fails.
+	if err := c.AcceptInbound(1, 10); !errors.Is(err, ErrRollback) {
+		t.Fatalf("pre-adopt replay must stay rejected, got %v", err)
+	}
+}
+
 func TestGenerateEngineID(t *testing.T) {
 	id1, err := GenerateEngineID()
 	if err != nil {

@@ -385,14 +385,22 @@ func (m *ManagerTranslator) handleReport(m2 *msg.V3Message) {
 		return
 	}
 	m.engineMu.Lock()
-	// A Report from a DIFFERENT engine is always adopted: after a
-	// failover to a second agent-side proxy replica (own engineID, lower
-	// boots), requests to the stale engineID are answered by the new
-	// replica's unknownEngineID Report, which must switch discovery.
+	// Any Report is adopted (HA pair state sync): a Report from a
+	// DIFFERENT engine always switches discovery (failover to a second
+	// agent-side proxy replica with its own engineID), and a same-engine
+	// Report follows the wire even when boots/time regress — after a
+	// failover between replicas sharing one engineID, the new active
+	// replica ANNOUNCES its lower persisted boots in every Report, and
+	// rejecting that would leave this manager stuck on the dead peer's
+	// state forever. Real anti-rollback lives on the engine side: the
+	// authoritative engine rejects stale boots/time on authenticated
+	// requests with a notInTime Report carrying its CURRENT state, which
+	// re-syncs this cache (a replayed stale Report can therefore only
+	// cost one rejected round trip, never bypass the engine's checks).
 	newer := m.remote == nil ||
 		!bytes.Equal(m2.USM.EngineID, m.remote.id) ||
-		m2.USM.Boots > m.remote.boots ||
-		(m2.USM.Boots == m.remote.boots && m2.USM.Time >= m.remote.time)
+		m2.USM.Boots != m.remote.boots ||
+		m2.USM.Time != m.remote.time
 	if newer {
 		m.remote = &remoteEngine{
 			id:           append([]byte{}, m2.USM.EngineID...),

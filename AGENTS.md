@@ -36,9 +36,13 @@ long-haul segment between them.
 
 ## 3. Status / Roadmap
 
-**Current state: all three security modes complete; no-YAML CLI mode
-implemented and smoke-tested end-to-end; cache package unit-tested;
-net-snmp CLI interop-tested end-to-end (incl. trap direction).**
+**Current state: all four security modes complete — passthrough,
+usm-translate (two-proxy tunnel), tsm (two-proxy tunnel), and usm-gateway
+(single box, standard v3 in / clear v2c out); no-YAML CLI mode implemented
+and smoke-tested end-to-end; cache package unit-tested; net-snmp CLI
+interop-tested end-to-end for both the two-proxy chain (incl. trap
+direction) and the USM gateway (incl. trap direction and rejection of
+clear/wrong-user traffic).**
 
 | Milestone | Status |
 |---|---|
@@ -52,11 +56,11 @@ net-snmp CLI interop-tested end-to-end (incl. trap direction).**
 | TSM mode (cert-based security model on tunnel leg) | done (tested) |
 | Cache package unit tests (store persistence, engine clocks, replay) | done (tested) |
 | Net-snmp interop tests (snmpget/getnext/bulkwalk/set/trap; needs `apt-get install snmp`) | done (tested, `scripts/interop-snmp.sh`) |
-| USM gateway mode (standard v3 manager → single proxy → legacy agent) | todo (detailed plan below) |
+| USM gateway mode (standard v3 manager → single proxy → legacy agent) | done (tested, gosnmp + net-snmp `scripts/interop-gateway.sh`, incl. trap direction) |
 | TSM gateway mode (RFC 6353 SNMP-over-DTLS front leg) | todo (detailed plan below) |
 | PSK ciphersuites, notify filtering, HA | backlog |
 
-### Gateway modes (planned — single proxy, no second proxy required)
+### Gateway modes (single proxy, no second proxy required)
 
 Motivation: today USM/TSM security only exists **between our own two
 proxies** (the tunnel leg). A normal industry-standard manager cannot
@@ -69,7 +73,8 @@ auditors. The proxy protecting the (v2c-only) agent **is the asset's
 security gate**: unauthenticated traffic never reaches the legacy
 device.
 
-**1. USM gateway (`usm-gateway`)** — the valuable one:
+**1. USM gateway (`usm-gateway`)** — the valuable one — **IMPLEMENTED
+(see below)**:
 
 ```
 [any standard manager] --SNMPv3 USM authPriv (RFC 3414)--> [proxy] --clear v2c--> [legacy agent]
@@ -89,6 +94,37 @@ device.
   manager (trap-wrapping code exists, repointed at the manager).
 - Mostly wiring: the engine (`cache.EngineClock`, discovery,
   verify/decrypt) already exists on the agent-side tunnel leg.
+
+### USM gateway design (as implemented)
+
+- New role `gateway` + `security.mode: usm-gateway` (no tunnel). Config:
+  `gateway.listen_addr` (front leg, plain UDP), `gateway.agent_addr`
+  (legacy agent), `gateway.agent_community` (v2c community toward the
+  agent), optional `gateway.trap_listen_addr` (clear traps from the
+  legacy network) and `gateway.trap_sink_addr` (manager's v3 USM trap
+  receiver). Users come from `security.users` (auth verify + priv
+  decrypt); `security.engine_store` persists the authoritative engine
+  boots (REQUIRED, anti-rollback); optional fixed `security.engine_id`.
+- `internal/usm/gateway.go` — `GatewayTranslator` mirrors the
+  agent-side termination path (translate_agent.go handleTunnelRequest):
+  ParseV3 → engine-ID check (discovery answered by `dropOrReport`
+  Reports) → timeliness (`cache.EngineClock.AcceptInbound`) →
+  `Profiles.Lookup` → sec-level enforcement → auth verify → priv
+  decrypt → forward as v1/v2c (GetBulk→GetNext downgrade on v1);
+  responses correlated by a map keyed on the downstream request-id;
+  clear v1/v2c on the front leg is rejected (`rejectClear`).
+- Trap direction: clear v1/v2c traps at `trap_listen_addr` are wrapped
+  into v3 authPriv notifications (first configured user, own engine
+  state) and sent to `trap_sink_addr`.
+- No-YAML CLI mode: `snmp-proxy gateway --listen :161 --agent
+  127.0.0.1:161 --community public --auth-pass <auth> --priv-pass
+  <priv> [--trap-listen :162 --trap-sink <mgr>:162]`.
+- Tests: `internal/usm/gateway_test.go` (gosnmp v3 authPriv client as
+  independent oracle: discovery+GET, wrong-user rejection, clear-v2c
+  rejection, trap direction validated by a gosnmp TrapListener);
+  `scripts/interop-gateway.sh` drives the gateway with real net-snmp
+  v3 clients (snmpget/getnext/bulkwalk/set, wrong-user + clear-v2c
+  rejection, snmptrap direction; skips rc 77 without net-snmp).
 
 **2. TSM gateway (`tsm-gateway`)** — RFC 6353 front leg, near-free:
 
@@ -123,11 +159,11 @@ device.
 ## 4. Repository Layout
 
 ```
-cmd/snmp-proxy/           main package; role via subcommand (manager|agent)
+cmd/snmp-proxy/           main package; role via subcommand (manager|agent|gateway)
 internal/config/          YAML config + flag overrides
 internal/proxy/           shared proxy wiring
 internal/passthrough/     opaque forwarding of clear SNMP
-internal/usm/             USM translate mode + profiles
+internal/usm/             USM translate mode + gateway mode + profiles
 internal/tsm/             TSM mode
 internal/tunnel/          DTLS/TLS tunnel dialer/listener
 internal/msg/             SNMP message build/parse helpers
@@ -140,8 +176,8 @@ internal/observ/          zap logging + Prometheus metrics
 (Directories with code: config, observ, tunnel, msg, passthrough, proxy,
 usm, tsm, cache, cmd/snmp-proxy. Still empty, reserved: discovery
 (discovery logic lives in internal/usm translate_manager.go), securitylevel.
-Also: configs/ example YAML (manager/agent × psk/usm/tsm), scripts/gen-certs.sh
-throwaway test PKI into gitignored certs/.)
+Also: configs/ example YAML (manager/agent × psk/usm/tsm + gateway-usm),
+scripts/gen-certs.sh throwaway test PKI into gitignored certs/.)
 
 ## 5. Build / Test
 
@@ -160,8 +196,8 @@ or set `-timeout` on `go test` (DTLS tests would hang without one).
 
 ### No-YAML CLI mode (plug-and-play deployment)
 
-Without `--config`, both subcommands build a validated Config from direct
-flags — deployment is two commands plus a generated key:
+Without `--config`, the subcommands build a validated Config from direct
+flags. Two-proxy deployment is two commands plus a generated key:
 
 ```bash
 KEY=$(snmp-proxy genpsk)   # random 32-byte hex key
@@ -175,6 +211,14 @@ Flags: `--tunnel-mode` (dtls|tls), `--psk-identity`, `--insecure`,
 `--security` (usm-translate|passthrough), `--trap-listen`, `--trap-sink`.
 Both sides must share `--psk`/`--auth-pass`/`--priv-pass`. Default security
 in flags mode is usm-translate (user 'proxy', SHA, AES).
+
+Gateway (single box, no tunnel/PSK):
+
+```bash
+snmp-proxy gateway --listen :161 --agent 127.0.0.1:161 \
+  --community public --auth-pass <auth> --priv-pass <priv> \
+  [--trap-listen :162 --trap-sink <manager>:162]
+```
 
 ### Smoke test
 
@@ -199,6 +243,16 @@ the **agent-side** proxy unwraps, verifies, and delivers the plain v2c
 notification (community = `security.trap_sink_community`, fallback
 `public`) to its `--trap-sink`. The agent-side translator has **no** clear
 trap listener in usm-translate mode.
+
+### net-snmp gateway interop test
+
+`scripts/interop-gateway.sh` — drives the single-box gateway with real
+net-snmp v3 USM authPriv clients: snmpget, snmpgetnext, snmpbulkwalk,
+snmpset (relayed as clear v2c to the fake agent), wrong-user rejection,
+clear-v2c rejection on the front leg (the protection), and snmptrap
+direction (clear v2c trap at the gateway's `--trap-listen` → v3 USM
+notification at the sink). Same fake-agent MIB and skip behavior as
+`interop-snmp.sh`. Exit 0 = green.
 
 ## 6. Key Dependencies (go.mod)
 
@@ -254,6 +308,35 @@ trap listener in usm-translate mode.
   - Response PDU request-id must match the request's req-id (or 0); the
     v3 header msgID is not validated.
   - Responses need ≥1 varbind unless errStatus is set.
+  - gosnmp's TrapListener **can** validate our authPriv v3 notifications:
+    it re-derives keys from the wire engineID (so our own engine state
+    works as authoritative engine), verifies the digest per the message's
+    MsgFlags, and decrypts with wire boots/time/salt. Attach
+    `Params.Logger = gosnmp.NewLogger(...)` when debugging — silent
+    rejects otherwise.
+- net-snmp quirks (stricter than gosnmp; learned via
+  `scripts/interop-gateway.sh`):
+  - **INTEGER encoding must be minimal two's-complement**: a positive
+    value whose top content byte has the high bit set needs a leading
+    `0x00` octet. `AppendInteger`/`AppendUint32` (internal/msg/ber.go)
+    encode this; msgMaxSize=65535 previously encoded as `FF FF` (signed
+    -1) and net-snmp rejected it with "Received bad msgMaxSize
+    (18446744073709551615 < 484)". gosnmp tolerated the non-minimal form,
+    so only the net-snmp interop test catches it. Pinned by
+    `internal/msg/ber_test.go`.
+  - **Varbind-list wrap contract**: `BuildPDU`'s varbinds argument is the
+    RAW varbind-list content (BuildPDU wraps in the 0x30 SEQUENCE itself);
+    `V1TrapToV2` returns raw content for the same reason. Passing an
+    already-wrapped list double-wraps it — gosnmp fails with "error
+    parsing OID Value: unknown field type: 30". This bug existed in all
+    three v1-trap translation paths (translate_manager, tsm_manager,
+    gateway) until the gosnmp TrapListener oracle caught it.
+  - v3 discovery works unchanged: net-snmp probes with a Reportable
+    NoAuthNoPriv GET and accepts our `dropOrReport` Report.
+- Test ports must be **ephemeral** (bind `127.0.0.1:0` and read
+  `LocalAddr()`): fixed loopback ports flake when the whole suite runs
+  with `-race` (packages run in parallel and share the loopback
+  namespace). See `fakeAgentOnFreePort` in tsm_e2e_test.go.
 
 ### pion/dtls v3 quirks (learned the hard way, do not regress)
 

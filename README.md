@@ -64,9 +64,9 @@ and SNMP health metrics, and SBOM/vulnerability tooling.
 | Shape | Topology | Use when |
 |---|---|---|
 | [Two-proxy USM](examples/two-proxy-usm.md) / [TSM](examples/two-proxy-tsm.md) | `[manager] ⇄ proxy ⇄ secured line ⇄ proxy ⇄ [agent]` | You control both ends; choose USM passphrases or TSM certificates |
-| [Gateway (agent leg)](examples/gateway-usm.md) | `[v3 managers] ⇄ gateway ⇄ clear ⇄ [legacy agent]` | One box; the **agent** is the asset to protect |
-| [Gateway (manager leg)](examples/usm-manager.md) | `[legacy devices] ⇄ clear ⇄ gateway ⇄ v3 ⇄ [manager]` | One box; the **manager** must only accept authenticated notifications (usm-gateway, notification-only) |
-| [Manager-gateway](examples/manager-gateway.md) | `[legacy manager] ⇄ clear ⇄ gateway ⇄ v3 authPriv ⇄ [real v3 agent]` | One box; the **agent** is v3-capable but the manager is not — requests are re-issued as authenticated v3 toward the agent |
+| [Gateway (agent side)](examples/gateway-usm.md) | `[v3 managers] ⇄ gateway ⇄ clear ⇄ [legacy agent]` | One box; the **agent** is the asset to protect (usm-gateway) |
+| [Gateway (notifications only)](examples/usm-manager.md) | `[legacy devices] ⇄ clear ⇄ gateway ⇄ v3 ⇄ [manager]` | One box; the **manager** must only accept authenticated notifications (usm-gateway, notification-only — traps/informs, no polling path) |
+| [Gateway (manager side)](examples/manager-gateway.md) | `[legacy manager] ⇄ clear ⇄ gateway ⇄ v3 authPriv ⇄ [real v3 agent]` | One box; the **agent** is v3-capable but the manager is not — requests are re-issued as authenticated v3 toward the agent (usm-manager-gateway) |
 | [HA two-proxy](examples/ha-two-proxy.md) | Two-proxy + redundant agent side | Failover matters |
 
 ## Security modes

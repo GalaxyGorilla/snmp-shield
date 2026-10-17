@@ -42,18 +42,6 @@ func berContentOf(buf []byte) ([]byte, error) {
 	return rest[:l], nil
 }
 
-// skipTLV skips one TLV at buf (position after tag).
-func skipTLV(buf []byte) ([]byte, []byte, error) {
-	l, rest, err := berLenAt(buf)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(rest) < l {
-		return nil, nil, errTrunc
-	}
-	return rest[:l], rest[l:], nil
-}
-
 // readInt32 parses an INTEGER TLV at buf.
 func readInt32(buf []byte) (int32, []byte, error) {
 	if len(buf) < 2 || buf[0] != 0x02 {

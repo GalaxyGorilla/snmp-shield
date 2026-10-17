@@ -471,12 +471,10 @@ func (g *TSMGateway) handleClearTrap(dg []byte, src net.Addr) {
 		g.informMu.Unlock()
 		go func() {
 			g.trapSinkWrite(out)
-			select {
-			case <-time.After(reqTimeout):
-				g.informMu.Lock()
-				delete(g.inform, info.RequestID)
-				g.informMu.Unlock()
-			}
+			<-time.After(reqTimeout)
+			g.informMu.Lock()
+			delete(g.inform, info.RequestID)
+			g.informMu.Unlock()
 		}()
 	} else {
 		go g.trapSinkWrite(out)

@@ -71,6 +71,9 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | crypto primitive unit tests (`internal/usm/crypto_test.go`: protocol parsers, key lengths, RFC 3414 A.3 password-to-key vectors, Blumenthal/Reeder priv-key extensions, digest/sign/verify round trips + aliasing, DES salt counter) + cmd flags/os.Args coverage (`main_test.go`: gateway branches, psk-ciphersuites + filter flags, parsePskCiphersuites, run() version/help/genpsk/unknown) | done (tested, -race -count 2; crypto.go ~100%, cmd 24% → 57%) |
 | Manager-securing single proxy: **usm-manager mode** (`security.mode: usm-manager`, gateway role; `internal/usm/manager_gateway.go`: clear v1/v2c traps/informs at `trap_listen_addr` → v3 USM authPriv notifications toward `trap_sink_addr`, own authoritative engine + first user; inform responses relayed back to the device) | done (tested, gosnmp TrapListener sink incl. auto-inform-response, trap/inform/v1/filter tests, -race -count 2) |
 | Meaningful challenge tests (adversarial/edge-case tests beyond happy paths, added where they find real issues) + pragmatic polish | done (tested, `internal/usm/gateway_challenge_test.go` + `internal/tunnel/challenge_test.go`: stale boots rejected w/ usmStatsNotInTimeWindows report, tampered digest rejected w/ usmStatsWrongDigests, non-reportable silent drop, GetBulk relay, garbage-datagram robustness, wrong-PSK handshake rejection; polish: removed unreachable GetBulk-on-v1 downgrade in gateway.go — `downstreamFor` always returns v2c) |
+| HA pair state sync (shared/merged engineBoots between failover replicas so USM clients don't reset engine clocks after a failover) | backlog |
+| Notify filtering for the usm-manager manager-side notification path (filter v3 notifications before they reach `trap_sink_addr`) | backlog |
+| Static analysis (staticcheck + govulncheck toolset, pragmatic: fix only meaningful findings) | done (tested, staticcheck zero findings — dead code removed, pion/dtls v3.1.4 upgrade for GO-2026-6165, options-API migration; govulncheck clean) |
 
 ### Gateway modes (single proxy, no second proxy required)
 
@@ -242,6 +245,14 @@ go.mod declares minimum **1.24.0** (CI-free project — tests run manually).
 go build ./...
 go vet ./...
 go test ./... -race -timeout 180s
+```
+
+**Static analysis** (installed in `~/go/bin`, run after every dependency
+change or parser edit — pragmatic: fix only meaningful findings):
+
+```bash
+~/go/bin/staticcheck ./...
+~/go/bin/govulncheck ./...
 ```
 
 **Acceptance for every commit**: build + vet + `go test -race ./...` clean.
@@ -650,6 +661,21 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   `SetWriteDeadline` and waits forever — the write deadline does NOT
   bound the lazy handshake, only the post-handshake record write.
 - Client needs BOTH `PSK` and `PSKIdentityHint` set (v3 rejects otherwise).
+- **pion/dtls upgraded to v3.1.4 (GO-2026-6165)**: panic parsing a crafted
+  ECDHE_PSK ServerKeyExchange in v3.0.10, reachable via our tunnel dialer.
+  v3.1.4 replaces the raw `dtls.Config` API with option constructors —
+  `dtlsClientOptions`/`dtlsServerOptions` (transport.go/listener.go) build
+  `[]dtls.ClientOption`/`[]dtls.ServerOption` and dial/listen via
+  `dtls.DialWithOptions`/`dtls.ListenWithOptions`. **Gotcha learned the
+  hard way**: `WithPSKIdentityHint` defensively copies the hint and
+  `toConfig` drops it when len==0 — an empty PSK identity (`[]byte("")`,
+  our config default) silently becomes **nil**, the server then omits the
+  ServerKeyExchange entirely, and the client's ClientKeyExchange marshal
+  fails (`IdentityHint == nil && PublicKey == nil` → errInvalidClientKeyExchange)
+  so the handshake hangs forever. Fix in `dtlsClientOptions`/
+  `dtlsServerOptions`: empty identity is replaced with a 1-byte placeholder
+  (`[]byte{0}`) so the hint stays non-nil on both sides (v3.0.10 wire
+  semantics; the PSK callback ignores the hint value anyway).
 - DTLS preserves record boundaries per Read: a partial Read consumes the
   whole record. `streamConn` (internal/tunnel/stream.go) buffers the
   remainder to give io.ReadFull semantics.

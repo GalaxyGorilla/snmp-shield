@@ -77,41 +77,53 @@ func (d *Dialer) tlsConfig() (*tls.Config, error) {
 	return cfg, nil
 }
 
-// dtlsConfig builds the pion/dtls.Config for the "dtls" mode, PSK or
-// certificate-based.
-func (d *Dialer) dtlsConfig() (*dtls.Config, error) {
+// dtlsClientOptions builds the pion/dtls client options for the "dtls"
+// mode, PSK or certificate-based.
+func (d *Dialer) dtlsClientOptions() ([]dtls.ClientOption, error) {
 	if len(d.PSK) > 0 {
 		suites, err := PskCipherSuiteIDs(d.PskCiphersuites)
 		if err != nil {
 			return nil, err
 		}
-		return &dtls.Config{
-			PSK: func(hint []byte) ([]byte, error) {
+		// pion v3.1.4 normalizes an empty PSK identity hint to nil
+		// (WithPSKIdentityHint defensively copies, toConfig drops
+		// len==0), which makes the client's ClientKeyExchange marshal
+		// fail (nil identity, no public key) and the handshake hang
+		// forever. Keep the pre-3.1.4 wire semantics: an empty
+		// configured identity becomes a 1-byte placeholder so the hint
+		// stays non-nil. The peer's PSK callback ignores the hint.
+		identity := d.PSKIdentity
+		if len(identity) == 0 {
+			identity = []byte{0}
+		}
+		return []dtls.ClientOption{
+			dtls.WithPSK(func(hint []byte) ([]byte, error) {
 				return d.PSK, nil
-			},
-			PSKIdentityHint:      d.PSKIdentity,
-			CipherSuites:         suites,
-			ExtendedMasterSecret: dtls.RequireExtendedMasterSecret,
+			}),
+			dtls.WithPSKIdentityHint(identity),
+			dtls.WithCipherSuites(suites...),
+			dtls.WithExtendedMasterSecret(dtls.RequireExtendedMasterSecret),
 		}, nil
 	}
 	tc, err := d.tlsConfig()
 	if err != nil {
 		return nil, err
 	}
-	cfg := &dtls.Config{
-		ExtendedMasterSecret: dtls.RequireExtendedMasterSecret,
-		ServerName:           d.ServerName,
+	var opts []dtls.ClientOption
+	opts = append(opts, dtls.WithExtendedMasterSecret(dtls.RequireExtendedMasterSecret))
+	if d.ServerName != "" {
+		opts = append(opts, dtls.WithServerName(d.ServerName))
 	}
 	if len(tc.Certificates) > 0 {
-		cfg.Certificates = tc.Certificates
+		opts = append(opts, dtls.WithCertificates(tc.Certificates...))
 	}
 	if tc.RootCAs != nil {
-		cfg.RootCAs = tc.RootCAs
+		opts = append(opts, dtls.WithRootCAs(tc.RootCAs))
 	}
 	if tc.InsecureSkipVerify {
-		cfg.InsecureSkipVerify = true
+		opts = append(opts, dtls.WithInsecureSkipVerify(true))
 	}
-	return cfg, nil
+	return opts, nil
 }
 
 // Dial connects to the tunnel endpoint. For "dtls" mode the network is
@@ -164,7 +176,7 @@ func (d *Dialer) dialOne(ctx context.Context, raddr string) (net.Conn, error) {
 	}
 	switch d.Mode {
 	case "dtls":
-		dcfg, err := d.dtlsConfig()
+		copts, err := d.dtlsClientOptions()
 		if err != nil {
 			return nil, err
 		}
@@ -172,18 +184,18 @@ func (d *Dialer) dialOne(ctx context.Context, raddr string) (net.Conn, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolve tunnel addr: %w", err)
 		}
-		// dtls.Dial does NOT run the handshake: it returns instantly and
-		// the handshake completes lazily on first Read/Write. Run it
-		// eagerly here (bounded by ctx/timeout) so dial errors surface
-		// to the caller — the HA failover walk needs per-endpoint
-		// failures to move on to the next endpoint.
+		// dtls.DialWithOptions does NOT run the handshake: it returns
+		// instantly and the handshake completes lazily on first
+		// Read/Write. Run it eagerly here (bounded by ctx/timeout) so
+		// dial errors surface to the caller — the HA failover walk needs
+		// per-endpoint failures to move on to the next endpoint.
 		type result struct {
 			conn net.Conn
 			err  error
 		}
 		ch := make(chan result, 1)
 		go func() {
-			dconn, derr := dtls.Dial("udp", addr, dcfg)
+			dconn, derr := dtls.DialWithOptions("udp", addr, copts...)
 			if derr == nil {
 				hctx, hcancel := context.WithTimeout(ctx, timeout)
 				defer hcancel()

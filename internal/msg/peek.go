@@ -158,18 +158,6 @@ func berTLV(buf []byte) ([]byte, error) {
 	return buf[:hdrLen+l], nil
 }
 
-// berSkip skips one TLV, returning the rest.
-func berSkip(buf []byte) ([]byte, error) {
-	l, rest, err := berLen(buf)
-	if err != nil {
-		return nil, err
-	}
-	if len(rest) < l {
-		return nil, errors.New("msg: truncated TLV")
-	}
-	return rest[l:], nil
-}
-
 // berInteger parses an INTEGER TLV, returning its int32 value and rest.
 func berInteger(buf []byte) (int32, []byte, error) {
 	if len(buf) == 0 {

@@ -49,13 +49,11 @@ type Agent struct {
 // reqPend tracks one request sent to the real agent.
 type reqPend struct {
 	ready chan struct{}
-	resp  []byte
 }
 
 // notifPend tracks one inform awaiting its response.
 type notifPend struct {
 	ready chan struct{}
-	resp  []byte
 }
 
 // NewAgent creates the agent-side forwarder.
@@ -322,13 +320,14 @@ func (a *Agent) awaitInformResp(corrID uint16) {
 	}
 }
 
-// notifRespLoop handles tunnel RESP frames that are inform responses.
+// notifRespLoop handles tunnel RESP frames that are inform responses;
+// closing the pending entry's ready channel releases the 15s timeout wait
+// (the response itself needs no payload on the agent side).
 func (a *Agent) notifRespLoop(ch <-chan *tunnel.Frame) {
 	for f := range ch {
 		a.notifMu.Lock()
-		p, ok := a.notifPend[f.CorrID]
-		if ok {
-			p.resp = append([]byte(nil), f.Payload...)
+		if p, ok := a.notifPend[f.CorrID]; ok {
+			delete(a.notifPend, f.CorrID)
 			close(p.ready)
 		}
 		a.notifMu.Unlock()

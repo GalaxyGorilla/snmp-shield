@@ -61,7 +61,6 @@ type ManagerTranslator struct {
 
 	cfg   config.ManagerRole
 	sec   config.Security
-	prof  *Profiles // users compiled against the remote engine (per engine: keys)
 	clock *cache.EngineClock
 	sess  FrameSink
 	log   *zap.Logger
@@ -91,8 +90,8 @@ type ManagerTranslator struct {
 
 // NewManagerTranslator builds the manager-side translator.
 func NewManagerTranslator(cfg config.ManagerRole, sec config.Security, clock *cache.EngineClock, sess FrameSink, log *zap.Logger, met *observ.Metrics, filt ...*notifyfilter.Filter) (*ManagerTranslator, error) {
-	// primary profile set is compiled lazily per remote engine (keys are
-	// localized per engine); keep a base compiled set for salt selection.
+	// profiles are compiled lazily per remote engine (keys are localized
+	// per engine); the key cache holds the base set.
 	return &ManagerTranslator{
 		translatorBase: translatorBase{
 			keys:   newKeyCache(profilesFromConfig(sec)),

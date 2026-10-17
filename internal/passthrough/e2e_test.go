@@ -77,9 +77,7 @@ func encodeOID(dotted string) []byte {
 	}
 	// first two arcs encoded as 40*a+b; here 1.3 -> 43
 	out := []byte{parts[0]*40 + parts[1]}
-	for _, p := range parts[2:] {
-		out = append(out, p)
-	}
+	out = append(out, parts[2:]...)
 	return out
 }
 

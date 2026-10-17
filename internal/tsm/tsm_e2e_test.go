@@ -142,16 +142,6 @@ func fakeAgentOnFreePort(t *testing.T) (net.PacketConn, string) {
 	return conn, conn.LocalAddr().String()
 }
 
-func fakeAgent(t *testing.T, addr string) net.PacketConn {
-	t.Helper()
-	conn, err := net.ListenPacket("udp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	go agentLoop(conn)
-	return conn
-}
-
 func agentLoop(conn net.PacketConn) {
 	buf := make([]byte, 65536)
 	for {
@@ -180,8 +170,7 @@ func agentLoop(conn net.PacketConn) {
 // --- translator pair over the pipe ------------------------------------------------
 
 type tsmPair struct {
-	mgrConn net.PacketConn // clear leg facing the v2c client
-	stop    func()
+	stop func()
 }
 
 func newTSMPair(t *testing.T, agentCertCN string, identities []string) (*tsmPair, string) {

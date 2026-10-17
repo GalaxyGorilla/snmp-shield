@@ -270,22 +270,6 @@ func pduCommon(pdu []byte) (msg.PDUFields, bool) {
 	return f, true
 }
 
-// varbindsOf returns the varbind list content from a raw PDU TLV.
-func varbindsOf(pdu []byte) []byte {
-	if f, ok := pduCommon(pdu); ok {
-		return f.Varbinds
-	}
-	return []byte{0}
-}
-
-func varbindContent(pdu []byte) ([]byte, error) {
-	f, ok := pduCommon(pdu)
-	if !ok {
-		return nil, ErrNoPending
-	}
-	return f.Varbinds, nil
-}
-
 // locateAuthParams finds the byte offset of the authParams OCTET STRING
 // content within a marshalled v3 message (for zeroing during verification
 // and for splicing the digest after signing).

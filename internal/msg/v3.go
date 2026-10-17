@@ -8,7 +8,6 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/des"
-	"encoding/binary"
 	"fmt"
 )
 
@@ -108,7 +107,7 @@ func ParseV3(data []byte) (*V3Message, error) {
 	if m.Header.MsgFlags, h, err = berSingleOctet(h); err != nil {
 		return nil, err
 	}
-	if m.Header.SecModel, h, err = berInteger(h); err != nil {
+	if m.Header.SecModel, _, err = berInteger(h); err != nil {
 		return nil, err
 	}
 
@@ -271,7 +270,7 @@ func ParseUSM(content []byte) (USMParams, error) {
 	if p.AuthParams, rest, err = berOctetString(rest); err != nil {
 		return p, err
 	}
-	if p.PrivParams, rest, err = berOctetString(rest); err != nil {
+	if p.PrivParams, _, err = berOctetString(rest); err != nil {
 		return p, err
 	}
 	return p, nil
@@ -413,6 +412,7 @@ func cfbEncryptTLV(plain, key, iv []byte) []byte {
 		return nil
 	}
 	ct := make([]byte, len(plain))
+	//lint:ignore SA1019 SNMPv3 privacy (RFC 3826 AES-CFB, RFC 3414 DES-CFB) mandates CFB mode on the wire; AEAD would break interop.
 	stream := cipher.NewCFBEncrypter(block, iv)
 	stream.XORKeyStream(ct, plain)
 	var out []byte
@@ -426,6 +426,7 @@ func cfbDecrypt(ct, key, iv []byte) ([]byte, error) {
 		return nil, err
 	}
 	pt := make([]byte, len(ct))
+	//lint:ignore SA1019 SNMPv3 privacy (RFC 3826 AES-CFB, RFC 3414 DES-CFB) mandates CFB mode on the wire; AEAD would break interop.
 	stream := cipher.NewCFBDecrypter(block, iv)
 	stream.XORKeyStream(pt, ct)
 	return pt, nil
@@ -475,12 +476,4 @@ func berString(buf []byte) (string, []byte, error) {
 		return "", nil, err
 	}
 	return string(b), rest, nil
-}
-
-// berUint32BE interprets 4-byte big-endian content.
-func berUint32BE(b []byte) uint32 {
-	if len(b) < 4 {
-		return 0
-	}
-	return binary.BigEndian.Uint32(b[:4])
 }

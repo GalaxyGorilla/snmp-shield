@@ -26,10 +26,9 @@ import (
 // the frame to the PEER's subscribers of the given type (frames are
 // delivered as fresh *tunnel.Frame copies with the CorrID preserved).
 type pipeEnd struct {
-	mu    sync.Mutex
-	subs  map[uint8][]chan *tunnel.Frame
-	peer  *pipeEnd
-	flags map[uint8]uint8 // last frame Flags seen per type (test inspection)
+	mu   sync.Mutex
+	subs map[uint8][]chan *tunnel.Frame
+	peer *pipeEnd
 }
 
 func newPipe() (*pipeEnd, *pipeEnd) {
@@ -68,7 +67,6 @@ type fakeV2cAgent struct {
 	conn     *net.UDPConn
 	mu       sync.Mutex
 	lastComm string
-	lastOID  string
 }
 
 func startFakeV2cAgent(t *testing.T) *fakeV2cAgent {
@@ -167,12 +165,11 @@ func singleBinding(oidBytes []byte) []byte {
 // chainHarness wires the real manager-side translator to the real agent-side
 // translator through a pipe shim, with a fake clear v2c agent on loopback.
 type chainHarness struct {
-	mgrConn *net.UDPConn // clear manager-facing listener of the manager translator
-	agent   *fakeV2cAgent
-	mgr     *ManagerTranslator
-	agt     *AgentTranslator
-	pipe    *pipeEnd
-	subs    map[uint8][]chan *tunnel.Frame // manager-translator subscriptions (test inspection)
+	sender *net.UDPConn // separate sender socket to the manager's clear listener (mgr.conn belongs to Run's goroutine)
+	agent  *fakeV2cAgent
+	mgr    *ManagerTranslator
+	agt    *AgentTranslator
+	pipe   *pipeEnd
 }
 
 // startChain builds and starts both translators with the given users and an
@@ -255,7 +252,7 @@ func startChain(t *testing.T, filt *notifyfilter.Filter) *chainHarness {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { sender.Close() })
-	h.mgrConn = sender
+	h.sender = sender
 	return h
 }
 
@@ -283,12 +280,12 @@ func (h *chainHarness) clearGet(t *testing.T, community, oidDotted string) ([]by
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.mgrConn.Write(dg); err != nil {
+	if _, err := h.sender.Write(dg); err != nil {
 		t.Fatal(err)
 	}
-	h.mgrConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	h.sender.SetReadDeadline(time.Now().Add(3 * time.Second))
 	buf := make([]byte, 65536)
-	n, _, err := h.mgrConn.ReadFrom(buf)
+	n, _, err := h.sender.ReadFrom(buf)
 	if err != nil {
 		return nil, false
 	}

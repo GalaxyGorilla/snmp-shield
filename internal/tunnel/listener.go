@@ -33,7 +33,7 @@ type ListenerConfig struct {
 func Listen(laddr string, cfg ListenerConfig) (net.Listener, error) {
 	switch cfg.Mode {
 	case "dtls":
-		dcfg, err := dtlsServerConfig(cfg)
+		sopts, err := dtlsServerOptions(cfg)
 		if err != nil {
 			return nil, err
 		}
@@ -41,7 +41,7 @@ func Listen(laddr string, cfg ListenerConfig) (net.Listener, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolve tunnel listen addr: %w", err)
 		}
-		l, err := dtls.Listen("udp", addr, dcfg)
+		l, err := dtls.ListenWithOptions("udp", addr, sopts...)
 		if err != nil {
 			return nil, fmt.Errorf("dtls listen: %w", err)
 		}
@@ -61,40 +61,49 @@ func Listen(laddr string, cfg ListenerConfig) (net.Listener, error) {
 	}
 }
 
-// dtlsServerConfig builds the pion/dtls server config, PSK or
+// dtlsServerOptions builds the pion/dtls server options, PSK or
 // certificate-based.
-func dtlsServerConfig(cfg ListenerConfig) (*dtls.Config, error) {
+func dtlsServerOptions(cfg ListenerConfig) ([]dtls.ServerOption, error) {
 	if len(cfg.PSK) > 0 {
 		suites, err := PskCipherSuiteIDs(cfg.PskCiphersuites)
 		if err != nil {
 			return nil, err
 		}
-		return &dtls.Config{
-			PSK: func(hint []byte) ([]byte, error) {
+		// Mirror the client-side fix: pion v3.1.4 normalizes an empty
+		// PSK identity hint to nil, and a server with a nil hint omits
+		// the ServerKeyExchange entirely (fine per RFC 4279, but the
+		// placeholder keeps the v3.0.10 wire shape and exercises the
+		// same code path on both sides). The PSK callback ignores the
+		// hint value.
+		identity := cfg.PSKIdentity
+		if len(identity) == 0 {
+			identity = []byte{0}
+		}
+		return []dtls.ServerOption{
+			dtls.WithPSK(func(hint []byte) ([]byte, error) {
 				return cfg.PSK, nil
-			},
-			PSKIdentityHint:      cfg.PSKIdentity,
-			CipherSuites:         suites,
-			ExtendedMasterSecret: dtls.RequireExtendedMasterSecret,
+			}),
+			dtls.WithPSKIdentityHint(identity),
+			dtls.WithCipherSuites(suites...),
+			dtls.WithExtendedMasterSecret(dtls.RequireExtendedMasterSecret),
 		}, nil
 	}
 	tcfg, err := tlsServerConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
-	dcfg := &dtls.Config{
-		ExtendedMasterSecret: dtls.RequireExtendedMasterSecret,
-		Certificates:         tcfg.Certificates,
+	var opts []dtls.ServerOption
+	opts = append(opts, dtls.WithExtendedMasterSecret(dtls.RequireExtendedMasterSecret))
+	if len(tcfg.Certificates) > 0 {
+		opts = append(opts, dtls.WithCertificates(tcfg.Certificates...))
 	}
 	if tcfg.ClientCAs != nil {
-		dcfg.ClientCAs = tcfg.ClientCAs
-		dcfg.ClientAuth = dtls.RequireAndVerifyClientCert
+		opts = append(opts, dtls.WithClientCAs(tcfg.ClientCAs), dtls.WithClientAuth(dtls.RequireAndVerifyClientCert))
 	}
 	if cfg.Insecure {
-		dcfg.ClientAuth = dtls.NoClientCert
-		dcfg.InsecureSkipVerify = true
+		opts = append(opts, dtls.WithClientAuth(dtls.NoClientCert), dtls.WithInsecureSkipVerify(true))
 	}
-	return dcfg, nil
+	return opts, nil
 }
 
 // tlsServerConfig builds the crypto/tls server config.
@@ -150,7 +159,7 @@ func ListenRaw(laddr string, cfg ListenerConfig) (net.Listener, error) {
 	if cfg.Mode != "dtls" {
 		return nil, fmt.Errorf("raw listen mode must be dtls, got %q (TLS/TCP has no record boundaries)", cfg.Mode)
 	}
-	dcfg, err := dtlsServerConfig(cfg)
+	sopts, err := dtlsServerOptions(cfg)
 	if err != nil {
 		return nil, err
 	}
@@ -158,7 +167,7 @@ func ListenRaw(laddr string, cfg ListenerConfig) (net.Listener, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve raw listen addr: %w", err)
 	}
-	l, err := dtls.Listen("udp", addr, dcfg)
+	l, err := dtls.ListenWithOptions("udp", addr, sopts...)
 	if err != nil {
 		return nil, fmt.Errorf("dtls listen: %w", err)
 	}

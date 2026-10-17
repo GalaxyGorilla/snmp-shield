@@ -27,14 +27,6 @@ func buildV2cTrapMsg(pduType uint8, vbs ...[]byte) []byte {
 	return dg
 }
 
-func buildOIDTLV(dotted string) []byte {
-	ber, err := EncodeOID(dotted)
-	if err != nil {
-		panic(err)
-	}
-	return AppendTLV(nil, 0x06, ber)
-}
-
 func TestDecodeOIDRoundTrip(t *testing.T) {
 	cases := []string{
 		"1.3.6.1",

@@ -107,29 +107,6 @@ func pduCommon(pdu []byte) (msg.PDUFields, bool) {
 	return f, true
 }
 
-// berLen reads length octets at buf (position after the tag).
-func berLen(buf []byte) (int, []byte, error) {
-	if len(buf) == 0 {
-		return 0, nil, ErrBadScopedPDU
-	}
-	b := buf[0]
-	if b < 0x80 {
-		return int(b), buf[1:], nil
-	}
-	if b == 0x80 {
-		return 0, nil, ErrBadScopedPDU
-	}
-	n := int(b & 0x7f)
-	if n > 4 || len(buf) < 1+n {
-		return 0, nil, ErrBadScopedPDU
-	}
-	l := 0
-	for i := 1; i <= n; i++ {
-		l = l<<8 | int(buf[i])
-	}
-	return l, buf[1+n:], nil
-}
-
 // sinkWriter delivers a datagram to a UDP sink (lazy dial per datagram).
 func sinkWrite(addr string, dg []byte) error {
 	udpAddr, err := net.ResolveUDPAddr("udp", addr)
@@ -162,7 +139,6 @@ func peerOK(name string, allowed []string) bool {
 // pendingBase tracks one in-flight request awaiting its response.
 type pendingBase struct {
 	ready chan struct{}
-	resp  []byte
 }
 
 // managerPending is one manager-side in-flight request.

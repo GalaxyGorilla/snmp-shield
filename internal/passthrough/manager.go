@@ -165,7 +165,13 @@ func (m *Manager) Close() {
 func (m *Manager) serveClearRequests() error {
 	buf := make([]byte, 65536)
 	for {
-		n, addr, err := m.conn.ReadFromUDP(buf)
+		m.socksMu.Lock()
+		conn := m.conn
+		m.socksMu.Unlock()
+		if conn == nil {
+			return fmt.Errorf("clear read: socket closed")
+		}
+		n, addr, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			select {
 			case <-m.stop:
@@ -207,8 +213,13 @@ func (m *Manager) serveClearRequests() error {
 func (m *Manager) awaitResponse(corrID uint16, p *pending) {
 	select {
 	case <-p.ready:
-		if _, err := m.conn.WriteToUDP(p.resp, p.addr); err != nil && m.log != nil {
-			m.log.Warn("deliver response", zap.Error(err))
+		m.socksMu.Lock()
+		conn := m.conn
+		m.socksMu.Unlock()
+		if conn != nil {
+			if _, err := conn.WriteToUDP(p.resp, p.addr); err != nil && m.log != nil {
+				m.log.Warn("deliver response", zap.Error(err))
+			}
 		}
 	case <-time.After(15 * time.Second):
 	case <-m.stop:

@@ -67,6 +67,7 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | USM two-proxy chain in-Go e2e tests (`internal/usm/translate_manager_e2e_test.go`: full manager+agent translator chain over a pipe shim, fake v2c agent; discovery/GET, trap relay+filter, agent-notif→sink, inform round trip) + **inform relay bug fix** (manager-side informs were never answered) | done (tested, -race -count 2) |
 | msg fuzz tests (`internal/msg/fuzz_test.go`: 7 Go-native fuzz targets — Peek/SplitV1V2c/ParsePDU/SplitV1Trap/ParseV3/UnwrapScopedPDU/TrapOID/DecodeOID; regression corpus in `testdata/fuzz/`) + **2 parser panic fixes** (berOctetStringLike empty-buffer, ParseV3 declared-length overflow) | done (tested, all targets fuzzed 30s green; corpus runs in every `go test`) |
 | TSM inform relay fix + e2e tests (`tsm_e2e_test.go`: inform round trip device→sink→device, agent-originated inform answered; pipe pending-queue fix for the startup race) — same dead-end as USM (FlagInform RESP frames never matched against the inform pending map, `ip.addr` never set) | done (tested, -race -count 2) |
+| internal/proxy wiring e2e tests (`internal/proxy/proxy_test.go`: white-box runAgent/runManager/runGateway over real PSK-DTLS loopback; passthrough + usm-translate two-proxy chains, USM + TSM gateways driven by gosnmp/DTLS clients, parseEngineID) + **2 prod fixes pinned**: TSM gateway accept loop returned "listener closed" error on clean shutdown (pion returns its own sentinel, not net.ErrClosed) and passthrough Manager `m.conn` read races its deferred nil-write (serveClearRequests/awaitResponse now read under socksMu) | done (tested, -race -count 2; proxy 0% → ~72% coverage) |
 
 ### Gateway modes (single proxy, no second proxy required)
 
@@ -450,6 +451,24 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   And: `msg.ParseV3`'s `m.PDU` is the ciphertext TLV (tag 0x04) for
   priv-flagged messages until `unwrapV3` decrypts in place — check the
   inner PDU type on the unwrapped `plain` TLV, not `m2.PDU[0]`.
+- **proxy e2e test gotchas** (`internal/proxy/proxy_test.go`): run the
+  unexported `runAgent`/`runManager`/`runGateway` directly with a
+  cancelable ctx (`Run` installs a signal.NotifyContext, untestable);
+  `config.Defaults()` is a METHOD — call it explicitly, runX does not;
+  `security.engine_store` must be a FILE path (`t.TempDir()` bare is a
+  directory and cache.Open fails with "is a directory"); the manager
+  clear leg speaks v1/v2c in usm-translate mode (drive it with a v2c
+  client — the v3 leg is the tunnel); `stopRun` consumes the single
+  buffered errCh value, so deferred cleanup must cancel only (never
+  `<-errCh` twice). DTLS clients dial with `tunnel.Dialer` (eager
+  handshake), never `tls.DialWithDialer("udp", ...)` — TLS-over-UDP is
+  not DTLS. `serveFront`-style raw sessions block on Read until the
+  client closes: close client conns BEFORE cancelling the gateway.
+- **pion/dtls accept-error sentinel**: pion's UDP listener returns its
+  own `ErrClosedListener = errors.New("udp: listener closed")` on Accept
+  after Close — NOT `net.ErrClosed`. Any accept loop that must return
+  nil on clean shutdown has to match both (tsm_gateway does a
+  strings.Contains fallback).
 - **msg fuzzing** (`internal/msg/fuzz_test.go`): 7 Go-native fuzz
   targets cover every parser entry point (Peek, SplitV1V2c, ParsePDU,
   SplitV1Trap, ParseV3, UnwrapScopedPDU, TrapOID, DecodeOID) with

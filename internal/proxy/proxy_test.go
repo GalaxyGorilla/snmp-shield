@@ -1,0 +1,575 @@
+package proxy
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"net"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
+	"github.com/gosnmp/gosnmp"
+	"go.uber.org/zap"
+)
+
+// --- test helpers ---------------------------------------------------------------
+
+// freeUDPPort returns a free 127.0.0.1 UDP address (bound then released).
+func freeUDPPort(t *testing.T) string {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	return conn.LocalAddr().String()
+}
+
+// waitBound blocks until addr is bound by someone else (our probe bind
+// fails) — removes the startup race against the runX loops.
+func waitBound(t *testing.T, addr string) {
+	t.Helper()
+	raddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		c, err := net.ListenUDP("udp", raddr)
+		if err != nil {
+			return // already bound
+		}
+		c.Close()
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for %s to be bound", addr)
+}
+
+// fakeAgent is a fake v2c agent echoing GET requests (req-id and varbinds).
+func fakeAgent(t *testing.T, addr string) net.PacketConn {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		buf := make([]byte, 65536)
+		for {
+			n, from, err := conn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			dg := append([]byte(nil), buf[:n]...)
+			ver, community, pdu, err := msg.SplitV1V2c(dg)
+			if err != nil {
+				continue
+			}
+			_, fields, err := msg.ParsePDU(pdu)
+			if err != nil {
+				continue
+			}
+			resp := msg.BuildPDU(msg.PDUGetResponse, fields.ReqID, 0, 0, fields.Varbinds)
+			out, err := msg.BuildV1V2c(ver, community, resp)
+			if err != nil {
+				continue
+			}
+			_, _ = conn.WriteTo(out, from)
+		}
+	}()
+	return conn
+}
+
+// gosnmpV3 builds an authPriv (SHA/AES) gosnmp v3 client matching the
+// default test user ("proxy").
+func gosnmpV3(t *testing.T, addr string) *gosnmp.GoSNMP {
+	t.Helper()
+	h, p, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split %s: %v", addr, err)
+	}
+	port := 0
+	for _, c := range p {
+		port = port*10 + int(c-'0')
+	}
+	g := &gosnmp.GoSNMP{
+		Target:        h,
+		Port:          uint16(port),
+		Version:       gosnmp.Version3,
+		Timeout:       3 * time.Second,
+		Retries:       2,
+		MaxOids:       10,
+		SecurityModel: gosnmp.UserSecurityModel,
+		MsgFlags:      gosnmp.AuthPriv,
+		SecurityParameters: &gosnmp.UsmSecurityParameters{
+			UserName:                 "proxy",
+			AuthenticationProtocol:   gosnmp.SHA,
+			AuthenticationPassphrase: "authpass",
+			PrivacyProtocol:          gosnmp.AES,
+			PrivacyPassphrase:        "privpass",
+		},
+	}
+	if err := g.Connect(); err != nil {
+		t.Fatalf("gosnmp connect: %v", err)
+	}
+	return g
+}
+
+// gosnmpV2c builds a plain v2c gosnmp client.
+func gosnmpV2c(t *testing.T, addr string) *gosnmp.GoSNMP {
+	t.Helper()
+	h, p, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split %s: %v", addr, err)
+	}
+	port := 0
+	for _, c := range p {
+		port = port*10 + int(c-'0')
+	}
+	g := &gosnmp.GoSNMP{
+		Target:   h,
+		Port:     uint16(port),
+		Version:  gosnmp.Version2c,
+		Timeout:  3 * time.Second,
+		Retries:  2,
+		MaxOids:  10,
+		Community: "public",
+	}
+	if err := g.Connect(); err != nil {
+		t.Fatalf("gosnmp connect: %v", err)
+	}
+	return g
+}
+
+// startAgent runs runAgent in the background with a cancelable context.
+func startAgent(t *testing.T, cfg *config.Config, met *observ.Metrics) (cancel context.CancelFunc, errCh chan error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh = make(chan error, 1)
+	go func() { errCh <- runAgent(ctx, Options{Config: cfg, Log: zap.NewNop()}, met) }()
+	waitBound(t, cfg.Tunnel.ListenAddr)
+	return cancel, errCh
+}
+
+// startManager runs runManager in the background with a cancelable context.
+func startManager(t *testing.T, cfg *config.Config, met *observ.Metrics) (cancel context.CancelFunc, errCh chan error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh = make(chan error, 1)
+	go func() { errCh <- runManager(ctx, Options{Config: cfg, Log: zap.NewNop()}, met) }()
+	waitBound(t, cfg.Manager.ListenAddr)
+	return cancel, errCh
+}
+
+// startGateway runs runGateway in the background with a cancelable context.
+func startGateway(t *testing.T, cfg *config.Config, met *observ.Metrics) (cancel context.CancelFunc, errCh chan error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh = make(chan error, 1)
+	go func() { errCh <- runGateway(ctx, Options{Config: cfg, Log: zap.NewNop()}, met) }()
+	waitBound(t, cfg.Gateway.ListenAddr)
+	return cancel, errCh
+}
+
+// stopRun cancels a background runX and asserts it shut down cleanly.
+func stopRun(t *testing.T, cancel context.CancelFunc, errCh chan error, name string) {
+	t.Helper()
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatalf("%s: run returned %v", name, err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatalf("%s: run did not shut down within 5s", name)
+	}
+}
+
+// testUsers is a valid USM user set (ProfilesFromSecurity silently skips
+// users with invalid protocols, so all fields must be valid).
+func testUsers() []config.UserCfg {
+	return []config.UserCfg{{
+		Name:           "proxy",
+		AuthProtocol:   "sha",
+		AuthPassphrase: "authpass",
+		PrivProtocol:   "aes",
+		PrivPassphrase: "privpass",
+		Community:      "public",
+	}}
+}
+
+// --- certFiles: throwaway PKI (mirrors tsm gateway_test) ------------------------
+
+func certFiles(t *testing.T) (ca, serverCrt, serverKey, clientCrt, clientKey string) {
+	t.Helper()
+	dir := t.TempDir()
+
+	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caTmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		IsCA:                  true,
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		BasicConstraintsValid: true,
+	}
+	caDER, err := x509.CreateCertificate(rand.Reader, caTmpl, caTmpl, &caKey.PublicKey, caKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	caCert, err := x509.ParseCertificate(caDER)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	leaf := func(cn string, serial int64) (derBytes []byte, keyPEM []byte) {
+		key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		if err != nil {
+			t.Fatal(err)
+		}
+		tmpl := &x509.Certificate{
+			SerialNumber: big.NewInt(serial),
+			Subject:      pkix.Name{CommonName: cn},
+			NotBefore:    time.Now().Add(-time.Hour),
+			NotAfter:     time.Now().Add(time.Hour),
+			DNSNames:     []string{cn},
+			KeyUsage:     x509.KeyUsageDigitalSignature,
+			ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, caKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		kr, err := x509.MarshalECPrivateKey(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: kr})
+		return der, keyPEM
+	}
+
+	serverDER, serverKeyPEM := leaf("127.0.0.1", 2)
+	clientDER, clientKeyPEM := leaf("snmp-proxy-manager", 3)
+
+	write := func(name string, der []byte) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	writeKey := func(name string, pemBytes []byte) string {
+		p := filepath.Join(dir, name)
+		if err := os.WriteFile(p, pemBytes, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	return write("ca.pem", caDER), write("server.crt", serverDER),
+		writeKey("server.key", serverKeyPEM), write("client.crt", clientDER),
+		writeKey("client.key", clientKeyPEM)
+}
+
+// --- e2e tests ------------------------------------------------------------------
+
+// TestRunManagerPassthroughE2E wires a full two-proxy chain (real DTLS
+// tunnel, passthrough mode) and pushes a v2c GET through it.
+func TestRunManagerPassthroughE2E(t *testing.T) {
+	met := observ.NewMetrics()
+	agent := fakeAgent(t, "127.0.0.1:0")
+	defer agent.Close()
+	agentAddr := agent.LocalAddr().String()
+
+	agentCfg := &config.Config{Role: config.RoleAgent}
+	agentCfg.Defaults()
+	agentCfg.Tunnel.Mode = "dtls"
+	agentCfg.Tunnel.ListenAddr = freeUDPPort(t)
+	agentCfg.Tunnel.PSK = "text:testpsk"
+	agentCfg.Agent.AgentAddr = agentAddr
+	agentListen := agentCfg.Tunnel.ListenAddr
+
+	agCancel, agErr := startAgent(t, agentCfg, met)
+	defer agCancel()
+
+	mgrCfg := &config.Config{Role: config.RoleManager}
+	mgrCfg.Defaults()
+	mgrCfg.Tunnel.Mode = "dtls"
+	mgrCfg.Tunnel.DialAddr = agentListen
+	mgrCfg.Tunnel.PSK = "text:testpsk"
+	mgrCfg.Manager.ListenAddr = freeUDPPort(t)
+	mgrListen := mgrCfg.Manager.ListenAddr
+
+	mgCancel, mgErr := startManager(t, mgrCfg, met)
+	defer mgCancel()
+	waitBound(t, mgrListen)
+
+	// Push a clear v2c GET through the chain.
+	sock, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sock.Close()
+	mgrUDP, err := net.ResolveUDPAddr("udp", mgrListen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oid, err := msg.EncodeOID("1.3.6.1.2.1.1.1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pdu := msg.BuildPDU(msg.PDUGetRequest, 4242, 0, 0, msg.AppendTLV(nil, 0x30, msg.AppendTLV(msg.AppendTLV(nil, 0x06, oid), 0x05, nil)))
+	dg, err := msg.BuildV1V2c(msg.Version2c, []byte("public"), pdu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sock.WriteTo(dg, mgrUDP); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, 65536)
+	if err := sock.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	n, _, err := sock.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("no response through chain: %v", err)
+	}
+	_, community, rpdu, err := msg.SplitV1V2c(buf[:n])
+	if err != nil {
+		t.Fatalf("bad response: %v", err)
+	}
+	if string(community) != "public" {
+		t.Fatalf("community = %q, want public", community)
+	}
+	typ, fields, err := msg.ParsePDU(rpdu)
+	if err != nil {
+		t.Fatalf("bad response PDU: %v", err)
+	}
+	if typ != msg.PDUGetResponse {
+		t.Fatalf("response type = %#x, want GETRESPONSE", typ)
+	}
+	if fields.ReqID != 4242 {
+		t.Fatalf("req-id = %d, want 4242 (echoed)", fields.ReqID)
+	}
+
+	stopRun(t, agCancel, agErr, "agent")
+	stopRun(t, mgCancel, mgErr, "manager")
+}
+
+// TestRunManagerUSME2E wires the two-proxy chain in usm-translate mode.
+// The manager's clear leg still speaks v1/v2c (USM security rides the
+// tunnel), so a v2c client drives the full chain end to end; the
+// translation path itself is covered by the usm package tests.
+func TestRunManagerUSME2E(t *testing.T) {
+	met := observ.NewMetrics()
+	agent := fakeAgent(t, "127.0.0.1:0")
+	defer agent.Close()
+	agentAddr := agent.LocalAddr().String()
+
+	agentCfg := &config.Config{Role: config.RoleAgent}
+	agentCfg.Defaults()
+	agentCfg.Tunnel.Mode = "dtls"
+	agentCfg.Tunnel.ListenAddr = freeUDPPort(t)
+	agentCfg.Tunnel.PSK = "text:testpsk"
+	agentCfg.Agent.AgentAddr = agentAddr
+	agentCfg.Security.Mode = "usm-translate"
+	agentCfg.Security.Users = testUsers()
+	agentCfg.Security.EngineStore = filepath.Join(t.TempDir(), "engine.json")
+	agentListen := agentCfg.Tunnel.ListenAddr
+
+	agCancel, agErr := startAgent(t, agentCfg, met)
+	defer agCancel()
+
+	mgrCfg := &config.Config{Role: config.RoleManager}
+	mgrCfg.Defaults()
+	mgrCfg.Tunnel.Mode = "dtls"
+	mgrCfg.Tunnel.DialAddr = agentListen
+	mgrCfg.Tunnel.PSK = "text:testpsk"
+	mgrCfg.Manager.ListenAddr = freeUDPPort(t)
+	mgrCfg.Security.Mode = "usm-translate"
+	mgrCfg.Security.Users = testUsers()
+	mgrCfg.Security.EngineStore = filepath.Join(t.TempDir(), "engine.json")
+	mgrListen := mgrCfg.Manager.ListenAddr
+
+	mgCancel, mgErr := startManager(t, mgrCfg, met)
+	defer mgCancel()
+	waitBound(t, mgrListen)
+
+	g := gosnmpV2c(t, mgrListen)
+	defer g.Conn.Close()
+	result, err := g.Get([]string{"1.3.6.1.2.1.1.1.0"})
+	if err != nil {
+		t.Fatalf("v2c GET through chain: %v", err)
+	}
+	if len(result.Variables) != 1 {
+		t.Fatalf("variables = %d, want 1", len(result.Variables))
+	}
+	// gosnmp prepends a leading dot to returned OIDs.
+	if result.Variables[0].Name != ".1.3.6.1.2.1.1.1.0" {
+		t.Fatalf("oid = %q", result.Variables[0].Name)
+	}
+
+	stopRun(t, agCancel, agErr, "agent")
+	stopRun(t, mgCancel, mgErr, "manager")
+}
+
+// TestRunGatewayUSM wires the single-box USM gateway and drives it with a
+// real gosnmp v3 authPriv client.
+func TestRunGatewayUSM(t *testing.T) {
+	met := observ.NewMetrics()
+	agent := fakeAgent(t, "127.0.0.1:0")
+	defer agent.Close()
+	agentAddr := agent.LocalAddr().String()
+
+	cfg := &config.Config{Role: config.RoleGateway}
+	cfg.Defaults()
+	cfg.Tunnel.Mode = "dtls"
+	cfg.Gateway.ListenAddr = freeUDPPort(t)
+	cfg.Gateway.AgentAddr = agentAddr
+	cfg.Security.Mode = "usm-gateway"
+	cfg.Security.Users = testUsers()
+	cfg.Security.EngineStore = filepath.Join(t.TempDir(), "engine.json")
+
+	cancel, errCh := startGateway(t, cfg, met)
+	defer cancel()
+
+	g := gosnmpV3(t, cfg.Gateway.ListenAddr)
+	defer g.Conn.Close()
+	result, err := g.Get([]string{"1.3.6.1.2.1.1.1.0"})
+	if err != nil {
+		t.Fatalf("v3 GET through gateway: %v", err)
+	}
+	if len(result.Variables) != 1 {
+		t.Fatalf("variables = %d, want 1", len(result.Variables))
+	}
+	if result.Variables[0].Name != ".1.3.6.1.2.1.1.1.0" {
+		t.Fatalf("oid = %q", result.Variables[0].Name)
+	}
+
+	stopRun(t, cancel, errCh, "gateway")
+}
+
+// TestRunGatewayTSM wires the single-box TSM gateway (raw DTLS front leg,
+// RFC 6353) and drives it with a cert-authenticated DTLS client.
+func TestRunGatewayTSM(t *testing.T) {
+	met := observ.NewMetrics()
+	agent := fakeAgent(t, "127.0.0.1:0")
+	defer agent.Close()
+	agentAddr := agent.LocalAddr().String()
+
+	ca, serverCrt, serverKey, clientCrt, clientKey := certFiles(t)
+
+	cfg := &config.Config{Role: config.RoleGateway}
+	cfg.Defaults()
+	cfg.Gateway.ListenAddr = freeUDPPort(t)
+	cfg.Gateway.AgentAddr = agentAddr
+	cfg.Security.Mode = "tsm-gateway"
+	cfg.Tunnel.CAFile = ca
+	cfg.Tunnel.CertFile = serverCrt
+	cfg.Tunnel.KeyFile = serverKey
+
+	cancel, errCh := startGateway(t, cfg, met)
+	defer cancel()
+
+	// DTLS client presenting the trusted client cert (tunnel.Dialer runs
+	// the handshake eagerly and wraps DTLS properly for UDP).
+	d := &tunnel.Dialer{
+		Mode:     "dtls",
+		CAFile:   ca,
+		CertFile: clientCrt,
+		KeyFile:  clientKey,
+		Timeout:  5 * time.Second,
+	}
+	dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer dcancel()
+	dconn, err := d.Dial(dctx, cfg.Gateway.ListenAddr)
+	if err != nil {
+		t.Fatalf("dtls dial: %v", err)
+	}
+	defer dconn.Close()
+
+	// TSM v3 GET: plaintext scopedPDU, empty secParams (RFC 5591).
+	oid, err := msg.EncodeOID("1.3.6.1.2.1.1.1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pdu := msg.BuildPDU(msg.PDUGetRequest, 777, 0, 0, msg.AppendTLV(nil, 0x30, msg.AppendTLV(msg.AppendTLV(nil, 0x06, oid), 0x05, nil)))
+	scoped := msg.BuildScoped(nil, nil, pdu)
+	dg, err := msg.BuildV3(msg.V3Header{
+		MsgID:      1234,
+		MsgMaxSize: msg.DefaultMsgMaxSize,
+		MsgFlags:   0,
+		SecModel:   msg.SecurityModelTSM,
+	}, msg.USMParams{}, scoped, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dconn.Write(dg); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, 65536)
+	if err := dconn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	n, err := dconn.Read(buf)
+	if err != nil {
+		t.Fatalf("no TSM response: %v", err)
+	}
+	m2, err := msg.ParseV3(buf[:n])
+	if err != nil {
+		t.Fatalf("bad TSM response: %v", err)
+	}
+	if m2.Header.MsgID != 1234 {
+		t.Fatalf("msgID = %d, want 1234 (echoed)", m2.Header.MsgID)
+	}
+	typ, fields, err := msg.ParsePDU(m2.PDU)
+	if err != nil {
+		t.Fatalf("bad response PDU: %v", err)
+	}
+	if typ != msg.PDUGetResponse {
+		t.Fatalf("response type = %#x, want GETRESPONSE", typ)
+	}
+	if fields.ReqID != 777 {
+		t.Fatalf("req-id = %d, want 777 (echoed)", fields.ReqID)
+	}
+
+	// Close the client conn before shutdown: serveFront blocks on Read
+	// until the client goes away.
+	_ = dconn.Close()
+	stopRun(t, cancel, errCh, "gateway")
+}
+
+// --- unit tests -----------------------------------------------------------------
+
+func TestParseEngineID(t *testing.T) {
+	if got, err := parseEngineID(""); err != nil || got != nil {
+		t.Fatalf("parseEngineID(\"\") = %v, %v; want nil, nil", got, err)
+	}
+	got, err := parseEngineID("hex:8000")
+	if err != nil || string(got) != "\x80\x00" {
+		t.Fatalf("parseEngineID(hex:8000) = %v, %v", got, err)
+	}
+	got, err = parseEngineID("8000")
+	if err != nil || string(got) != "\x80\x00" {
+		t.Fatalf("parseEngineID(8000) = %v, %v", got, err)
+	}
+	if _, err := parseEngineID("zz"); err == nil {
+		t.Fatal("parseEngineID(zz) = nil error, want invalid-hex error")
+	}
+}

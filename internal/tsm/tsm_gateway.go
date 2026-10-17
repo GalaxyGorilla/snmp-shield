@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -161,7 +162,11 @@ func (g *TSMGateway) Run(done <-chan struct{}) error {
 	for {
 		conn, aerr := l.Accept()
 		if aerr != nil {
-			if errors.Is(aerr, net.ErrClosed) && done != nil {
+			// pion/dtls returns its own "udp: listener closed" sentinel
+			// (not net.ErrClosed) when the raw front listener is closed —
+			// match both so a clean shutdown returns nil.
+			closed := errors.Is(aerr, net.ErrClosed) || strings.Contains(aerr.Error(), "listener closed")
+			if closed && done != nil {
 				select {
 				case <-done:
 					wg.Wait()

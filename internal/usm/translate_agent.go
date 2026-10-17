@@ -316,11 +316,11 @@ func (a *AgentTranslator) handleTunnelRequest(f *tunnel.Frame) {
 	// ship over the clear leg
 	udpAddr, err := net.ResolveUDPAddr("udp", a.cfg.AgentAddr)
 	if err != nil {
-		a.dropOrReport(hdr, m, f.CorrID, err)
+			a.dropOrReport(hdr, m, f.CorrID, err)
 		return
 	}
 	if _, err := a.agentConn.WriteTo(dg, udpAddr); err != nil {
-		a.dropOrReport(hdr, m, f.CorrID, err)
+			a.dropOrReport(hdr, m, f.CorrID, err)
 		return
 	}
 	if a.met != nil {
@@ -398,7 +398,7 @@ func (a *AgentTranslator) handleClearResponse(dg []byte) {
 	}
 
 	if err := a.buildAndSendResponse(pend, c, pdu); err != nil {
-		a.log.Debug("usm agent: response build failed", zap.Error(err))
+			a.log.Debug("usm agent: response build failed", zap.Error(err))
 	}
 }
 
@@ -459,7 +459,7 @@ func (a *AgentTranslator) buildAndSendResponse(pend *agentPending, c *compiled, 
 	}
 
 	if err := a.sess.Send(context.Background(), tunnel.TypeRESP, 0, pend.tunnelCorrID, out); err != nil {
-		return err
+			return err
 	}
 	if a.met != nil {
 		a.met.ReqForwarded.Inc()

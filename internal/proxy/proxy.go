@@ -77,6 +77,13 @@ func runManager(ctx context.Context, opts Options, met *observ.Metrics) error {
 	sess := tunnel.NewClientSession(dial, opts.Config.Tunnel.MaxFrameSize, 1200, opts.Log)
 	defer sess.Close()
 
+	// Connect eagerly: the first Send on a lazy session races the DTLS
+	// handshake and the first app record can be lost (pion's server-side
+	// handshake only starts once the client writes).
+	if err := sess.Connect(ctx); err != nil {
+		opts.Log.Warn("tunnel initial connect failed; will retry in background", zap.Error(err))
+	}
+
 	switch opts.Config.Security.Mode {
 	case "usm-translate":
 		return runManagerUSM(ctx, opts, met, sess)

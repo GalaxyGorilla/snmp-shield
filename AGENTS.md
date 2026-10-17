@@ -36,8 +36,8 @@ long-haul segment between them.
 
 ## 3. Status / Roadmap
 
-**Current state: milestone 3 (TSM) implemented and tested; all three
-security modes (passthrough, USM translate, TSM) complete.**
+**Current state: all three security modes complete; no-YAML CLI mode
+implemented and smoke-tested end-to-end.**
 
 | Milestone | Status |
 |---|---|
@@ -103,6 +103,30 @@ go test ./... -race
 Note: non-login shells may not have `go` on PATH — use `/usr/local/go/bin/go`
 or set `-timeout` on `go test` (DTLS tests would hang without one).
 
+### No-YAML CLI mode (plug-and-play deployment)
+
+Without `--config`, both subcommands build a validated Config from direct
+flags — deployment is two commands plus a generated key:
+
+```bash
+KEY=$(snmp-proxy genpsk)   # random 32-byte hex key
+snmp-proxy agent   --tunnel-addr <manager-proxy-ip>:19611 --psk $KEY \
+  --auth-pass <auth> --priv-pass <priv> --agent 127.0.0.1:161 --community public
+snmp-proxy manager --tunnel-addr <manager-proxy-ip>:19611 --psk $KEY \
+  --auth-pass <auth> --priv-pass <priv> --listen :161 --community public
+```
+
+Flags: `--tunnel-mode` (dtls|tls), `--psk-identity`, `--insecure`,
+`--security` (usm-translate|passthrough), `--trap-listen`, `--trap-sink`.
+Both sides must share `--psk`/`--auth-pass`/`--priv-pass`. Default security
+in flags mode is usm-translate (user 'proxy', SHA, AES).
+
+### Smoke test
+
+`scripts/smoke-cli.sh` — plug-and-play end-to-end: builds the binary, starts
+agent+manager via flags plus a fake Python v2c agent (hand-built BER),
+polls with `go run ./scripts/smoke-client <port>`. Exit 0 = green.
+
 ## 6. Key Dependencies (go.mod)
 
 - `github.com/gosnmp/gosnmp` — SNMP v1/v2c/v3 (USM) marshalling, requests
@@ -125,6 +149,10 @@ or set `-timeout` on `go test` (DTLS tests would hang without one).
   the tunnel handshake then *is* the SNMP authentication.
 - Traps/informs flow both directions: devices -> manager-side proxy -> tunnel
   -> agent-side proxy -> real manager.
+- **Manager-side tunnel wiring must call `sess.Connect(ctx)` eagerly** before
+  starting a translator: the first Send on a lazy session races the DTLS
+  handshake and the first app record can be silently lost (pion's server-side
+  handshake only starts once the client writes).
 - USM translate architecture: the agent-side proxy owns the authoritative
   engine (requests + its own trap engine); the manager-side proxy owns its
   own engine for traps it originates. Translation is PDU splicing (v1/v2c

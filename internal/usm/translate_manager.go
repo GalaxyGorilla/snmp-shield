@@ -484,11 +484,11 @@ func (m *ManagerTranslator) readTraps() {
 func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 	info, err := msg.Peek(dg)
 	if err != nil {
-		return
+			return
 	}
 	_, community, pduTLV, err := msg.SplitV1V2c(dg)
 	if err != nil {
-		return
+			return
 	}
 
 	var pdu []byte
@@ -517,7 +517,7 @@ func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 	scoped := msg.BuildScoped(eng.id, []byte{}, pdu)
 	out, err := m.buildV3Request(eng, scoped, true)
 	if err != nil {
-		m.log.Warn("usm manager: trap build failed", zap.Error(err))
+			m.log.Warn("usm manager: trap build failed", zap.Error(err))
 		return
 	}
 	flags := byte(0)
@@ -525,7 +525,7 @@ func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 		flags = tunnel.FlagInform
 	}
 	if err := m.sess.Send(context.Background(), msgTypeNOTIF, flags, 0, out); err != nil {
-		m.log.Warn("usm manager: trap tunnel send failed", zap.Error(err))
+			m.log.Warn("usm manager: trap tunnel send failed", zap.Error(err))
 		return
 	}
 	if m.met != nil {

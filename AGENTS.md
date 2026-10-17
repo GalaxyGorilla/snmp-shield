@@ -37,7 +37,8 @@ long-haul segment between them.
 ## 3. Status / Roadmap
 
 **Current state: all three security modes complete; no-YAML CLI mode
-implemented and smoke-tested end-to-end.**
+implemented and smoke-tested end-to-end; cache package unit-tested;
+net-snmp CLI interop-tested end-to-end (incl. trap direction).**
 
 | Milestone | Status |
 |---|---|
@@ -49,7 +50,8 @@ implemented and smoke-tested end-to-end.**
 | E2E harness (Go/gosnmp client + fake Go agent on loopback) | done |
 | USM translate mode (v1/v2c <-> v3 authPriv, engineID discovery, boots/time cache) | done (tested, interop vs gosnmp) |
 | TSM mode (cert-based security model on tunnel leg) | done (tested) |
-| Net-snmp interop tests (needs `apt-get install snmp snmpd`) | todo |
+| Cache package unit tests (store persistence, engine clocks, replay) | done (tested) |
+| Net-snmp interop tests (snmpget/getnext/bulkwalk/set/trap; needs `apt-get install snmp`) | done (tested, `scripts/interop-snmp.sh`) |
 | PSK ciphersuites, notify filtering, HA | backlog |
 
 ### TSM design (RFC 5591, as implemented)
@@ -84,19 +86,20 @@ internal/observ/          zap logging + Prometheus metrics
 ```
 
 (Directories with code: config, observ, tunnel, msg, passthrough, proxy,
-usm, cache, cmd/snmp-proxy. Still empty, reserved: tsm, discovery
+usm, tsm, cache, cmd/snmp-proxy. Still empty, reserved: discovery
 (discovery logic lives in internal/usm translate_manager.go), securitylevel.
-Also: configs/ example YAML (manager/agent × psk/usm), scripts/gen-certs.sh
+Also: configs/ example YAML (manager/agent × psk/usm/tsm), scripts/gen-certs.sh
 throwaway test PKI into gitignored certs/.)
 
 ## 5. Build / Test
 
-Go 1.27.2 at `/usr/local/go/bin/go` (on PATH via `/etc/profile.d/go.sh`).
+Go 1.27.2 at `/usr/local/go/bin/go` (on PATH via `/etc/profile.d/go.sh`);
+go.mod declares minimum **1.24.0** (CI-free project — tests run manually).
 
 ```bash
 go build ./...
 go vet ./...
-go test ./... -race
+go test ./... -race -timeout 180s
 ```
 
 **Acceptance for every commit**: build + vet + `go test -race ./...` clean.
@@ -126,6 +129,24 @@ in flags mode is usm-translate (user 'proxy', SHA, AES).
 `scripts/smoke-cli.sh` — plug-and-play end-to-end: builds the binary, starts
 agent+manager via flags plus a fake Python v2c agent (hand-built BER),
 polls with `go run ./scripts/smoke-client <port>`. Exit 0 = green.
+
+### net-snmp interop test
+
+`scripts/interop-snmp.sh` — drives the two-proxy chain (PSK-DTLS,
+usm-translate) with real net-snmp CLI clients: snmpget, snmpgetnext,
+snmpbulkwalk, snmpset, and snmptrap (full trap direction) against a fake
+Python v2c agent on a tiny 2-OID MIB (sysDescr.0, sysObjectID.0; increasing
+GETNEXT/GETBULK walk, endOfMibView/noSuchInstance exceptions). Requires
+`apt-get install snmp`; exits 77 (skip) when tools are missing. Exit 0 =
+green.
+
+**Trap direction (usm-translate mode, verified by this script):** devices
+fire at the **manager-side** proxy's `--trap-listen`; the manager-side
+translator wraps the v1/v2c trap into a v3 NOTIF frame across the tunnel;
+the **agent-side** proxy unwraps, verifies, and delivers the plain v2c
+notification (community = `security.trap_sink_community`, fallback
+`public`) to its `--trap-sink`. The agent-side translator has **no** clear
+trap listener in usm-translate mode.
 
 ## 6. Key Dependencies (go.mod)
 

@@ -96,6 +96,29 @@ users in `security.users` — every shipped default is SHA + AES
 speak noAuthNoPriv v3 (framed, not secured). Configure real passphrases
 and the leg is authPriv.
 
+**Why TSM is not everywhere**: TSM (RFC 5591) exists in exactly two
+shapes here — the two-proxy tunnel and the agent-side gateway front leg
+(`tsm-gateway`). There is no TSM variant of the manager-side gateway,
+and TSM gateway support is a niche option rather than the default:
+
+- **Almost no manager speaks TSM.** SNMP-over-(D)TLS (RFC 6353) is
+  implemented by net-snmp; mainstream management platforms (Zabbix,
+  PRTG, …) speak USM v3. The USM gateway is the front door for those.
+- **TSM-capable devices virtually always speak USM too.** A device that
+  terminates SNMP-over-DTLS is by definition modern and v3-capable, so
+  the manager-side gateway for such devices already exists as
+  `usm-manager-gateway` (the industry-standard USM path, interop-tested
+  against real snmpd).
+- **Server-side TSM stacks are rare and incomplete.** Net-snmp's
+  server-side DTLS support is partial; there is no realistic population
+  of TSM-only agents to point a TSM variant of the manager-side gateway
+  at.
+
+Practical rule: certificates are the *tunnel* authentication between two
+snmp-shield proxies (any endpoints, any SNMP versions); USM is the
+*endpoint* security toward managers and agents, which everything
+industry-standard speaks.
+
 ## Tunnel transport
 
 - **DTLS over UDP** (primary) — preserves SNMP's connectionless model.

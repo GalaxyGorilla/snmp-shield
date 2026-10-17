@@ -317,7 +317,8 @@ internal/snmpmetrics/     SNMP health MIB agent + tunnel event traps
 usm, tsm, cache, notifyfilter, snmpmetrics, cmd/snmp-shield. Still empty, reserved:
 discovery (discovery logic lives in internal/usm translate_manager.go),
 securitylevel. Also: configs/ example YAML (manager/agent × psk/usm/tsm +
-gateway-usm + gateway-tsm + gateway-manager-gateway + gateway-usm-manager
+gateway-usm + gateway-tsm + gateway-manager-gateway +
+gateway-notifications-only
 [usm-gateway notification-only]), scripts/gen-certs.sh
 throwaway test PKI into gitignored certs/, scripts/tsm-sink raw-DTLS
 test receiver for interop, scripts/interop-manager-gateway.sh real-snmpd

@@ -79,7 +79,7 @@ proxy automatically.
 
   `--filter-oid` is an OID prefix (repeatable, arc-boundary match),
   `--filter-action` is `allow` or `deny`. In YAML:
-  `notifications.filter` (see `configs/gateway-usm-manager.yaml`).
+  `notifications.filter` (see `configs/gateway-notifications-only.yaml`).
 
 - **SNMP metrics interface** — expose the proxy's own health over SNMP
   (optional, all roles): `--metrics-snmp-listen <ip:port>` serves a
@@ -92,6 +92,6 @@ proxy automatically.
 
 ## Config file
 
-`configs/gateway-usm-manager.yaml` — notification-only usm-gateway
+`configs/gateway-notifications-only.yaml` — notification-only usm-gateway
 (engine store placement and user list); the full request+notification
 shape is `configs/gateway-usm.yaml`.

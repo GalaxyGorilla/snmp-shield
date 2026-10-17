@@ -40,6 +40,12 @@ snmp-shield gateway \
   accepted on `--trap-listen` are verified, decrypted and relayed as
   clear v2c traps (informs are confirmed by the proxy itself).
 
+**Scale notes:** any number of legacy managers can poll the gateway
+concurrently — each request is correlated independently (the manager's
+original req-id, community and address are remembered per request). The
+v3 **agent** side is singular: one `--agent` per instance. If a second
+manager needs the trap stream, deploy a second gateway instance for it.
+
 ## 2. Point the legacy manager at the gateway
 
 Any v1/v2c manager — no v3 configuration needed:

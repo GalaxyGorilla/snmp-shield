@@ -39,7 +39,14 @@ snmp-shield gateway \
   acknowledgment is relayed back to the device).
 - Either leg pair can be used alone: notification-only (this section
   only) secures a manager leg with no request path — see
-  [usm-manager](usm-manager.md).
+  [gateway-notifications-only](gateway-notifications-only.md).
+
+**Scale notes:** any number of managers can poll the gateway
+concurrently — each request is correlated independently (the engine and
+the user database are shared, which is correct per RFC 3414: every
+manager discovers the same authoritative engine). Notifications, on the
+other hand, go to a **single** `--trap-sink`; if a second manager needs
+the trap stream, deploy a second gateway instance for it.
 
 ## 2. Point the manager at the gateway
 

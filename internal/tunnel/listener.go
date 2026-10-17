@@ -16,10 +16,16 @@ type ListenerConfig struct {
 	Mode        string // "dtls" or "tls"
 	PSK         []byte
 	PSKIdentity []byte
-	CAFile      string
-	CertFile    string
-	KeyFile     string
-	Insecure    bool // DTLS cert mode: skip client-cert verification
+	// PskCiphersuites selects the DTLS 1.2 PSK cipher suites in server
+	// preference order ("aes128-ccm-8", "aes256-ccm-8", "aes128-ccm",
+	// "aes128-gcm", "aes128-cbc" or full RFC names). Empty = default
+	// (aes128-ccm-8). Only used in PSK mode. Must overlap with the
+	// client's list or the handshake fails.
+	PskCiphersuites []string
+	CAFile          string
+	CertFile        string
+	KeyFile         string
+	Insecure        bool // DTLS cert mode: skip client-cert verification
 }
 
 // Listen binds the tunnel listener at laddr. The returned Listener is a
@@ -59,12 +65,16 @@ func Listen(laddr string, cfg ListenerConfig) (net.Listener, error) {
 // certificate-based.
 func dtlsServerConfig(cfg ListenerConfig) (*dtls.Config, error) {
 	if len(cfg.PSK) > 0 {
+		suites, err := PskCipherSuiteIDs(cfg.PskCiphersuites)
+		if err != nil {
+			return nil, err
+		}
 		return &dtls.Config{
 			PSK: func(hint []byte) ([]byte, error) {
 				return cfg.PSK, nil
 			},
 			PSKIdentityHint:      cfg.PSKIdentity,
-			CipherSuites:         []dtls.CipherSuiteID{dtls.TLS_PSK_WITH_AES_128_CCM_8},
+			CipherSuites:         suites,
 			ExtendedMasterSecret: dtls.RequireExtendedMasterSecret,
 		}, nil
 	}

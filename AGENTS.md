@@ -60,7 +60,8 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | Net-snmp interop tests (snmpget/getnext/bulkwalk/set/trap; needs `apt-get install snmp`) | done (tested, `scripts/interop-snmp.sh`) |
 | USM gateway mode (standard v3 manager → single proxy → legacy agent) | done (tested, gosnmp + net-snmp `scripts/interop-gateway.sh`, incl. trap direction) |
 | TSM gateway mode (RFC 6353 SNMP-over-DTLS front leg) | done (tested, Go harness + net-snmp `scripts/interop-gateway-tsm.sh`, incl. trap direction) |
-| PSK ciphersuites, notify filtering, HA | backlog |
+| PSK ciphersuite variety (`tunnel.psk_ciphersuites`: aes128-ccm-8 default, aes256-ccm-8, aes128-ccm, aes128-gcm, aes128-cbc; YAML + `--psk-ciphersuites` flag) | done (tested, unit + per-suite loopback handshakes + mismatch rejection) |
+| Notify filtering, HA | backlog |
 
 ### Gateway modes (single proxy, no second proxy required)
 
@@ -207,7 +208,7 @@ internal/proxy/           shared proxy wiring
 internal/passthrough/     opaque forwarding of clear SNMP
 internal/usm/             USM translate mode + gateway mode + profiles
 internal/tsm/             TSM mode + TSM gateway mode
-internal/tunnel/          DTLS/TLS tunnel dialer/listener
+internal/tunnel/          DTLS/TLS tunnel dialer/listener (+ PSK ciphersuite mapping)
 internal/msg/             SNMP message build/parse helpers
 internal/cache/           engine boots/time cache (anti-rollback, persistence)
 internal/discovery/       engineID discovery per RFC 3414
@@ -250,9 +251,13 @@ snmp-proxy manager --tunnel-addr <manager-proxy-ip>:19611 --psk $KEY \
   --auth-pass <auth> --priv-pass <priv> --listen :161 --community public
 ```
 
-Flags: `--tunnel-mode` (dtls|tls), `--psk-identity`, `--insecure`,
-`--security` (usm-translate|passthrough), `--trap-listen`, `--trap-sink`.
-Both sides must share `--psk`/`--auth-pass`/`--priv-pass`. Default security
+Flags: `--tunnel-mode` (dtls|tls), `--psk-identity`, `--psk-ciphersuites`
+(comma-separated DTLS PSK suites, most preferred first: aes128-ccm-8 |
+aes256-ccm-8 | aes128-ccm | aes128-gcm | aes128-cbc; default
+aes128-ccm-8), `--insecure`, `--security` (usm-translate|passthrough),
+`--trap-listen`, `--trap-sink`.
+Both sides must share `--psk`/`--auth-pass`/`--priv-pass` and at least
+one `--psk-ciphersuites` entry. Default security
 in flags mode is usm-translate (user 'proxy', SHA, AES).
 
 Gateway (single box, no tunnel/PSK):
@@ -439,6 +444,14 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   the server never answers the ClientHello until the app reads. The proxy
   serves every accepted conn with `NewServerSession` (readLoop) immediately;
   tests must do the same (an "accept and discard" test deadlocks).
+- **pion's listener creates a new accepted conn per client UDP port** and
+  the client's `dtls.Dial` opens a fresh ephemeral port per attempt. A
+  test whose client reconnects (e.g. cipher-suite-mismatch failure then
+  backoff retry) must serve EVERY accepted conn in a loop; serving only
+  the first one leaves the retried handshake unserved. The client's lazy
+  handshake (started inside `Write`, Background ctx) ignores
+  `SetWriteDeadline` and waits forever — the write deadline does NOT
+  bound the lazy handshake, only the post-handshake record write.
 - Client needs BOTH `PSK` and `PSKIdentityHint` set (v3 rejects otherwise).
 - DTLS preserves record boundaries per Read: a partial Read consumes the
   whole record. `streamConn` (internal/tunnel/stream.go) buffers the
@@ -447,6 +460,13 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   writes each frame separately.
 - 13-byte frame headers fail `Unmarshal` (ErrShort) when payload length >0:
   readLoop uses header-only `UnmarshalHeader` then reads the payload.
+- **PSK ciphersuite selection** (pion v3.0.10): exactly five PSK suites
+  exist — `TLS_PSK_WITH_AES_128_CCM_8` (our default), `AES_256_CCM_8`,
+  `AES_128_CCM`, `AES_128_GCM_SHA256`, `AES_128_CBC_SHA256`. A client/
+  server suite mismatch fails fast with a fatal alert on both sides —
+  but only if the server actually serves the conn (see quirk above).
+  Mapping lives in `internal/tunnel/ciphersuite.go`
+  (`PskCipherSuiteIDs`, short names + full RFC names as aliases).
 
 ## 8. AGENTS.md Maintenance Rule
 

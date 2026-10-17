@@ -125,6 +125,47 @@ func TestValidateErrors(t *testing.T) {
 	}
 }
 
+func TestLoadPskCiphersuites(t *testing.T) {
+	path := writeTemp(t, `
+tunnel:
+  mode: dtls
+  dial_addr: "10.0.0.1:10162"
+  psk: "text:shared-secret"
+  psk_ciphersuites: ["aes256-ccm-8", "aes128-gcm"]
+manager:
+  listen_addr: ":161"
+`)
+	cfg, err := Load(path, RoleManager)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	got := cfg.Tunnel.PskCiphersuites
+	if len(got) != 2 || got[0] != "aes256-ccm-8" || got[1] != "aes128-gcm" {
+		t.Errorf("psk_ciphersuites = %v", got)
+	}
+}
+
+func TestValidatePskCiphersuites(t *testing.T) {
+	good := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", DialAddr: "x:1", PSK: "text:s", PskCiphersuites: []string{"aes256-ccm-8", "TLS_PSK_WITH_AES_128_CCM"}}, Manager: ManagerRole{ListenAddr: ":161"}, Security: Security{Mode: "passthrough"}}
+	if err := good.Validate(); err != nil {
+		t.Errorf("valid suites rejected: %v", err)
+	}
+	bad := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", DialAddr: "x:1", PSK: "text:s", PskCiphersuites: []string{"chacha20"}}, Manager: ManagerRole{ListenAddr: ":161"}, Security: Security{Mode: "passthrough"}}
+	if err := bad.Validate(); err == nil {
+		t.Error("unknown psk ciphersuite accepted")
+	}
+	// Suites without a PSK are also validated (harmless, forward-proof).
+	noPSK := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "tls", DialAddr: "x:1", PskCiphersuites: []string{"bogus"}}, Manager: ManagerRole{ListenAddr: ":161"}, Security: Security{Mode: "passthrough"}}
+	if err := noPSK.Validate(); err == nil {
+		t.Error("unknown psk ciphersuite without psk accepted")
+	}
+	// No suites configured: valid everywhere.
+	none := &Config{Role: RoleAgent, Tunnel: Tunnel{Mode: "tls", ListenAddr: ":10162"}, Agent: AgentRole{AgentAddr: "127.0.0.1:161"}, Security: Security{Mode: "passthrough"}}
+	if err := none.Validate(); err != nil {
+		t.Errorf("no suites rejected: %v", err)
+	}
+}
+
 func TestKeepaliveAndBackoff(t *testing.T) {
 	c := &Config{Tunnel: Tunnel{KeepaliveSecs: 7, MaxReconnectBackoff: 3}}
 	if got := c.Keepalive(); got != 7*time.Second {

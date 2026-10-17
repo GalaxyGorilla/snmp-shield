@@ -65,16 +65,17 @@ func runManager(ctx context.Context, opts Options, met *observ.Metrics) error {
 		return err
 	}
 	dial := &tunnel.Dialer{
-		Mode:        opts.Config.Tunnel.Mode,
-		RemoteAddr:  opts.Config.Tunnel.DialAddr,
-		PSK:         psk,
-		PSKIdentity: []byte(opts.Config.Tunnel.PSKIdentity),
-		CAFile:      opts.Config.Tunnel.CAFile,
-		CertFile:    opts.Config.Tunnel.CertFile,
-		KeyFile:     opts.Config.Tunnel.KeyFile,
-		ServerName:  opts.Config.Tunnel.ServerName,
-		Insecure:    opts.Config.Tunnel.InsecureSkipVerify,
-		Timeout:     10 * time.Second,
+		Mode:            opts.Config.Tunnel.Mode,
+		RemoteAddr:      opts.Config.Tunnel.DialAddr,
+		PSK:             psk,
+		PSKIdentity:     []byte(opts.Config.Tunnel.PSKIdentity),
+		PskCiphersuites: opts.Config.Tunnel.PskCiphersuites,
+		CAFile:          opts.Config.Tunnel.CAFile,
+		CertFile:        opts.Config.Tunnel.CertFile,
+		KeyFile:         opts.Config.Tunnel.KeyFile,
+		ServerName:      opts.Config.Tunnel.ServerName,
+		Insecure:        opts.Config.Tunnel.InsecureSkipVerify,
+		Timeout:         10 * time.Second,
 	}
 	sess := tunnel.NewClientSession(dial, opts.Config.Tunnel.MaxFrameSize, 1200, opts.Log)
 	defer sess.Close()
@@ -130,12 +131,13 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics) error {
 		return err
 	}
 	lcfg := tunnel.ListenerConfig{
-		Mode:        opts.Config.Tunnel.Mode,
-		PSK:         psk,
-		PSKIdentity: []byte(opts.Config.Tunnel.PSKIdentity),
-		CAFile:      opts.Config.Tunnel.CAFile,
-		CertFile:    opts.Config.Tunnel.CertFile,
-		KeyFile:     opts.Config.Tunnel.KeyFile,
+		Mode:            opts.Config.Tunnel.Mode,
+		PSK:             psk,
+		PSKIdentity:     []byte(opts.Config.Tunnel.PSKIdentity),
+		PskCiphersuites: opts.Config.Tunnel.PskCiphersuites,
+		CAFile:          opts.Config.Tunnel.CAFile,
+		CertFile:        opts.Config.Tunnel.CertFile,
+		KeyFile:         opts.Config.Tunnel.KeyFile,
 	}
 	l, err := tunnel.Listen(opts.Config.Tunnel.ListenAddr, lcfg)
 	if err != nil {

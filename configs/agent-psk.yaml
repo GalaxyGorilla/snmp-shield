@@ -7,6 +7,10 @@ tunnel:
   psk_identity: "snmp-proxy-agent"
   # Must match the manager side.
   psk: "text:change-me-shared-secret"
+  # Optional DTLS 1.2 PSK ciphersuites, most preferred first; both sides
+  # must share at least one. Supported: aes128-ccm-8 (default),
+  # aes256-ccm-8, aes128-ccm, aes128-gcm, aes128-cbc.
+  # psk_ciphersuites: ["aes256-ccm-8", "aes128-ccm-8"]
   keepalive_secs: 15
   max_frame_size: 8192
 

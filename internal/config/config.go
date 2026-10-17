@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
 	"gopkg.in/yaml.v3"
 )
 
@@ -45,6 +46,13 @@ type Tunnel struct {
 	// PSK is the pre-shared key: "hex:..." (hex-encoded), "text:..."
 	// (literal bytes) or bare (tried as hex, then as literal bytes).
 	PSK string `yaml:"psk"`
+
+	// PskCiphersuites selects the DTLS 1.2 PSK cipher suites for the
+	// tunnel, most preferred first: "aes128-ccm-8" (default),
+	// "aes256-ccm-8", "aes128-ccm", "aes128-gcm", "aes128-cbc" (full
+	// RFC names accepted as aliases). Both sides must share at least
+	// one suite. Empty = default.
+	PskCiphersuites []string `yaml:"psk_ciphersuites"`
 
 	// Mutual TLS settings (used for both "tls" and cert-based "dtls").
 	CAFile     string `yaml:"ca_file"`
@@ -241,6 +249,13 @@ func (c *Config) Validate() error {
 	}
 	if c.Tunnel.Mode == "dtls" && len(c.Tunnel.CertFile) == 0 && len(c.Tunnel.PSK) == 0 {
 		return fmt.Errorf("tunnel: dtls needs either psk or certificate material")
+	}
+	if len(c.Tunnel.PSK) > 0 || len(c.Tunnel.PskCiphersuites) > 0 {
+		// Validate ciphersuite names (tunnel package owns the mapping;
+		// no import cycle since tunnel does not import config).
+		if err := tunnel.ValidatePskCiphersuites(c.Tunnel.PskCiphersuites); err != nil {
+			return fmt.Errorf("tunnel.psk_ciphersuites: %w", err)
+		}
 	}
 	if c.Role == RoleManager {
 		if c.Manager.ListenAddr == "" {

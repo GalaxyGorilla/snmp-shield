@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
@@ -46,6 +47,23 @@ func run() int {
 	}
 }
 
+// parsePskCiphersuites splits the comma-separated --psk-ciphersuites
+// flag into a list (empty flag = nil, default applies). Name validity
+// is checked by Config.Validate.
+func parsePskCiphersuites(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // genPSK prints a fresh random 32-byte pre-shared key in hex form.
 func genPSK() int {
 	buf := make([]byte, 32)
@@ -69,6 +87,7 @@ func runRole(role string, args []string) int {
 	tunnelAddr := fs.String("tunnel-addr", "", "tunnel endpoint: dial (manager role) or listen (agent role) address ip:port")
 	psk := fs.String("psk", "", "pre-shared key for the tunnel (hex; generate with `snmp-proxy genpsk`)")
 	pskIdentity := fs.String("psk-identity", "snmp-proxy", "PSK identity string")
+	pskSuites := fs.String("psk-ciphersuites", "", "DTLS PSK ciphersuites, comma-separated, most preferred first (aes128-ccm-8, aes256-ccm-8, aes128-ccm, aes128-gcm, aes128-cbc; default aes128-ccm-8)")
 	insecure := fs.Bool("insecure", false, "skip tunnel certificate verification (tls mode only; never in production)")
 
 	// direct-flags mode: usm-translate security
@@ -122,6 +141,7 @@ func runRole(role string, args []string) int {
 			tunnelAddr:  *tunnelAddr,
 			psk:         *psk,
 			pskIdentity: *pskIdentity,
+			pskSuites:   *pskSuites,
 			insecure:    *insecure,
 			secMode:     *secMode,
 			authPass:    *authPass,
@@ -169,6 +189,7 @@ type flagsOpts struct {
 	tunnelAddr  string
 	psk         string
 	pskIdentity string
+	pskSuites   string
 	insecure    bool
 	secMode     string
 	authPass    string
@@ -259,6 +280,7 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 		Mode:               o.tunnelMode,
 		PSKIdentity:        o.pskIdentity,
 		PSK:                "hex:" + o.psk,
+		PskCiphersuites:    parsePskCiphersuites(o.pskSuites),
 		InsecureSkipVerify: o.insecure,
 	}
 	cfg.Security = config.Security{Mode: o.secMode}

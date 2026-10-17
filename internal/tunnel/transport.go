@@ -21,12 +21,17 @@ type Dialer struct {
 	RemoteAddr  string // tunnel endpoint address to dial
 	PSK         []byte
 	PSKIdentity []byte
-	CAFile      string
-	CertFile    string
-	KeyFile     string
-	ServerName  string
-	Insecure    bool
-	Timeout     time.Duration
+	// PskCiphersuites selects the DTLS 1.2 PSK cipher suites, most
+	// preferred first ("aes128-ccm-8", "aes256-ccm-8", "aes128-ccm",
+	// "aes128-gcm", "aes128-cbc" or full RFC names). Empty = default
+	// (aes128-ccm-8). Only used in PSK mode.
+	PskCiphersuites []string
+	CAFile          string
+	CertFile        string
+	KeyFile         string
+	ServerName      string
+	Insecure        bool
+	Timeout         time.Duration
 }
 
 // tlsConfig builds a mutual-TLS *tls.Config for the "tls" mode.
@@ -64,12 +69,16 @@ func (d *Dialer) tlsConfig() (*tls.Config, error) {
 // certificate-based.
 func (d *Dialer) dtlsConfig() (*dtls.Config, error) {
 	if len(d.PSK) > 0 {
+		suites, err := PskCipherSuiteIDs(d.PskCiphersuites)
+		if err != nil {
+			return nil, err
+		}
 		return &dtls.Config{
 			PSK: func(hint []byte) ([]byte, error) {
 				return d.PSK, nil
 			},
 			PSKIdentityHint:      d.PSKIdentity,
-			CipherSuites:         []dtls.CipherSuiteID{dtls.TLS_PSK_WITH_AES_128_CCM_8},
+			CipherSuites:         suites,
 			ExtendedMasterSecret: dtls.RequireExtendedMasterSecret,
 		}, nil
 	}

@@ -6,8 +6,8 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"github.com/gosnmp/gosnmp"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/gosnmp/gosnmp"
 )
 
 // TestParseAndDecryptGosnmpAuthPriv feeds a real gosnmp-marshaled authPriv

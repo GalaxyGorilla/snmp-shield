@@ -50,9 +50,9 @@ type Tunnel struct {
 	// (TLS mode only). Never enable in production.
 	InsecureSkipVerify bool `yaml:"insecure_skip_verify"`
 
-	KeepaliveSecs        int `yaml:"keepalive_secs"`
-	MaxReconnectBackoff  int `yaml:"max_reconnect_backoff_secs"`
-	MaxFrameSize         int `yaml:"max_frame_size"`
+	KeepaliveSecs       int `yaml:"keepalive_secs"`
+	MaxReconnectBackoff int `yaml:"max_reconnect_backoff_secs"`
+	MaxFrameSize        int `yaml:"max_frame_size"`
 }
 
 // ManagerRole is the configuration for the manager-side instance: it
@@ -120,12 +120,12 @@ type Security struct {
 // Community maps authenticated requests to the v1/v2c community used
 // toward the real agent.
 type UserCfg struct {
-	Name            string `yaml:"name"`
-	AuthProtocol    string `yaml:"auth_protocol"`
-	AuthPassphrase  string `yaml:"auth_passphrase"`
-	PrivProtocol    string `yaml:"priv_protocol"`
-	PrivPassphrase  string `yaml:"priv_passphrase"`
-	Community       string `yaml:"community"`
+	Name           string `yaml:"name"`
+	AuthProtocol   string `yaml:"auth_protocol"`
+	AuthPassphrase string `yaml:"auth_passphrase"`
+	PrivProtocol   string `yaml:"priv_protocol"`
+	PrivPassphrase string `yaml:"priv_passphrase"`
+	Community      string `yaml:"community"`
 }
 
 // Config is the full per-instance configuration.

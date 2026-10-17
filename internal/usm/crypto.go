@@ -10,13 +10,13 @@ import (
 	"crypto/hmac"
 	"crypto/md5"
 	"crypto/sha1"
-	"hash"
 	_ "crypto/sha256" // register SHA224/SHA256
 	_ "crypto/sha512" // register SHA384/SHA512
 	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"hash"
 )
 
 // AuthProtocol enumerates the supported authentication protocols.
@@ -38,11 +38,11 @@ type PrivProtocol int
 const (
 	PrivNone    PrivProtocol = 1
 	PrivDES     PrivProtocol = 2
-	PrivAES     PrivProtocol = 3  // AES-128 (CFB)
-	PrivAES192  PrivProtocol = 4  // Blumenthal extension
-	PrivAES256  PrivProtocol = 5  // Blumenthal extension
-	PrivAES192C PrivProtocol = 6  // Reeder extension
-	PrivAES256C PrivProtocol = 7  // Reeder extension
+	PrivAES     PrivProtocol = 3 // AES-128 (CFB)
+	PrivAES192  PrivProtocol = 4 // Blumenthal extension
+	PrivAES256  PrivProtocol = 5 // Blumenthal extension
+	PrivAES192C PrivProtocol = 6 // Reeder extension
+	PrivAES256C PrivProtocol = 7 // Reeder extension
 )
 
 // ErrAuth is returned when authentication fails verification.

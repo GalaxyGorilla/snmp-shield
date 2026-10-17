@@ -368,8 +368,8 @@ func TestTSMEndToEndTrapPath(t *testing.T) {
 
 	agentSec := config.Security{Mode: "tsm", TSMIdentities: []string{"snmp-proxy-manager"}}
 	agentRole := config.AgentRole{
-		AgentAddr:      "127.0.0.1:11811",
-		TrapSinkAddr:   sinkAddr,
+		AgentAddr:         "127.0.0.1:11811",
+		TrapSinkAddr:      sinkAddr,
 		TrapSinkCommunity: "sinkcomm",
 	}
 	atr, err := tsm.NewAgentTranslator(agentRole, agentSec, agtPipe, zap.NewNop(), nil)

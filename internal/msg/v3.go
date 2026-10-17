@@ -35,18 +35,18 @@ type V3Header struct {
 
 // USMParams is the parsed USM security parameters (RFC 3414 2.4).
 type USMParams struct {
-	EngineID    []byte
-	Boots       uint32
-	Time        uint32
-	UserName    string
-	AuthParams  []byte // 12/16/24/32/48 bytes when authenticated
-	PrivParams  []byte // 8-byte salt when encrypted
+	EngineID   []byte
+	Boots      uint32
+	Time       uint32
+	UserName   string
+	AuthParams []byte // 12/16/24/32/48 bytes when authenticated
+	PrivParams []byte // 8-byte salt when encrypted
 }
 
 // V3Message is a fully decomposed (but not decrypted) SNMPv3 message.
 type V3Message struct {
-	Header     V3Header
-	USM        USMParams
+	Header V3Header
+	USM    USMParams
 	// ScopedPDU content: contextEngineID, contextName and the raw PDU TLV.
 	ContextEngineID []byte
 	ContextName     []byte

@@ -13,12 +13,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gosnmp/gosnmp"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/cache"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/usm"
+	"github.com/gosnmp/gosnmp"
 	"go.uber.org/zap"
 )
 
@@ -225,14 +225,14 @@ func portOf(addr string) uint16 {
 func gosnmpV3Client(t *testing.T, addr string) *gosnmp.GoSNMP {
 	t.Helper()
 	g := &gosnmp.GoSNMP{
-		Target:    hostOf(addr),
-		Port:      portOf(addr),
-		Version:   gosnmp.Version3,
-		Timeout:   3 * time.Second,
-		Retries:   2,
-		MaxOids:   10,
-		SecurityModel:   gosnmp.UserSecurityModel,
-		MsgFlags:        gosnmp.AuthPriv,
+		Target:        hostOf(addr),
+		Port:          portOf(addr),
+		Version:       gosnmp.Version3,
+		Timeout:       3 * time.Second,
+		Retries:       2,
+		MaxOids:       10,
+		SecurityModel: gosnmp.UserSecurityModel,
+		MsgFlags:      gosnmp.AuthPriv,
 		SecurityParameters: &gosnmp.UsmSecurityParameters{
 			UserName:                 "proxy",
 			AuthenticationProtocol:   gosnmp.SHA,

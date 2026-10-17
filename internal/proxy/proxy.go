@@ -20,17 +20,17 @@ import (
 	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/passthrough"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/tsm"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/usm"
 	"go.uber.org/zap"
 )
 
 // Options for a proxy run.
 type Options struct {
-	Config     *config.Config
+	Config      *config.Config
 	MetricsAddr string
-	Log        *zap.Logger
+	Log         *zap.Logger
 }
 
 // Run executes the configured role until SIGINT/SIGTERM.

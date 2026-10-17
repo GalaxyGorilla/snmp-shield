@@ -184,8 +184,8 @@ type informPending struct {
 // managers is wrapped in v3 TSM frames over the tunnel; device
 // notifications arriving from the tunnel are delivered to the sink.
 type ManagerTranslator struct {
-	cfg config.ManagerRole
-	sec config.Security
+	cfg  config.ManagerRole
+	sec  config.Security
 	sess FrameSink
 	log  *zap.Logger
 	met  *observ.Metrics
@@ -279,7 +279,7 @@ func (m *ManagerTranslator) readClear() {
 			}
 			continue
 		}
-			dg := append([]byte{}, buf[:n]...)
+		dg := append([]byte{}, buf[:n]...)
 		m.handleClearRequest(dg, addr)
 	}
 }
@@ -417,7 +417,7 @@ func (m *ManagerTranslator) readTraps() {
 func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 	info, err := msg.Peek(dg)
 	if err != nil || !msg.IsTrap(info.PDUType) && !msg.IsInform(info.PDUType) {
-			return
+		return
 	}
 	_, _, pduTLV, err := msg.SplitV1V2c(dg)
 	if err != nil {
@@ -431,15 +431,15 @@ func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 		// v1 trap -> v2 trap per RFC 2576 3.1
 		trap, err := msg.SplitV1Trap(pduTLV)
 		if err != nil {
-					return
+			return
 		}
 		vb, err := msg.V1TrapToV2(trap, nil, true)
 		if err != nil {
-					return
+			return
 		}
 		pduType = msg.PDUSNMPv2Trap
 		varbinds = vb
-		} else {
+	} else {
 		pduType = info.PDUType
 		fields, ok := pduCommon(pduTLV)
 		if !ok {
@@ -451,7 +451,7 @@ func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 	corrID := uint16(m.corr.Add(1))
 	out, err := wrapTSM(m.msgID.Add(1), m.reqID.Add(1), pduType, varbinds, nil, true)
 	if err != nil {
-			return
+		return
 	}
 
 	if isInform {

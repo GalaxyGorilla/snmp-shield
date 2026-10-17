@@ -219,12 +219,12 @@ func BuildV1Trap(t V1Trap) []byte {
 
 // Pre-encoded OIDs used by the translation paths.
 var (
-	OIDSysUpTime          = mustOID("1.3.6.1.2.1.1.3.0")        // sysUpTime.0
-	OIDSnmpTrapOID        = mustOID("1.3.6.1.6.3.1.1.4.1.0")    // snmpTrapOID.0
-	OIDSnmpTrapAddress    = mustOID("1.3.6.1.6.3.18.1.3.0")     // snmpTrapAddress.0
-	OIDSnmpTrapCommunity  = mustOID("1.3.6.1.6.3.18.1.4.0")     // snmpTrapCommunity.0
-	OIDSnmpTrapEnterprise = mustOID("1.3.6.1.6.3.1.1.5.9")      // snmpTrapEnterprise.0
-	OIDSnmpTraps          = mustOID(OIDSnmpTrapsDotted)         // 1.3.6.1.6.3.1.1.5
+	OIDSysUpTime          = mustOID("1.3.6.1.2.1.1.3.0")     // sysUpTime.0
+	OIDSnmpTrapOID        = mustOID("1.3.6.1.6.3.1.1.4.1.0") // snmpTrapOID.0
+	OIDSnmpTrapAddress    = mustOID("1.3.6.1.6.3.18.1.3.0")  // snmpTrapAddress.0
+	OIDSnmpTrapCommunity  = mustOID("1.3.6.1.6.3.18.1.4.0")  // snmpTrapCommunity.0
+	OIDSnmpTrapEnterprise = mustOID("1.3.6.1.6.3.1.1.5.9")   // snmpTrapEnterprise.0
+	OIDSnmpTraps          = mustOID(OIDSnmpTrapsDotted)      // 1.3.6.1.6.3.1.1.5
 )
 
 // OIDSnmpTrapsDotted is the snmpTraps prefix; standard trap generic n maps

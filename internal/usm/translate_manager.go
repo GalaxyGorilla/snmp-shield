@@ -26,21 +26,21 @@ import (
 
 // remoteEngine is the agent-side engine as discovered via RFC 3414.
 type remoteEngine struct {
-	id          []byte
-	boots       uint32
-	time        uint32
+	id           []byte
+	boots        uint32
+	time         uint32
 	discoveredAt time.Time
 }
 
 // mgrPending is one in-flight tunneled request (by tunnel corrID).
 type mgrPending struct {
-	addr       net.Addr // manager that sent the clear request
-	ver        int      // clear version to rebuild for the response
-	community  string
-	clientReqID int32  // req-id from the clear request (echoed back)
+	addr        net.Addr // manager that sent the clear request
+	ver         int      // clear version to rebuild for the response
+	community   string
+	clientReqID int32 // req-id from the clear request (echoed back)
 	isDiscovery bool
-	ready      chan struct{}
-	resp       []byte
+	ready       chan struct{}
+	resp        []byte
 }
 
 // ManagerTranslator is the manager-side USM translation engine.
@@ -55,11 +55,11 @@ type ManagerTranslator struct {
 	log   *zap.Logger
 	met   *observ.Metrics
 
-	engineMu    sync.Mutex
-	remote      *remoteEngine
-	msgID       atomic.Uint32
-	reqID       atomic.Uint32
-	corrID      atomic.Uint32
+	engineMu sync.Mutex
+	remote   *remoteEngine
+	msgID    atomic.Uint32
+	reqID    atomic.Uint32
+	corrID   atomic.Uint32
 
 	pendMu sync.Mutex
 	pend   map[uint16]*mgrPending
@@ -484,11 +484,11 @@ func (m *ManagerTranslator) readTraps() {
 func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 	info, err := msg.Peek(dg)
 	if err != nil {
-			return
+		return
 	}
 	_, community, pduTLV, err := msg.SplitV1V2c(dg)
 	if err != nil {
-			return
+		return
 	}
 
 	var pdu []byte
@@ -517,7 +517,7 @@ func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 	scoped := msg.BuildScoped(eng.id, []byte{}, pdu)
 	out, err := m.buildV3Request(eng, scoped, true)
 	if err != nil {
-			m.log.Warn("usm manager: trap build failed", zap.Error(err))
+		m.log.Warn("usm manager: trap build failed", zap.Error(err))
 		return
 	}
 	flags := byte(0)
@@ -525,7 +525,7 @@ func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 		flags = tunnel.FlagInform
 	}
 	if err := m.sess.Send(context.Background(), msgTypeNOTIF, flags, 0, out); err != nil {
-			m.log.Warn("usm manager: trap tunnel send failed", zap.Error(err))
+		m.log.Warn("usm manager: trap tunnel send failed", zap.Error(err))
 		return
 	}
 	if m.met != nil {

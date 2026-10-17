@@ -20,8 +20,8 @@ import (
 type streamConn struct {
 	conn net.Conn
 
-	mu   sync.Mutex
-	buf  []byte // unconsumed bytes of the last record
+	mu  sync.Mutex
+	buf []byte // unconsumed bytes of the last record
 }
 
 // newStreamConn wraps conn unless it is already a stream (TCP/TLS).
@@ -90,10 +90,10 @@ func parseDERCerts(der [][]byte) []*x509.Certificate {
 // PeerCerts implements PeerCertConn.
 func (s *streamConn) PeerCerts() []*x509.Certificate { return s.peerCerts() }
 
-func (s *streamConn) Write(p []byte) (int, error)         { return s.conn.Write(p) }
-func (s *streamConn) Close() error                        { return s.conn.Close() }
-func (s *streamConn) LocalAddr() net.Addr                 { return s.conn.LocalAddr() }
-func (s *streamConn) RemoteAddr() net.Addr                { return s.conn.RemoteAddr() }
-func (s *streamConn) SetDeadline(t time.Time) error       { return s.conn.SetDeadline(t) }
-func (s *streamConn) SetReadDeadline(t time.Time) error   { return s.conn.SetReadDeadline(t) }
-func (s *streamConn) SetWriteDeadline(t time.Time) error  { return s.conn.SetWriteDeadline(t) }
+func (s *streamConn) Write(p []byte) (int, error)        { return s.conn.Write(p) }
+func (s *streamConn) Close() error                       { return s.conn.Close() }
+func (s *streamConn) LocalAddr() net.Addr                { return s.conn.LocalAddr() }
+func (s *streamConn) RemoteAddr() net.Addr               { return s.conn.RemoteAddr() }
+func (s *streamConn) SetDeadline(t time.Time) error      { return s.conn.SetDeadline(t) }
+func (s *streamConn) SetReadDeadline(t time.Time) error  { return s.conn.SetReadDeadline(t) }
+func (s *streamConn) SetWriteDeadline(t time.Time) error { return s.conn.SetWriteDeadline(t) }

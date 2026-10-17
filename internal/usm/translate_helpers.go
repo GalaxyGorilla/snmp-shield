@@ -138,9 +138,9 @@ func (t *translatorBase) receiveNotif(packet []byte, m *msg.V3Message) (*compile
 // translatorBase carries the state shared by both translators: the user
 // key cache, the notification replay cache, and the salt counter.
 type translatorBase struct {
-	keys    *keyCache
-	replay  *replayCache
-	salt    SaltCounter
+	keys   *keyCache
+	replay *replayCache
+	salt   SaltCounter
 }
 
 // --- usmStats report helpers --------------------------------------------------

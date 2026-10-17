@@ -20,7 +20,7 @@ import (
 // configured trap sink. Local devices may also send notifications to
 // TrapListenAddr; those ship across the tunnel.
 type Manager struct {
-	cfg config.ManagerRole
+	cfg  config.ManagerRole
 	sess *tunnel.Session
 	log  *zap.Logger
 	met  *observ.Metrics

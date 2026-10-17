@@ -46,26 +46,26 @@ type Session struct {
 // on first use and reconnects with backoff on errors.
 func NewClientSession(dial *Dialer, maxPayload, chunk int, log *zap.Logger) *Session {
 	return &Session{
-		dial:        dial,
-		maxPayload:  maxPayload,
-		chunk:       chunk,
-		log:         log,
-		chunker:     NewChunker(maxPayload),
-		subs:        make(map[uint8]map[chan *Frame]struct{}),
-		readStop:    make(chan struct{}),
+		dial:       dial,
+		maxPayload: maxPayload,
+		chunk:      chunk,
+		log:        log,
+		chunker:    NewChunker(maxPayload),
+		subs:       make(map[uint8]map[chan *Frame]struct{}),
+		readStop:   make(chan struct{}),
 	}
 }
 
 // NewServerSession wraps one accepted transport connection into a Session.
 func NewServerSession(conn net.Conn, maxPayload, chunk int, log *zap.Logger) *Session {
 	s := &Session{
-		conn:        conn,
-		maxPayload:  maxPayload,
-		chunk:       chunk,
-		log:         log,
-		chunker:     NewChunker(maxPayload),
-		subs:        make(map[uint8]map[chan *Frame]struct{}),
-		readStop:    make(chan struct{}),
+		conn:       conn,
+		maxPayload: maxPayload,
+		chunk:      chunk,
+		log:        log,
+		chunker:    NewChunker(maxPayload),
+		subs:       make(map[uint8]map[chan *Frame]struct{}),
+		readStop:   make(chan struct{}),
 	}
 	s.startReadLoop()
 	return s

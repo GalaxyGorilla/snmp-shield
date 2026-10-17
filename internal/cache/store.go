@@ -24,7 +24,7 @@ type Engine struct {
 	EngineID []byte `json:"engine_id"`
 	Boots    uint32 `json:"boots"`
 	// LastBoots is the highest accepted boots value (anti-rollback floor).
-	LastBoots uint32 `json:"last_boots"`
+	LastBoots uint32    `json:"last_boots"`
 	StartedAt time.Time `json:"started_at"`
 }
 

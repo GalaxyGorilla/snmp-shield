@@ -45,6 +45,16 @@ type mgrPending struct {
 	resp        []byte
 }
 
+// informPending is one in-flight tunneled inform (by tunnel corrID): the
+// agent-side GetResponse arrives as a RESP frame and must be translated
+// back into a clear inform response for the originating device.
+type informPending struct {
+	addr        net.Addr // device that sent the clear inform
+	ver         int      // clear version to rebuild the response for
+	community   string
+	clientReqID int32 // req-id from the clear inform (echoed back)
+}
+
 // ManagerTranslator is the manager-side USM translation engine.
 type ManagerTranslator struct {
 	translatorBase
@@ -72,6 +82,10 @@ type ManagerTranslator struct {
 	trapConn net.PacketConn // clear trap listener (optional)
 	sink     net.Addr       // local trap sink (optional, lazily dialed)
 
+	informMu   sync.Mutex
+	informPend map[uint16]*informPending // by tunnel corrID
+	lastInform net.Addr                  // most recent clear inform sender
+
 	stop chan struct{}
 }
 
@@ -91,8 +105,9 @@ func NewManagerTranslator(cfg config.ManagerRole, sec config.Security, clock *ca
 		log:   log,
 		met:   met,
 		filtr: notifyfilter.From(filt...),
-		pend:  make(map[uint16]*mgrPending),
-		stop:  make(chan struct{}),
+		pend:       make(map[uint16]*mgrPending),
+		informPend: make(map[uint16]*informPending),
+		stop:       make(chan struct{}),
 	}, nil
 }
 
@@ -142,7 +157,11 @@ func (m *ManagerTranslator) Run(done <-chan struct{}) error {
 			if !ok {
 				return nil
 			}
-			m.handleTunnelResponse(f)
+			if f.Flags&tunnel.FlagInform != 0 {
+				m.handleTunnelInformResp(f)
+			} else {
+				m.handleTunnelResponse(f)
+			}
 		case f, ok := <-notifCh:
 			if !ok {
 				return nil
@@ -307,6 +326,59 @@ func (m *ManagerTranslator) handleTunnelResponse(f *tunnel.Frame) {
 	}
 }
 
+// handleTunnelInformResp translates an agent-side inform GetResponse (which
+// arrives as a RESP frame flagged FlagInform) back into a clear inform
+// response for the originating device.
+func (m *ManagerTranslator) handleTunnelInformResp(f *tunnel.Frame) {
+	m.informMu.Lock()
+	ip, ok := m.informPend[f.CorrID]
+	if ok {
+		delete(m.informPend, f.CorrID)
+	}
+	m.informMu.Unlock()
+	if !ok {
+		m.log.Debug("usm manager: inform response with no pending inform", zap.Uint16("corrID", f.CorrID))
+		return
+	}
+
+	m2, err := msg.ParseV3(f.Payload)
+	if err != nil {
+		m.log.Debug("usm manager: undecodable v3 inform response", zap.Error(err))
+		return
+	}
+	keys, kerr := m.keys.profilesFor(m2.USM.EngineID)
+	if kerr != nil {
+		m.log.Debug("usm manager: no keys for inform response engine", zap.Error(kerr))
+		return
+	}
+	c, pdu, err := unwrapV3(keys, m2, f.Payload)
+	if err != nil {
+		m.log.Debug("usm manager: inform response rejected", zap.Error(err))
+		return
+	}
+	_ = c
+	fields, fieldsOK := pduCommon(pdu)
+	if !fieldsOK {
+		m.log.Debug("usm manager: undecodable PDU in inform response")
+		return
+	}
+
+	clientReqID := ip.clientReqID
+	if fields.ReqID != 0 {
+		clientReqID = fields.ReqID
+	}
+	resp := msg.BuildPDU(msg.PDUGetResponse, clientReqID, fields.ErrStatus, fields.ErrIndex, fields.Varbinds)
+	out, err := msg.BuildV1V2c(ip.ver, []byte(ip.community), resp)
+	if err != nil {
+		return
+	}
+	if udp, ok2 := ip.addr.(*net.UDPAddr); ok2 {
+		if _, err := m.conn.WriteTo(out, udp); err != nil {
+			m.log.Debug("usm manager: inform response delivery failed", zap.Error(err))
+		}
+	}
+}
+
 // handleReport processes a Report PDU from the authoritative engine: the
 // engineID/boots/time in its USM parameters update the discovery state.
 func (m *ManagerTranslator) handleReport(m2 *msg.V3Message) {
@@ -342,9 +414,10 @@ func (m *ManagerTranslator) handleReport(m2 *msg.V3Message) {
 		if p.isDiscovery {
 			select {
 			case <-p.ready:
+				// already closed
 			default:
+				close(p.ready)
 			}
-			close(p.ready)
 		}
 	}
 	m.pendMu.Unlock()
@@ -471,7 +544,7 @@ func (m *ManagerTranslator) buildV3Request(eng *remoteEngine, scoped []byte, aut
 func (m *ManagerTranslator) readTraps() {
 	buf := make([]byte, 65536)
 	for {
-		n, _, err := m.trapConn.ReadFrom(buf)
+		n, addr, err := m.trapConn.ReadFrom(buf)
 		if err != nil {
 			select {
 			case <-m.stop:
@@ -484,6 +557,13 @@ func (m *ManagerTranslator) readTraps() {
 			continue
 		}
 		dg := append([]byte{}, buf[:n]...)
+		// stash the sender for inform responses (best-effort: informs are
+		// answered at the most recent sender, matching the relay design).
+		if info, perr := msg.Peek(dg); perr == nil && msg.IsInform(info.PDUType) {
+			m.informMu.Lock()
+			m.lastInform = addr
+			m.informMu.Unlock()
+		}
 		m.handleClearTrap(dg)
 	}
 }
@@ -508,6 +588,10 @@ func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 	_, community, pduTLV, err := msg.SplitV1V2c(dg)
 	if err != nil {
 		return
+	}
+	ver := msg.Version2c
+	if info.Version == msg.Version1 {
+		ver = msg.Version1
 	}
 
 	var pdu []byte
@@ -540,16 +624,54 @@ func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 		return
 	}
 	flags := byte(0)
+	var corrID uint16
 	if info.PDUType == msg.PDUInformRequest {
+		// informs need the agent-side GetResponse relayed back to the
+		// device: track the pending inform by tunnel corrID.
+		corrID = uint16(m.corrID.Add(1))
+		ip := &informPending{
+			ver:         ver,
+			community:   string(community),
+			clientReqID: info.RequestID,
+			addr:        m.lastInformAddr(),
+		}
+		m.informMu.Lock()
+		m.informPend[corrID] = ip
+		m.informMu.Unlock()
 		flags = tunnel.FlagInform
 	}
-	if err := m.sess.Send(context.Background(), msgTypeNOTIF, flags, 0, out); err != nil {
+	if err := m.sess.Send(context.Background(), msgTypeNOTIF, flags, corrID, out); err != nil {
+		if flags != 0 {
+			m.informMu.Lock()
+			delete(m.informPend, corrID)
+			m.informMu.Unlock()
+		}
 		m.log.Warn("usm manager: trap tunnel send failed", zap.Error(err))
 		return
+	}
+	if flags != 0 {
+		// timeout: drop the pending inform after 15s
+		go func(id uint16) {
+			select {
+			case <-time.After(15 * time.Second):
+				m.informMu.Lock()
+				delete(m.informPend, id)
+				m.informMu.Unlock()
+			case <-m.stop:
+			}
+		}(corrID)
 	}
 	if m.met != nil {
 		m.met.NotifsRelayed.Inc()
 	}
+}
+
+// lastInformAddr returns the address of the most recent clear inform sender
+// (stashed by readTraps; nil when unknown).
+func (m *ManagerTranslator) lastInformAddr() net.Addr {
+	m.informMu.Lock()
+	defer m.informMu.Unlock()
+	return m.lastInform
 }
 
 // handleTunnelNotif validates an inbound v3 trap/inform (originated by the

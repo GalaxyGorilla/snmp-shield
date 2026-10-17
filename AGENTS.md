@@ -64,6 +64,7 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | PSK ciphersuite variety (`tunnel.psk_ciphersuites`: aes128-ccm-8 default, aes256-ccm-8, aes128-ccm, aes128-gcm, aes128-cbc; YAML + `--psk-ciphersuites` flag) | done (tested, unit + per-suite loopback handshakes + mismatch rejection) |
 | Notification filtering (`notifications.filter`: allow/deny OID prefixes; YAML + `--filter-oid`/`--filter-action` flags) | done (tested, unit + e2e: passthrough relay, USM gateway w/ gosnmp TrapListener; config validation) |
 | HA (manager tunnel failover `tunnel.dial_addrs` sticky walk; keepalive dead-peer detection 3 misses × 3×keepalive; session Done()/per-session cancel; USM cross-engine Report adoption; live `keepalive_secs`/`max_reconnect_backoff_secs` + Reconnects/TunnelUp metrics) | done (tested, failover e2e + dead-peer net.Pipe + config/flags tests; smoke + all 3 interop suites re-run green) |
+| USM two-proxy chain in-Go e2e tests (`internal/usm/translate_manager_e2e_test.go`: full manager+agent translator chain over a pipe shim, fake v2c agent; discovery/GET, trap relay+filter, agent-notif→sink, inform round trip) + **inform relay bug fix** (manager-side informs were never answered) | done (tested, -race -count 2) |
 
 ### Gateway modes (single proxy, no second proxy required)
 
@@ -397,6 +398,34 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
     anti-rollback is unchanged.
   - Metrics now wired: `Reconnects` counter + `TunnelUp` gauge set by
     the session on reconnect/drop.
+- **USM inform relay (bug fix, pinned by e2e)**: in usm-translate mode,
+  device-facing informs (PDUInformRequest arriving on the manager's clear
+  trap listener) are tracked in `ManagerTranslator.informPend` keyed by a
+  fresh tunnel corrID (the device's req-id is remembered), sent as NOTIF
+  frames with `tunnel.FlagInform`; the agent side answers via
+  `sendInformResponse` (RESP frame, FlagInform, corrID preserved); the
+  manager's `handleTunnelInformResp` matches the corrID, unwraps with
+  per-engine keys and rebuilds the clear v2c GetResponse for the device
+  (req-id echoed from the response, falling back to the remembered
+  client req-id). Before the fix the inform response was dropped by
+  `handleTunnelResponse` ("no pending request") and informs timed out
+  RFC-3411-style. The sender address is tracked best-effort
+  (`lastInform`, stashed by `readTraps` on inform detection) since UDP
+  gives no per-message reply address on the response path. The manager's
+  inbound notif path (`handleTunnelNotif`) additionally answers
+  agent-originated informs with a RESP FlagInform frame echoing the
+  inform's USM params (engine/boots/time/user) and req-id.
+- **Pipe-shim test lesson** (`translate_manager_e2e_test.go`): an
+  in-memory FrameSink shim must deliver frames via **blocking** channel
+  sends — non-blocking sends silently drop frames that arrive before the
+  peer's Run loop has subscribed (discovery then times out); the real
+  tunnel blocks, so the shim must too. Also: `ManagerTranslator.Run`
+  binds its own socket on `cfg.ListenAddr` — a test harness must pass
+  the wanted port in the config and use a separate `DialUDP` sender
+  socket (reading `mgr.conn` from the test goroutine races Run).
+  And: `msg.ParseV3`'s `m.PDU` is the ciphertext TLV (tag 0x04) for
+  priv-flagged messages until `unwrapV3` decrypts in place — check the
+  inner PDU type on the unwrapped `plain` TLV, not `m2.PDU[0]`.
 - **Notification filtering** (`internal/notifyfilter`, `notifications.filter`):
   one filter (action allow|deny + dotted OID prefixes) applies at the
   **clear-notification ingress points only** (the 6 `handleClearTrap`/

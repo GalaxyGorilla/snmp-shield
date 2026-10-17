@@ -46,6 +46,14 @@ type Dialer struct {
 	failIdx int
 }
 
+// currentIdx returns the sticky failover index (for endpoint-change
+// detection by the session layer).
+func (d *Dialer) currentIdx() int {
+	d.failMu.Lock()
+	defer d.failMu.Unlock()
+	return d.failIdx
+}
+
 // tlsConfig builds a mutual-TLS *tls.Config for the "tls" mode.
 func (d *Dialer) tlsConfig() (*tls.Config, error) {
 	cfg := &tls.Config{

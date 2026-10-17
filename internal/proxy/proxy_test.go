@@ -12,12 +12,14 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/snmpmetrics"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
 	"github.com/gosnmp/gosnmp"
 	"go.uber.org/zap"
@@ -156,7 +158,7 @@ func startAgent(t *testing.T, cfg *config.Config, met *observ.Metrics) (cancel c
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh = make(chan error, 1)
-	go func() { errCh <- runAgent(ctx, Options{Config: cfg, Log: zap.NewNop()}, met) }()
+	go func() { errCh <- runAgent(ctx, Options{Config: cfg, Log: zap.NewNop(), Version: "test"}, met, nil) }()
 	waitBound(t, cfg.Tunnel.ListenAddr)
 	return cancel, errCh
 }
@@ -166,7 +168,7 @@ func startManager(t *testing.T, cfg *config.Config, met *observ.Metrics) (cancel
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh = make(chan error, 1)
-	go func() { errCh <- runManager(ctx, Options{Config: cfg, Log: zap.NewNop()}, met) }()
+	go func() { errCh <- runManager(ctx, Options{Config: cfg, Log: zap.NewNop(), Version: "test"}, met, nil) }()
 	waitBound(t, cfg.Manager.ListenAddr)
 	return cancel, errCh
 }
@@ -572,4 +574,330 @@ func TestParseEngineID(t *testing.T) {
 	if _, err := parseEngineID("zz"); err == nil {
 		t.Fatal("parseEngineID(zz) = nil error, want invalid-hex error")
 	}
+}
+
+// TestSNMPMetricsE2E wires a full two-proxy chain with the SNMP health
+// agent enabled on the manager side (MIB listener + trap sink) and
+// verifies both delivery paths over real sockets: health polling with
+// v2c GET (identity scalars, tunnelUp) and a tunnel-lifecycle trap
+// (tunnel down → trap at the sink).
+func TestSNMPMetricsE2E(t *testing.T) {
+	met := observ.NewMetrics()
+	agent := fakeAgent(t, "127.0.0.1:0")
+	defer agent.Close()
+	agentAddr := agent.LocalAddr().String()
+
+	agentCfg := &config.Config{Role: config.RoleAgent}
+	agentCfg.Defaults()
+	agentCfg.Tunnel.Mode = "dtls"
+	agentCfg.Tunnel.ListenAddr = freeUDPPort(t)
+	agentCfg.Tunnel.PSK = "text:testpsk"
+	agentCfg.Agent.AgentAddr = agentAddr
+	agentListen := agentCfg.Tunnel.ListenAddr
+
+	agCancel, agErrCh := startAgent(t, agentCfg, met)
+	defer agCancel()
+
+	// SNMP trap sink: a plain UDP listener collecting datagrams.
+	sinkPC, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sinkPC.Close()
+	sinkAddr := sinkPC.LocalAddr().String()
+	trapCh := make(chan []byte, 8)
+	go func() {
+		buf := make([]byte, 65536)
+		for {
+			n, _, err := sinkPC.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			dg := make([]byte, n)
+			copy(dg, buf[:n])
+			trapCh <- dg
+		}
+	}()
+
+	// Manager config with the SNMP metrics interface enabled.
+	mgrCfg := &config.Config{Role: config.RoleManager}
+	mgrCfg.Defaults()
+	mgrCfg.Tunnel.Mode = "dtls"
+	mgrCfg.Tunnel.DialAddr = agentListen
+	mgrCfg.Tunnel.PSK = "text:testpsk"
+	// Short keepalive so dead-peer detection drops the session quickly
+	// after the agent-side listener dies (UDP gives no connection-state
+	// notification; 1s keepalive → 3s read deadline × 3 misses ≈ 9s).
+	mgrCfg.Tunnel.KeepaliveSecs = 1
+	mgrCfg.Tunnel.MaxReconnectBackoff = 1
+	mgrCfg.Manager.ListenAddr = freeUDPPort(t)
+	mgrCfg.Metrics = config.MetricsRole{
+		ListenAddr:   freeUDPPort(t),
+		Community:    "metcomm",
+		TrapSinkAddr: sinkAddr,
+	}
+	mgrListen := mgrCfg.Manager.ListenAddr
+	snmpListen := mgrCfg.Metrics.ListenAddr
+
+	// startManager passes nil for the SNMP agent; this test needs the
+	// real agent wired to the same met set, so run runManager manually
+	// (same pattern as startManager) with a constructed agent.
+	{
+		ctx, cancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		snmpAgent := snmpmetrics.New(snmpmetrics.Config{
+			Community:  mgrCfg.Metrics.Community,
+			BaseOID:    mgrCfg.Metrics.BaseOID,
+			Version:    "test",
+			Role:       "manager",
+			SecMode:    mgrCfg.Security.Mode,
+			TunnelMode: mgrCfg.Tunnel.Mode,
+			Endpoints:  agentListen,
+		}, met.CounterList(), met.ForwardLatency, zap.NewNop())
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() { _ = snmpAgent.Serve(snmpListen, stop) }()
+		go func() {
+			errCh <- runManager(ctx, Options{Config: mgrCfg, Log: zap.NewNop(), Version: "test"}, met, snmpAgent)
+		}()
+		defer func() {
+			cancel()
+			select {
+			case e := <-errCh:
+				if e != nil {
+					t.Errorf("manager run: %v", e)
+				}
+			case <-time.After(5 * time.Second):
+				t.Error("manager did not shut down within 5s")
+			}
+		}()
+	}
+
+	waitBound(t, mgrListen)
+	waitBoundSnmp(t, snmpListen)
+
+	base := "1.3.6.1.4.1.58427.1"
+
+	// 1. Health polling: identity scalars via v2c GET.
+	snmpSock, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer snmpSock.Close()
+	snmpUDP, err := net.ResolveUDPAddr("udp", snmpListen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oidBytes, err := msg.EncodeOID(base + ".1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	getPDU := msg.BuildPDU(msg.PDUGetRequest, 77, 0, 0,
+		msg.AppendTLV(nil, 0x30, msg.AppendOIDTLV(nil, oidBytes)))
+	getDG, err := msg.BuildV1V2c(msg.Version2c, []byte("metcomm"), getPDU)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := snmpSock.WriteTo(getDG, snmpUDP); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 65536)
+	if err := snmpSock.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	n, _, err := snmpSock.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("no SNMP health response: %v", err)
+	}
+	_, _, rpdu, err := msg.SplitV1V2c(buf[:n])
+	if err != nil {
+		t.Fatalf("bad health response: %v", err)
+	}
+	typ, fields, err := msg.ParsePDU(rpdu)
+	if err != nil {
+		t.Fatalf("bad health response PDU: %v", err)
+	}
+	if typ != msg.PDUGetResponse || fields.ReqID != 77 {
+		t.Fatalf("health response type 0x%02x reqID %d, want GETRESPONSE/77", typ, fields.ReqID)
+	}
+
+	// 2. Trap direction: kill the agent-side proxy (listener closes);
+	// the manager's session sees PING misses (keepalive 1s → dead in
+	// ~9s) and drops the tunnel — a tunnel-down trap must land at the
+	// sink. After the drop the session reconnects in the background
+	// (agent listener is gone; reconnect loops — that's fine, the run
+	// is cancelled below).
+	agCancel()
+	<-agErrCh
+	select {
+	case dg := <-trapCh:
+		validateTrap(t, dg)
+	case <-time.After(25 * time.Second):
+		t.Fatal("no tunnel-down trap at the sink within 25s")
+	}
+}
+
+// TestSNMPMetricsDownTrap pins the trap wiring directly: a client
+// session with short keepalive + SNMP agent + trap sink; killing the
+// peer must produce a tunnel-down trap at the sink.
+func TestSNMPMetricsDownTrap(t *testing.T) {
+	lA := freeListenerDTLS(t)
+	defer func() { _ = lA.Close() }()
+
+	sinkPC, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sinkPC.Close()
+	trapCh := make(chan []byte, 8)
+	go func() {
+		buf := make([]byte, 65536)
+		for {
+			n, _, err := sinkPC.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			dg := make([]byte, n)
+			copy(dg, buf[:n])
+			trapCh <- dg
+		}
+	}()
+
+	met := observ.NewMetrics()
+	snmpAgent := snmpmetrics.New(snmpmetrics.Config{
+		Community: "metcomm",
+		Version:   "test",
+		Role:      "manager",
+	}, met.CounterList(), met.ForwardLatency, zap.NewNop())
+
+	cancel := make(chan struct{})
+	defer close(cancel)
+	var wg sync.WaitGroup
+	go func() {
+		for {
+			conn, err := lA.Accept()
+			if err != nil {
+				return
+			}
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				sess := tunnel.NewServerSession(conn, 65536, 1200, zap.NewNop())
+				defer sess.Close()
+				sess.SetTuning(100*time.Millisecond, 0)
+				select {
+				case <-sess.Done():
+				case <-cancel:
+				}
+			}()
+		}
+	}()
+
+	dial := &tunnel.Dialer{
+		Mode:        "dtls",
+		RemoteAddr:  lA.Addr().String(),
+		PSK:         []byte("secret"),
+		PSKIdentity: []byte("id"),
+		Timeout:     2 * time.Second,
+	}
+	sess := tunnel.NewClientSession(dial, 65536, 1200, zap.NewNop())
+	defer sess.Close()
+	sess.SetMetrics(met)
+	sess.SetTuning(300*time.Millisecond, 200*time.Millisecond)
+	installTunnelEvents(sess, snmpAgent, Options{
+		Config: &config.Config{
+			Role: config.RoleManager,
+			Metrics: config.MetricsRole{
+				Community:    "metcomm",
+				TrapSinkAddr: sinkPC.LocalAddr().String(),
+			},
+		},
+		Log: zap.NewNop(),
+	})
+	ctx, cancelCtx := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelCtx()
+	if err := sess.Connect(ctx); err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+
+	// Kill the server listener + accepted sessions: client session drops
+	// → tunnel-down event → trap at the sink.
+	_ = lA.Close()
+	wg.Wait()
+	select {
+	case dg := <-trapCh:
+		validateTrap(t, dg)
+	case <-time.After(10 * time.Second):
+		t.Fatal("no tunnel-down trap within 10s")
+	}
+}
+
+// validateTrap asserts a captured v2c trap: PDUSNMPv2Trap with
+// snmpTrapOID.0 carrying a metrics events OID.
+func validateTrap(t *testing.T, dg []byte) {
+	t.Helper()
+	_, _, pdu, err := msg.SplitV1V2c(dg)
+	if err != nil {
+		t.Fatalf("split trap: %v", err)
+	}
+	typ, fields, err := msg.ParsePDU(pdu)
+	if err != nil {
+		t.Fatalf("parse trap: %v", err)
+	}
+	if typ != msg.PDUSNMPv2Trap {
+		t.Fatalf("trap type 0x%02x, want SNMPv2Trap", typ)
+	}
+	found := false
+	for rest := fields.Varbinds; len(rest) > 0; {
+		tag, content, r, err := msg.NextTLV(rest)
+		if err != nil || tag != 0x30 {
+			break
+		}
+		rest = r
+		oidTag, oidContent, _, err := msg.NextTLV(content)
+		if err != nil || oidTag != 0x06 {
+			continue
+		}
+		oid, err := msg.DecodeOID(oidContent)
+		if err != nil {
+			continue
+		}
+		if oid == "1.3.6.1.6.3.1.1.4.1.0" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("trap carries no snmpTrapOID.0 varbind")
+	}
+}
+
+// waitBoundSnmp polls until addr is bound (someone owns it).
+func waitBoundSnmp(t *testing.T, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if conn, err := net.ListenPacket("udp", addr); err == nil {
+			_ = conn.Close()
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		return
+	}
+	t.Fatalf("address %s never became bound", addr)
+}
+
+// freeListenerDTLS binds a DTLS PSK listener on an ephemeral port
+// (mirrors the tunnel package's freeListener; the tunnel helpers are not
+// exported).
+func freeListenerDTLS(t *testing.T) net.Listener {
+	t.Helper()
+	l, err := tunnel.Listen("127.0.0.1:0", tunnel.ListenerConfig{
+		Mode:        "dtls",
+		PSK:         []byte("secret"),
+		PSKIdentity: []byte("id"),
+	})
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	return l
 }

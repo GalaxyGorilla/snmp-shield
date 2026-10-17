@@ -167,6 +167,24 @@ func parseUint(s string) (uint64, error) {
 	return v, nil
 }
 
+// NextTLV splits the first TLV off buf and returns its tag, content and
+// the remaining bytes. Used to walk varbind sequences and similar TLV
+// streams.
+func NextTLV(buf []byte) (tag byte, content, rest []byte, err error) {
+	if len(buf) < 2 {
+		return 0, nil, nil, errShortTLV
+	}
+	tag = buf[0]
+	l, rest, err := berLen(buf[1:])
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	if len(rest) < l {
+		return 0, nil, nil, errBadTLV
+	}
+	return tag, rest[:l], rest[l:], nil
+}
+
 // DecodeOID converts raw BER sub-identifier bytes (as produced by
 // EncodeOID, or extracted from a varbind) to a dotted OID string. The
 // combined first arc (40*x+y) is split back into x.y.

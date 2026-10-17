@@ -57,6 +57,15 @@ type Session struct {
 	// idleMisses counts consecutive idle read timeouts for dead-peer
 	// detection. Guarded by mu.
 	idleMisses int
+
+	// onEvent is the optional lifecycle event callback (tunnel up/down,
+	// failover). Set via SetEventFunc; called from arbitrary goroutines,
+	// so implementations must be safe for concurrent use.
+	onEvent func(Event)
+
+	// lastFailIdx is the last seen dialer failover index (-1 = none yet),
+	// used to detect endpoint switches (EventFailover). Guarded by mu.
+	lastFailIdx int
 }
 
 // Session tuning: the legacy hardcoded values.
@@ -67,32 +76,57 @@ const (
 	maxIdleMisses        = 3
 )
 
+// Event is a tunnel session lifecycle event delivered to the callback
+// registered via SetEventFunc.
+type Event struct {
+	Kind EventKind
+	// Endpoint is the peer address involved (tunnel-up/failover: the
+	// dialed endpoint; tunnel-down: the dropped peer when known).
+	Endpoint string
+}
+
+// EventKind enumerates the session lifecycle events.
+type EventKind uint8
+
+const (
+	// EventTunnelUp fires after a transport connection was established.
+	EventTunnelUp EventKind = iota
+	// EventTunnelDown fires when the transport connection was lost
+	// (error, dead peer, GOAWAY) or the session was closed.
+	EventTunnelDown
+	// EventFailover fires when a reconnect pinned a DIFFERENT endpoint
+	// than the previously active one (HA failover happened).
+	EventFailover
+)
+
 // NewClientSession creates a client (dialing) session. It connects lazily
 // on first use and reconnects with backoff on errors.
 func NewClientSession(dial *Dialer, maxPayload, chunk int, log *zap.Logger) *Session {
 	return &Session{
-		dial:       dial,
-		maxPayload: maxPayload,
-		chunk:      chunk,
-		log:        log,
-		chunker:    NewChunker(maxPayload),
-		subs:       make(map[uint8]map[chan *Frame]struct{}),
-		readStop:   make(chan struct{}),
-		doneCh:     make(chan struct{}),
+		dial:        dial,
+		maxPayload:  maxPayload,
+		chunk:       chunk,
+		log:         log,
+		chunker:     NewChunker(maxPayload),
+		subs:        make(map[uint8]map[chan *Frame]struct{}),
+		readStop:    make(chan struct{}),
+		doneCh:      make(chan struct{}),
+		lastFailIdx: -1,
 	}
 }
 
 // NewServerSession wraps one accepted transport connection into a Session.
 func NewServerSession(conn net.Conn, maxPayload, chunk int, log *zap.Logger) *Session {
 	s := &Session{
-		conn:       conn,
-		maxPayload: maxPayload,
-		chunk:      chunk,
-		log:        log,
-		chunker:    NewChunker(maxPayload),
-		subs:       make(map[uint8]map[chan *Frame]struct{}),
-		readStop:   make(chan struct{}),
-		doneCh:     make(chan struct{}),
+		conn:        conn,
+		maxPayload:  maxPayload,
+		chunk:       chunk,
+		log:         log,
+		chunker:     NewChunker(maxPayload),
+		subs:        make(map[uint8]map[chan *Frame]struct{}),
+		readStop:    make(chan struct{}),
+		doneCh:      make(chan struct{}),
+		lastFailIdx: -1,
 	}
 	s.startReadLoop()
 	return s
@@ -113,6 +147,30 @@ func (s *Session) SetTuning(keepalive, maxBackoff time.Duration) {
 // SetMetrics attaches the metrics set used for Reconnects/TunnelUp.
 func (s *Session) SetMetrics(met *observ.Metrics) {
 	s.met = met
+}
+
+// SetEventFunc registers the lifecycle event callback (tunnel up/down,
+// failover). Called from arbitrary goroutines; f must be safe for
+// concurrent use. nil disables callbacks.
+func (s *Session) SetEventFunc(f func(Event)) {
+	s.mu.Lock()
+	s.onEvent = f
+	s.mu.Unlock()
+}
+
+// emit invokes the event callback when one is registered. The endpoint
+// is read from the current connection (best effort).
+func (s *Session) emit(kind EventKind) {
+	s.mu.Lock()
+	f := s.onEvent
+	var ep string
+	if s.conn != nil {
+		ep = s.conn.RemoteAddr().String()
+	}
+	s.mu.Unlock()
+	if f != nil {
+		f(Event{Kind: kind, Endpoint: ep})
+	}
 }
 
 // Done returns a channel closed when the session is closed or its
@@ -267,10 +325,10 @@ func (s *Session) current() net.Conn {
 
 // dropConn discards the current connection after an error.
 func (s *Session) dropConn(err error) {
+	s.mu.Lock()
 	if s.log != nil {
 		s.log.Warn("tunnel connection error", zap.Error(err))
 	}
-	s.mu.Lock()
 	if s.conn != nil {
 		_ = s.conn.Close()
 		s.conn = nil
@@ -279,6 +337,7 @@ func (s *Session) dropConn(err error) {
 	if s.met != nil {
 		s.met.TunnelUp.Set(0)
 	}
+	s.emit(EventTunnelDown)
 }
 
 // reconnect dials a new transport connection (client sessions).
@@ -302,6 +361,9 @@ func (s *Session) reconnect(ctx context.Context) error {
 		}
 		conn, err := s.dial.Dial(ctx, s.dial.RemoteAddr)
 		if err == nil {
+			// Failover detection: the dialer pins its sticky index; a
+			// change means the endpoint switched (HA failover).
+			failedOver := s.failoverChanged()
 			s.mu.Lock()
 			if s.closed {
 				s.mu.Unlock()
@@ -315,6 +377,10 @@ func (s *Session) reconnect(ctx context.Context) error {
 				s.met.Reconnects.Inc()
 				s.met.TunnelUp.Set(1)
 			}
+			if failedOver {
+				s.emit(EventFailover)
+			}
+			s.emit(EventTunnelUp)
 			return nil
 		}
 		if s.log != nil {
@@ -337,6 +403,26 @@ func (s *Session) startReadLoop() {
 	s.readLoopOnce.Do(func() {
 		go s.readLoop()
 	})
+}
+
+// failoverChanged reports whether the dialer's sticky failover index
+// differs from the last recorded one, updating the record. Always false
+// (and no state) for single-endpoint or server sessions.
+func (s *Session) failoverChanged() bool {
+	if s.dial == nil || len(s.dial.RemoteAddrs) == 0 {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	idx := s.dial.currentIdx()
+	if s.lastFailIdx != idx {
+		// The very first successful dial (lastFailIdx unset, -1) is not
+		// a failover.
+		first := s.lastFailIdx < 0
+		s.lastFailIdx = idx
+		return !first
+	}
+	return false
 }
 
 // readLoop reads frames from the connection and dispatches them.

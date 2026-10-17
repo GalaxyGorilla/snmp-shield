@@ -86,6 +86,19 @@ func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{})
 }
 
+// CounterList returns the counters in the fixed SNMP MIB row order
+// (.20.1..n): frames sent/received, bytes sent/received, requests
+// forwarded/errors, notifications relayed/filtered, drops, reconnects.
+// The order is a compatibility contract for the SNMP metrics MIB —
+// never reorder.
+func (m *Metrics) CounterList() []prometheus.Counter {
+	return []prometheus.Counter{
+		m.FramesSent, m.FramesRecv, m.BytesSent, m.BytesRecv,
+		m.ReqForwarded, m.ReqErrors, m.NotifsRelayed, m.NotifsFiltered,
+		m.DropTotal, m.Reconnects,
+	}
+}
+
 // ServeMetrics serves /metrics on addr until the process exits. It is
 // intended to run in its own goroutine.
 func ServeMetrics(addr string, handler http.Handler, log *zap.Logger) *http.Server {

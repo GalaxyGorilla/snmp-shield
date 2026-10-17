@@ -107,6 +107,10 @@ type cliFlags struct {
 	trapSink      *string
 	filterAction  *string
 	filterOID     *[]string
+	snmpListen    *string
+	snmpCommunity *string
+	snmpBaseOID   *string
+	snmpTrapSink  *string
 	jsonOut       *bool
 	selftestProbe *bool
 }
@@ -151,6 +155,12 @@ func register(fs *pflag.FlagSet) cliFlags {
 	c.filterAction = fs.String("filter-action", "allow", "notification filter action: allow or deny")
 	c.filterOID = fs.StringArray("filter-oid", nil, "notification filter OID prefix (repeatable, e.g. --filter-oid 1.3.6.1.4.1.8072)")
 
+	// direct-flags mode: SNMP metrics interface (health MIB + event traps)
+	c.snmpListen = fs.String("metrics-snmp-listen", "", "SNMP health MIB listen address ip:port (GET/GETNEXT; enables the SNMP metrics agent)")
+	c.snmpCommunity = fs.String("metrics-snmp-community", "public", "SNMP community for the health MIB and event traps")
+	c.snmpBaseOID = fs.String("metrics-snmp-base-oid", ".1.3.6.1.4.1.58427.1", "SNMP metrics MIB base OID (enterprise OID)")
+	c.snmpTrapSink = fs.String("metrics-snmp-trap-sink", "", "trap sink ip:port for tunnel lifecycle events (tunnel up/down, HA failover)")
+
 	// validate/selftest only
 	c.jsonOut = fs.Bool("json", false, "validate: machine-readable JSON output (for tooling / web UIs)")
 	c.selftestProbe = fs.Bool("probe", true, "selftest: run network probes (tunnel dial / SNMP GET); --probe=false checks config and local files only")
@@ -179,6 +189,10 @@ func (c cliFlags) opts() flagsOpts {
 		trapSink:     *c.trapSink,
 		filterAction: *c.filterAction,
 		filterOids:   *c.filterOID,
+		snmpListen:   *c.snmpListen,
+		snmpComm:     *c.snmpCommunity,
+		snmpBaseOID:  *c.snmpBaseOID,
+		snmpTrapSink: *c.snmpTrapSink,
 	}
 }
 
@@ -233,6 +247,7 @@ func runRole(role string, args []string) int {
 		Config:      cfg,
 		MetricsAddr: *c.metricsAddr,
 		Log:         log,
+		Version:     version,
 	})
 	if err != nil {
 		log.Error("proxy exited", zap.Error(err))
@@ -263,6 +278,21 @@ type flagsOpts struct {
 	trapSink     string
 	filterAction string
 	filterOids   []string
+	snmpListen   string
+	snmpComm     string
+	snmpBaseOID  string
+	snmpTrapSink string
+}
+
+// snmpMetrics builds the config Metrics section from flags (zero value
+// when none of the --metrics-snmp-* flags are set beyond defaults).
+func snmpMetrics(o flagsOpts) config.MetricsRole {
+	return config.MetricsRole{
+		ListenAddr:   o.snmpListen,
+		Community:    o.snmpComm,
+		BaseOID:      o.snmpBaseOID,
+		TrapSinkAddr: o.snmpTrapSink,
+	}
 }
 
 // trapFilter builds the config Notifications filter from flags (nil when
@@ -351,6 +381,7 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 		} else if filt != nil {
 			cfg.Notifications = config.Notifications{Filter: filt}
 		}
+		cfg.Metrics = snmpMetrics(o)
 		cfg.Defaults()
 		if err := cfg.Validate(); err != nil {
 			return nil, err
@@ -433,6 +464,7 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 	} else if filt != nil {
 		cfg.Notifications = config.Notifications{Filter: filt}
 	}
+	cfg.Metrics = snmpMetrics(o)
 	cfg.Defaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -484,6 +516,14 @@ Other commands:
 Notification filtering (flags mode): --filter-oid <prefix> (repeatable)
 with --filter-action allow|deny drops notifications whose trap OID does
 not pass the filter before they are relayed.
+
+SNMP metrics interface (flags mode): --metrics-snmp-listen <ip:port>
+serves a small read-only SNMPv2c health MIB (GET/GETNEXT: identity,
+tunnel state, counters) and --metrics-snmp-trap-sink <ip:port> emits
+v2c traps on tunnel lifecycle changes (up/down, HA failover).
+--metrics-snmp-community (default "public") and
+--metrics-snmp-base-oid (default .1.3.6.1.4.1.58427.1) apply to both.
+Prometheus metrics (--metrics-addr) stay available alongside.
 
 The manager instance listens for clear SNMP from managers and dials the
 secured tunnel; the agent instance listens on the tunnel and forwards to

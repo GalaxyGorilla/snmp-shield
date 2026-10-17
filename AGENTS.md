@@ -78,6 +78,7 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | Makefile (`make build/test/vet/release`), systemd units (`deploy/*.service`: hardening, CAP_NET_BIND_SERVICE, StateDirectory), examples directory (6 copy-paste walkthroughs), README rewrite | done |
 | Goroutine-leak regression test (`internal/tunnel/leak_test.go`: 30 connect/exchange/close cycles over real PSK-DTLS loopback, goroutine count must return to baseline; server side keyed on `Session.Done()` + production `SetTuning` so there is no test-end accounting noise) | done (tested, -race -count 8 stable: before=after=5) |
 | SBOM + automated vuln-DB comparison (`make sbom` → syft SPDX+CycloneDX into `dist/`; `make vulnscan` → `grype db update` + `grype --fail-on high` vs NVD/GHSA/OSV; `scripts/sbom.sh --sbom-only`) + x/crypto v0.48.0 → v0.58.0 upgrade clearing all Critical/High advisories (go directive 1.24 → 1.26, mandatory for x/crypto ≥ 0.56) | done (tested, `make vulnscan` rc=0 — only residual GO-2026-5932 is Unknown severity/unfixed deprecated-openpgp advisory, below the gate; direct symbol-precise binary scan: 0 findings) |
+| SNMP metrics interface (`internal/snmpmetrics`: read-only SNMPv2c health MIB GET/GETNEXT on `metrics.listen_addr` + v2c tunnel-lifecycle traps to `metrics.trap_sink_addr`; `Session.SetEventFunc` events, all roles; Prometheus stays alongside) | done (tested, unit tests + e2e: two-proxy chain polling + tunnel-down trap pinned) |
 
 ### Gateway modes (single proxy, no second proxy required)
 
@@ -231,10 +232,11 @@ internal/cache/           engine boots/time cache (anti-rollback, persistence)
 internal/discovery/       engineID discovery per RFC 3414
 internal/securitylevel/   securityLevel constants/validation
 internal/observ/          zap logging + Prometheus metrics
+internal/snmpmetrics/     SNMP health MIB agent + tunnel event traps
 ```
 
 (Directories with code: config, observ, tunnel, msg, passthrough, proxy,
-usm, tsm, cache, notifyfilter, cmd/snmp-proxy. Still empty, reserved:
+usm, tsm, cache, notifyfilter, snmpmetrics, cmd/snmp-proxy. Still empty, reserved:
 discovery (discovery logic lives in internal/usm translate_manager.go),
 securitylevel. Also: configs/ example YAML (manager/agent × psk/usm/tsm +
 gateway-usm + gateway-tsm + gateway-usm-manager), scripts/gen-certs.sh
@@ -305,7 +307,10 @@ preferred first; agent role: single listen address), `--psk-identity`,
 aes256-ccm-8 | aes128-ccm | aes128-gcm | aes128-cbc; default
 aes128-ccm-8), `--insecure`, `--security` (usm-translate|passthrough),
 `--trap-listen`, `--trap-sink`, `--filter-oid` (repeatable OID prefix) +
-`--filter-action` (allow|deny; notification filtering, see §7).
+`--filter-action` (allow|deny; notification filtering, see §7),
+`--metrics-snmp-listen` / `--metrics-snmp-trap-sink` /
+`--metrics-snmp-community` / `--metrics-snmp-base-oid` (SNMP metrics
+interface, see §7).
 Both sides must share `--psk`/`--auth-pass`/`--priv-pass` and at least
 one `--psk-ciphersuites` entry. Default security
 in flags mode is usm-translate (user 'proxy', SHA, AES).
@@ -694,6 +699,39 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   keeping existing call sites compiling. Dropped notifications increment
   `snmp_proxy_notifications_filtered_total`. Validation runs in
   `Config.Validate` before the gateway branch (which returns early).
+- **SNMP metrics interface** (`internal/snmpmetrics`, `metrics.` config
+  section): every role can serve a small read-only SNMPv2c health agent
+  (`metrics.listen_addr`, GET/GETNEXT only, community-gated; wrong
+  community and malformed datagrams are silently dropped) and emit v2c
+  event traps (`metrics.trap_sink_addr`). MIB layout (default base
+  `.1.3.6.1.4.1.58427.1`, configurable `metrics.base_oid`): .1 product,
+  .2 version, .3 role, .4 securityMode, .5 tunnelMode, .6 tunnelEndpoints,
+  .7 uptimeSecs, .10 tunnelUp, .11 tunnelEndpoint, .20.<n> counters
+  (1-based rows in `Metrics.CounterList()` order — a compatibility
+  contract, never reorder), .30 latencyCount, .31 latencySum. Events
+  subtree (traps): .2.1 tunnel up (varbind-less distinction: .2.3 is sent
+  instead when the event is an HA failover), .2.2 tunnel down.
+  Wiring: `tunnel.Session.SetEventFunc` (tunnel-up/down/failover events,
+  emitted from reconnect/dropConn; failover = sticky dialer index changed)
+  → `installTunnelEvents` (proxy.go) updates the scalars and sends the
+  trap; agent role hooks every accepted server session. Traps are
+  fire-and-forget v2c (sysUpTime.0 + snmpTrapOID.0), sent from the MIB
+  listener socket when it is bound, else from a dedicated ephemeral
+  socket (trap-only configuration). Prometheus (--metrics-addr) stays
+  available alongside. Gotchas learned building it:
+  (a) **lexicographic OID comparison is wrong for GETNEXT** — dotted
+  strings sort ".10" before ".7"; the walk must compare arc-by-arc
+  numerically (`parseArcs`/`arcsAfter`).
+  (b) **a nil *net.UDPConn inside a net.PacketConn interface is
+  non-nil** — the trap sender's `currentConn()` must nil-check the
+  typed pointer, not the interface, or WriteTo panics on a nil receiver.
+  (c) dotted OID strings carry a leading dot in accessor form but
+  `msg.EncodeOID` rejects it — normalize (TrimPrefix) before encoding;
+  the config default base OID is dotted-with-leading-dot while raw flag
+  values may lack it, so both trap-OID joining and the MIB agent
+  normalize defensively.
+  (d) prometheus instruments expose values via `Write(*dto.Metric)`
+  (Collect takes a channel — wrong API).
 - gosnmp quirks (interop oracle; learned the hard way):
   - gosnmp encrypts the **full scopedPDU TLV** (outer SEQUENCE header
     included) and expects the same from us — `msg.BuildV3` mirrors this.

@@ -330,6 +330,12 @@ func appendUintTLV(dst []byte, tag byte, v uint32) []byte {
 	return AppendTLV(dst, tag, be[i:])
 }
 
+// AppendTimeTicks appends a TimeTicks TLV (APPLICATION 3, tag 0x43) with
+// minimal big-endian content.
+func AppendTimeTicks(dst []byte, v uint32) []byte {
+	return appendUintTLV(dst, 0x43, v)
+}
+
 // berOctetStringLike parses a TLV with the given tag, treating the content
 // as opaque bytes (works for OCTET STRING, OID, IpAddress, TimeTicks...).
 func berOctetStringLike(tag byte, buf []byte) ([]byte, []byte, error) {

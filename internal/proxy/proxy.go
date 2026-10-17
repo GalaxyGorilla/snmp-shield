@@ -20,6 +20,7 @@ import (
 	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/passthrough"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/snmpmetrics"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/tsm"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/usm"
@@ -31,6 +32,99 @@ type Options struct {
 	Config      *config.Config
 	MetricsAddr string
 	Log         *zap.Logger
+	// Version is the product version string surfaced in the SNMP health
+	// MIB (defaults to "dev" when empty).
+	Version string
+}
+
+// SNMP event trap OIDs, relative to the metrics base (base + ".2.x").
+const (
+	trapTunnelUpOID   = ".2.1"
+	trapTunnelDownOID = ".2.2"
+	trapFailoverOID   = ".2.3"
+)
+
+// newSNMPMetricsAgent builds the optional SNMP health agent from the
+// metrics config. Returns nil when neither the MIB listener nor a trap
+// sink is configured.
+func newSNMPMetricsAgent(opts Options, met *observ.Metrics) *snmpmetrics.Agent {
+	m := opts.Config.Metrics
+	if m.ListenAddr == "" && m.TrapSinkAddr == "" {
+		return nil
+	}
+	ver := opts.Version
+	if ver == "" {
+		ver = "dev"
+	}
+	return snmpmetrics.New(snmpmetrics.Config{
+		Community:  m.Community,
+		BaseOID:    m.BaseOID,
+		Version:    ver,
+		Role:       string(opts.Config.Role),
+		SecMode:    opts.Config.Security.Mode,
+		TunnelMode: opts.Config.Tunnel.Mode,
+		Endpoints:  strings.Join(opts.Config.DialEndpoints(), ","),
+	}, met.CounterList(), met.ForwardLatency, opts.Log)
+}
+
+// serveSNMPMetrics runs the SNMP MIB listener until stop is closed.
+func serveSNMPMetrics(agent *snmpmetrics.Agent, opts Options, stop <-chan struct{}) {
+	if agent == nil || opts.Config.Metrics.ListenAddr == "" {
+		return
+	}
+	go func() {
+		if err := agent.Serve(opts.Config.Metrics.ListenAddr, stop); err != nil {
+			opts.Log.Error("snmp metrics agent", zap.Error(err))
+		}
+	}()
+}
+
+// installTunnelEvents hooks tunnel lifecycle events into the SNMP
+// metrics agent: scalars (tunnelUp/endpoint) update on every event and
+// a v2c trap goes to Metrics.TrapSinkAddr when one is configured. Safe
+// to call with a nil agent.
+func installTunnelEvents(sess *tunnel.Session, agent *snmpmetrics.Agent, opts Options) {
+	if agent == nil || sess == nil {
+		return
+	}
+	m := opts.Config.Metrics
+	var sink net.Addr
+	if m.TrapSinkAddr != "" {
+		if addr, err := net.ResolveUDPAddr("udp", m.TrapSinkAddr); err == nil {
+			sink = addr
+		} else {
+			opts.Log.Warn("snmp metrics trap sink unresolvable", zap.Error(err))
+		}
+	}
+	sess.SetEventFunc(func(ev tunnel.Event) {
+		up := ev.Kind == tunnel.EventTunnelUp
+		failedOver := ev.Kind == tunnel.EventFailover
+		agent.SetTunnelUp(up, ev.Endpoint)
+		if sink == nil {
+			return
+		}
+		oid := trapTunnelUpOID
+		switch ev.Kind {
+		case tunnel.EventTunnelUp:
+			if failedOver {
+				oid = trapFailoverOID
+			}
+		case tunnel.EventFailover:
+			oid = trapFailoverOID
+		case tunnel.EventTunnelDown:
+			oid = trapTunnelDownOID
+		}
+		// BaseOID arrives dotted with a leading dot from config; the
+		// trap OID is relative and also dotted — join without doubling.
+		base := strings.TrimSuffix(strings.TrimPrefix(m.BaseOID, "."), ".")
+		if base == "" {
+			base = "1.3.6.1.4.1.58427.1"
+		}
+		trapOID := base + "." + strings.TrimPrefix(oid, ".")
+		if err := agent.SendTrap(trapOID, sink); err != nil && opts.Log != nil {
+			opts.Log.Debug("snmp metrics trap", zap.Error(err))
+		}
+	})
 }
 
 // Run executes the configured role until SIGINT/SIGTERM.
@@ -42,14 +136,20 @@ func Run(opts Options) error {
 		defer observ.ShutdownMetrics(metSrv)
 	}
 
+	// Optional SNMP health MIB + event traps (all roles).
+	snmpAgent := newSNMPMetricsAgent(opts, met)
+	snmpStop := make(chan struct{})
+	defer close(snmpStop)
+	serveSNMPMetrics(snmpAgent, opts, snmpStop)
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	switch opts.Config.Role {
 	case config.RoleManager:
-		return runManager(ctx, opts, met)
+		return runManager(ctx, opts, met, snmpAgent)
 	case config.RoleAgent:
-		return runAgent(ctx, opts, met)
+		return runAgent(ctx, opts, met, snmpAgent)
 	case config.RoleGateway:
 		return runGateway(ctx, opts, met)
 	default:
@@ -59,7 +159,7 @@ func Run(opts Options) error {
 
 // runManager runs the manager-side instance: it dials the tunnel and
 // serves the clear manager leg.
-func runManager(ctx context.Context, opts Options, met *observ.Metrics) error {
+func runManager(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent *snmpmetrics.Agent) error {
 	psk, err := opts.Config.PSKBytes()
 	if err != nil {
 		return err
@@ -90,6 +190,7 @@ func runManager(ctx context.Context, opts Options, met *observ.Metrics) error {
 	if err := sess.Connect(ctx); err != nil {
 		opts.Log.Warn("tunnel initial connect failed; will retry in background", zap.Error(err))
 	}
+	installTunnelEvents(sess, snmpAgent, opts)
 
 	switch opts.Config.Security.Mode {
 	case "usm-translate":
@@ -141,7 +242,7 @@ func runManagerUSM(ctx context.Context, opts Options, met *observ.Metrics, sess 
 
 // runAgent runs the agent-side instance: it listens on the tunnel and
 // serves the clear agent leg.
-func runAgent(ctx context.Context, opts Options, met *observ.Metrics) error {
+func runAgent(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent *snmpmetrics.Agent) error {
 	psk, err := opts.Config.PSKBytes()
 	if err != nil {
 		return err
@@ -223,6 +324,7 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics) error {
 				scancel()
 			}()
 			sess.SetTuning(opts.Config.Keepalive(), 0)
+			installTunnelEvents(sess, snmpAgent, opts)
 			var rerr error
 			if usmMode {
 				var tr *usm.AgentTranslator

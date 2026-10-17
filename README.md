@@ -163,6 +163,14 @@ with `validate --json`, and offer a "test connection" button backed by
 - **Metrics** — Prometheus endpoint via `--metrics-addr`: tunnel
   frames/bytes, forwarded requests, errors, notifications relayed/
   filtered/dropped, reconnects, tunnel-up gauge, forwarding latency.
+- **SNMP metrics interface** — every role can expose its health over
+  SNMP itself: `metrics.listen_addr` (or `--metrics-snmp-listen`)
+  serves a small read-only SNMPv2c agent (GET/GETNEXT: identity,
+  tunnel state, counters) and `metrics.trap_sink_addr` (or
+  `--metrics-snmp-trap-sink`) emits v2c traps on tunnel lifecycle
+  changes (up/down, HA failover). `metrics.community` (default
+  "public") and `metrics.base_oid` apply to both. Prometheus stays
+  available alongside.
 
 ## Operations
 

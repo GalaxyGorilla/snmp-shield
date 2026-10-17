@@ -13,4 +13,6 @@ var (
 	errBadV3     = errors.New("msg: malformed SNMPv3 message")
 	errBadUSM    = errors.New("msg: malformed USM security parameters")
 	errShortPriv = errors.New("msg: privacy parameters too short")
+	errShortTLV  = errors.New("msg: TLV truncated")
+	errBadTLV    = errors.New("msg: TLV length exceeds buffer")
 )

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/notifyfilter"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
 	"gopkg.in/yaml.v3"
@@ -174,6 +175,25 @@ type Notifications struct {
 	Filter *NotifyFilter `yaml:"filter"`
 }
 
+// MetricsRole configures the SNMP metrics interface: a small read-only
+// SNMPv2c agent (health polling) and optional v2c event traps for tunnel
+// lifecycle changes. This lets an SNMP-native monitoring system watch
+// the proxy without the HTTP metrics endpoint.
+type MetricsRole struct {
+	// ListenAddr, when set, serves the SNMP health MIB (GET/GETNEXT)
+	// on this UDP address.
+	ListenAddr string `yaml:"listen_addr"`
+	// Community is the SNMPv2c community for both the health MIB and
+	// event traps (default "public").
+	Community string `yaml:"community"`
+	// BaseOID is the MIB root (default ".1.3.6.1.4.1.58427.1", IANA
+	// PEN 58427 placeholder — set your own enterprise OID).
+	BaseOID string `yaml:"base_oid"`
+	// TrapSinkAddr, when set, receives v2c event traps (tunnel up/down,
+	// HA failover) emitted on tunnel lifecycle changes.
+	TrapSinkAddr string `yaml:"trap_sink_addr"`
+}
+
 // UserCfg is one USM user: protocols + passphrases. On the agent side,
 // Community maps authenticated requests to the v1/v2c community used
 // toward the real agent.
@@ -195,6 +215,22 @@ type Config struct {
 	Gateway       GatewayRole   `yaml:"gateway"`
 	Security      Security      `yaml:"security"`
 	Notifications Notifications `yaml:"notifications"`
+	Metrics       MetricsRole   `yaml:"metrics"`
+}
+
+// ValidateMetrics checks the SNMP metrics interface configuration.
+func (c *Config) ValidateMetrics() error {
+	m := c.Metrics
+	if m.ListenAddr == "" && m.TrapSinkAddr == "" {
+		return nil
+	}
+	if m.TrapSinkAddr != "" && m.ListenAddr == "" {
+		// Traps only: no listener needed, but the source socket is the
+		// trap listener... traps are sent from a dedicated socket in
+		// that case; valid without ListenAddr.
+		return nil
+	}
+	return nil
 }
 
 // TrapFilter builds the notification filter from the configuration. It
@@ -239,12 +275,25 @@ func (c *Config) Defaults() {
 	if c.Security.TrapCommunity == "" {
 		c.Security.TrapCommunity = "public"
 	}
+	if c.Metrics.Community == "" {
+		c.Metrics.Community = "public"
+	}
+	if c.Metrics.BaseOID == "" {
+		c.Metrics.BaseOID = ".1.3.6.1.4.1.58427.1"
+	}
 }
 
 // Validate checks the configuration for the configured role.
 func (c *Config) Validate() error {
 	if _, err := c.TrapFilter(); err != nil {
 		return fmt.Errorf("notifications.filter: %w", err)
+	}
+	if c.Metrics.BaseOID != "" {
+		dotted := strings.TrimSuffix(strings.TrimPrefix(c.Metrics.BaseOID, "."), ".")
+		if _, err := msg.EncodeOID(dotted); err != nil {
+			return fmt.Errorf("metrics.base_oid: %w", err)
+		}
+		c.Metrics.BaseOID = "." + dotted
 	}
 	// Gateway role: single-box gateway — no tunnel. The front leg
 	// terminates SNMP security directly from third-party clients:

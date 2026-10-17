@@ -67,20 +67,20 @@ func securityNameFromCerts(certs []*x509.Certificate) (string, error) {
 
 // wrapTSM builds a v3 TSM message around a clear PDU TLV. The scopedPDU
 // carries the caller's context engine ID and the PDU verbatim; secParams
-// are empty per RFC 5591. msgID/reqID come from the caller's counters.
-func wrapTSM(msgID int32, reqID int32, pduType uint8, pduBody []byte, ctxEngineID []byte, reportable bool) ([]byte, error) {
+// carry secName (empty per RFC 5591 for our own two-proxy messages;
+// net-snmp TSM clients validate that responses echo their securityName).
+// msgID/reqID come from the caller's counters; flags are echoed verbatim
+// (net-snmp also validates that responses carry the request's security
+// level — auth/priv bits — even though TSM secParams stay empty).
+func wrapTSM(msgID int32, reqID int32, pduType uint8, pduBody []byte, ctxEngineID []byte, flags byte, secName string) ([]byte, error) {
 	pdu := msg.BuildPDU(pduType, reqID, 0, 0, pduBody)
 	scoped := msg.BuildScoped(ctxEngineID, []byte{}, pdu)
-	flags := uint8(0)
-	if reportable {
-		flags |= msg.MsgFlagReportable
-	}
 	return msg.BuildV3(msg.V3Header{
 		MsgID:      msgID,
 		MsgMaxSize: msg.DefaultMsgMaxSize,
 		MsgFlags:   flags,
 		SecModel:   msg.SecurityModelTSM,
-	}, msg.USMParams{}, scoped, nil)
+	}, msg.USMParams{UserName: secName}, scoped, nil)
 }
 
 // unwrapTSM extracts the clear PDU TLV from a v3 TSM message.
@@ -319,7 +319,7 @@ func (m *ManagerTranslator) handleClearRequest(dg []byte, addr net.Addr) {
 
 	// TSM has no per-request engine semantics: the context engine ID is
 	// empty (agent-side local context).
-	out, err := wrapTSM(msgID, reqID, pduTLV[0], fields.Varbinds, nil, true)
+	out, err := wrapTSM(msgID, reqID, pduTLV[0], fields.Varbinds, nil, msg.MsgFlagReportable, "")
 	if err != nil {
 		m.dropPending(corrID)
 		return
@@ -449,7 +449,7 @@ func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 	}
 
 	corrID := uint16(m.corr.Add(1))
-	out, err := wrapTSM(m.msgID.Add(1), m.reqID.Add(1), pduType, varbinds, nil, true)
+	out, err := wrapTSM(m.msgID.Add(1), m.reqID.Add(1), pduType, varbinds, nil, msg.MsgFlagReportable, "")
 	if err != nil {
 		return
 	}

@@ -42,6 +42,7 @@ SINK_PORT=$(free_port)
 SINK_FILE=$(mktemp)
 
 "$BIN" gateway \
+  --security usm-gateway \
   --listen "127.0.0.1:$GW_PORT" \
   --agent "127.0.0.1:$AGENT_PORT" \
   --community realcomm \

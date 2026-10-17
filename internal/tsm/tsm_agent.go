@@ -262,7 +262,7 @@ func (a *AgentTranslator) handleClearResponse(dg []byte) {
 	a.pendMu.Unlock()
 	close(pend.ready)
 
-	out, err := wrapTSM(a.msgID.Add(1), info.RequestID, msg.PDUGetResponse, fields.Varbinds, nil, true)
+	out, err := wrapTSM(a.msgID.Add(1), info.RequestID, msg.PDUGetResponse, fields.Varbinds, nil, msg.MsgFlagReportable, "")
 	if err != nil {
 		return
 	}

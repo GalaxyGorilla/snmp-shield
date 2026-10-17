@@ -32,13 +32,21 @@ import (
 
 // tsmGwPending is one in-flight forwarded request: the DTLS session to
 // answer on (a gateway serves many managers concurrently), the req-id
-// written downstream and the manager's original request-id (responses
-// must echo it — managers validate response request-ids).
+// written downstream, the manager's original request-id (responses must
+// echo it — managers validate response request-ids), the manager's
+// v3 header msgID (responses must echo it for v3 — net-snmp drops
+// responses whose msgID differs from the request's) and the manager's
+// contextEngineID (responses must echo it — net-snmp's snmpv3_verify_msg
+// compares it, e.g. the RFC 5343 probe marker 0x8000000006).
 type tsmGwPending struct {
-	ready       chan struct{}
-	downReqID   int32
-	clientReqID int32
-	conn        net.Conn
+	ready         chan struct{}
+	downReqID     int32
+	clientReqID   int32
+	clientMsgID   int32
+	clientCtxID   []byte
+	clientSecName string
+	clientFlags   byte
+	conn          net.Conn
 }
 
 // gwInformPending tracks one inform awaiting the manager's response: the
@@ -229,7 +237,7 @@ func (g *TSMGateway) handleFrontDatagram(conn net.Conn, dg []byte) {
 	}
 
 	downReqID := g.reqID.Add(1)
-	pend := &tsmGwPending{ready: make(chan struct{}), downReqID: downReqID, clientReqID: fields.ReqID, conn: conn}
+	pend := &tsmGwPending{ready: make(chan struct{}), downReqID: downReqID, clientReqID: fields.ReqID, clientMsgID: int32(m.Header.MsgID), clientCtxID: m.ContextEngineID, clientSecName: m.USM.UserName, clientFlags: m.Header.MsgFlags, conn: conn}
 	g.pendMu.Lock()
 	g.pend[downReqID] = pend
 	g.pendMu.Unlock()
@@ -357,7 +365,10 @@ func (g *TSMGateway) handleAgentResponse(dg []byte) {
 	}
 	close(pend.ready)
 
-	out, err := wrapTSM(g.msgID.Add(1), pend.clientReqID, msg.PDUGetResponse, fields.Varbinds, nil, true)
+	// Echo the request's msgID/reqID/contextEngineID/securityName/security
+	// level: net-snmp's snmpv3_verify_msg validates every one of them.
+	flags := pend.clientFlags | msg.MsgFlagReportable
+	out, err := wrapTSM(pend.clientMsgID, pend.clientReqID, msg.PDUGetResponse, fields.Varbinds, pend.clientCtxID, flags, pend.clientSecName)
 	if err != nil {
 		return
 	}
@@ -427,7 +438,7 @@ func (g *TSMGateway) handleClearTrap(dg []byte, src net.Addr) {
 		varbinds = fields.Varbinds
 	}
 
-	out, err := wrapTSM(g.msgID.Add(1), g.reqID.Add(1), pduType, varbinds, nil, true)
+	out, err := wrapTSM(g.msgID.Add(1), g.reqID.Add(1), pduType, varbinds, nil, msg.MsgFlagReportable, "")
 	if err != nil {
 		return
 	}

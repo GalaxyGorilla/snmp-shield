@@ -16,6 +16,9 @@
 //
 //	createUser authPrivUser SHA "authpass123" AES "privpass123"
 //	rouser authPrivUser authpriv -V systemonly
+
+//go:build snmpd_spike
+
 package usm
 
 import (

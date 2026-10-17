@@ -390,6 +390,9 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 		return nil, fmt.Errorf("--psk is required (generate one with `snmp-shield genpsk`)")
 	}
 	if o.secMode != "usm-translate" && o.secMode != "passthrough" {
+		if o.secMode == "tsm" {
+			return nil, fmt.Errorf("--security tsm requires a config file (see configs/manager-tsm.yaml + agent-tsm.yaml); flags mode supports usm-translate and passthrough")
+		}
 		return nil, fmt.Errorf("--security must be usm-translate or passthrough, got %q", o.secMode)
 	}
 

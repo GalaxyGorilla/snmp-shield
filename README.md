@@ -26,7 +26,9 @@ still getting authentication and encryption where it matters:
   does all the security work.
 - **One box is enough** — the gateway modes secure a single leg
   (in front of the agent *or* the manager) with standard SNMPv3 or
-  SNMP-over-DTLS on the front.
+  SNMP-over-DTLS on the front; the agent-leg gateway also has a
+  notification-only shape for manager legs, with informs confirmed
+  end-to-end.
 - **Standard SNMP at deployment boundaries** — gateway front legs use
   standard SNMPv3 or SNMP-over-DTLS; two-proxy deployments use a
   snmp-shield framed (D)TLS tunnel on their secured segment. This keeps
@@ -63,7 +65,7 @@ and SNMP health metrics, and SBOM/vulnerability tooling.
 |---|---|---|
 | [Two-proxy USM](examples/two-proxy-usm.md) / [TSM](examples/two-proxy-tsm.md) | `[manager] ⇄ proxy ⇄ secured line ⇄ proxy ⇄ [agent]` | You control both ends; choose USM passphrases or TSM certificates |
 | [Gateway (agent leg)](examples/gateway-usm.md) | `[v3 managers] ⇄ gateway ⇄ clear ⇄ [legacy agent]` | One box; the **agent** is the asset to protect |
-| [Gateway (manager leg)](examples/usm-manager.md) | `[legacy devices] ⇄ clear ⇄ gateway ⇄ v3 ⇄ [manager]` | One box; the **manager** must only accept authenticated notifications |
+| [Gateway (manager leg)](examples/usm-manager.md) | `[legacy devices] ⇄ clear ⇄ gateway ⇄ v3 ⇄ [manager]` | One box; the **manager** must only accept authenticated notifications (usm-gateway, notification-only) |
 | [HA two-proxy](examples/ha-two-proxy.md) | Two-proxy + redundant agent side | Failover matters |
 
 ## Security modes
@@ -73,13 +75,14 @@ and SNMP health metrics, and SBOM/vulnerability tooling.
 | `passthrough` | Opaque forwarding of clear SNMP (v1/v2c/v3). v3 USM params forwarded byte-exact, never decrypted. | Managers/agents already speak SNMPv3; you only need to protect the long-haul link. |
 | `usm-translate` | The proxies upgrade the secured segment to **SNMPv3 authPriv** (SHA auth + AES privacy). The agent-side proxy is the authoritative engine: RFC 3414 discovery, engineBoots/engineTime tracking with persistence and anti-rollback, replay window. End devices stay on v1/v2c. | End devices **can't** do SNMPv3. |
 | `tsm` | Two role-specific translators protect clear v1/v2c traffic through a certificate-authenticated (D)TLS tunnel. Per RFC 5591, the peer certificate CN becomes the securityName; no USM passphrases or engine state are used. | You control both proxies and prefer certificates over PSKs/passphrases. |
-| `usm-gateway` | Single box; plain-UDP front leg terminates **standard SNMPv3 USM** from any manager (net-snmp, Zabbix, PRTG…). The gateway is the authoritative engine; authenticated requests are relayed as clear v2c to the legacy agent. Clear traffic on the front leg is rejected — that is the protection. | The agent is the asset; managers speak standard v3. |
+| `usm-gateway` | Single box; plain-UDP front leg terminates **standard SNMPv3 USM** from any manager (net-snmp, Zabbix, PRTG…). The gateway is the authoritative engine; authenticated requests are relayed as clear v2c to the legacy agent. Clear traffic on the front leg is rejected — that is the protection. Also supports **notification-only** deployments (no request path): clear device traps/informs are wrapped into authenticated v3 USM notifications toward the manager's trap receiver, informs confirmed end-to-end. | The agent is the asset; managers speak standard v3. |
 | `tsm-gateway` | Single box; front leg is **SNMP-over-DTLS (RFC 6353)** — the client certificate is the authentication. | Your clients are net-snmp-based with certs. |
-| `usm-manager` | Single box on the **manager leg**: clear device traps/informs are wrapped into authenticated v3 USM notifications toward the manager's trap receiver; informs work end-to-end. | Devices are v1/v2c-only; the manager must only accept authenticated notifications. |
 
 All two-proxy modes carry the full operation set in both directions:
 `GET`, `GETNEXT`, `SET`, `GETBULK`, plus **traps and informs** both ways
-(inform confirmations relayed end-to-end).
+(inform confirmations relayed end-to-end). Gateway modes confirm informs
+the same way: the manager's acknowledgment flows back through the
+gateway to the device in every gateway mode.
 
 ## Tunnel transport
 
@@ -135,6 +138,16 @@ Full walkthroughs for every deployment shape: [examples/](examples/).
 
 Any standard v3 manager now polls the gateway with user `proxy`
 (SHA/AES) and the legacy agent never sees unauthenticated traffic.
+
+Notification-only variant (protects the manager leg: clear device
+traps/informs in, authenticated v3 toward the manager's trap receiver,
+informs confirmed end-to-end — no request path):
+
+```bash
+./bin/snmp-shield gateway --security usm-gateway \
+  --trap-listen :162 --trap-sink <manager-ip>:162 \
+  --auth-pass myauthpass --priv-pass myprivpass
+```
 
 ### Config files
 

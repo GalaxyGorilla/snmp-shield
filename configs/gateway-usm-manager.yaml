@@ -1,5 +1,6 @@
-# USM-manager mode: single-box deployment protecting the MANAGER leg —
-# no tunnel, no second proxy.
+# USM gateway mode, notification-only deployment: single-box, no tunnel,
+# no second proxy. This instance protects the MANAGER leg — no request
+# path (no listen_addr/agent_addr), only the notification legs.
 #
 #   [devices] --clear v1/v2c traps/informs--> [gateway]
 #       === SNMPv3 USM authPriv (RFC 3414) ===> [manager trap receiver]
@@ -9,10 +10,12 @@
 # (security.users below, authPriv) toward the manager's trap receiver.
 # Informs are confirmed: the manager's response is verified/decrypted and
 # the clear response is relayed back to the device. Traps fire-and-forget.
+# (Same mode as gateway-usm.yaml — usm-gateway supports request-only,
+# notification-only and both-leg deployments.)
 role: gateway          # passed via subcommand: snmp-shield gateway --config ...
 
 gateway:
-  # No listen_addr/agent_addr needed in this mode: only the trap legs.
+  # Notification-only: no listen_addr/agent_addr — only the trap legs.
   trap_listen_addr: ":10162"                     # clear traps/informs from devices
   trap_sink_addr: "127.0.0.1:162"                # manager's v3 trap receiver
 
@@ -27,7 +30,7 @@ gateway:
 #       - "1.3.6.1.4.1.8072"  # forward only this enterprise's traps
 
 security:
-  mode: usm-manager
+  mode: usm-gateway
   engine_store: /var/lib/snmp-shield/mgr-gateway-engine.json  # REQUIRED: boots must never decrease
   # engine_id: "hex:8000b98380736e6d702d70726f7879"           # optional, fixed engine ID
   users:

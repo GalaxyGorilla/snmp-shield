@@ -39,8 +39,11 @@ long-haul segment between them.
 
 **Current state: all five security modes complete — passthrough,
 usm-translate (two-proxy tunnel), tsm (two-proxy tunnel), usm-gateway
-(single box, standard v3 in / clear v2c out), and tsm-gateway (single
-box, SNMP-over-DTLS RFC 6353 in / clear v2c out); no-YAML CLI mode
+(single box, standard v3 in / clear v2c out; notification-only and
+both-leg deployment shapes; the former usm-manager mode is merged in as
+the notification-only shape), and tsm-gateway (single box,
+SNMP-over-DTLS RFC 6353 in / clear v2c out); informs confirmed in ALL
+gateway modes (usm + tsm round-trip e2e-pinned); no-YAML CLI mode
 implemented and smoke-tested end-to-end; cache package unit-tested;
 net-snmp CLI interop-tested end-to-end for the two-proxy chain (incl.
 trap direction), the USM gateway (incl. trap direction and rejection of
@@ -69,10 +72,11 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | TSM inform relay fix + e2e tests (`tsm_e2e_test.go`: inform round trip device→sink→device, agent-originated inform answered; pipe pending-queue fix for the startup race) — same dead-end as USM (FlagInform RESP frames never matched against the inform pending map, `ip.addr` never set) | done (tested, -race -count 2) |
 | internal/proxy wiring e2e tests (`internal/proxy/proxy_test.go`: white-box runAgent/runManager/runGateway over real PSK-DTLS loopback; passthrough + usm-translate two-proxy chains, USM + TSM gateways driven by gosnmp/DTLS clients, parseEngineID) + **2 prod fixes pinned**: TSM gateway accept loop returned "listener closed" error on clean shutdown (pion returns its own sentinel, not net.ErrClosed) and passthrough Manager `m.conn` read races its deferred nil-write (serveClearRequests/awaitResponse now read under socksMu) | done (tested, -race -count 2; proxy 0% → ~72% coverage) |
 | crypto primitive unit tests (`internal/usm/crypto_test.go`: protocol parsers, key lengths, RFC 3414 A.3 password-to-key vectors, Blumenthal/Reeder priv-key extensions, digest/sign/verify round trips + aliasing, DES salt counter) + cmd flags/os.Args coverage (`main_test.go`: gateway branches, psk-ciphersuites + filter flags, parsePskCiphersuites, run() version/help/genpsk/unknown) | done (tested, -race -count 2; crypto.go ~100%, cmd 24% → 57%) |
-| Manager-securing single proxy: **usm-manager mode** (`security.mode: usm-manager`, gateway role; `internal/usm/manager_gateway.go`: clear v1/v2c traps/informs at `trap_listen_addr` → v3 USM authPriv notifications toward `trap_sink_addr`, own authoritative engine + first user; inform responses relayed back to the device) | done (tested, gosnmp TrapListener sink incl. auto-inform-response, trap/inform/v1/filter tests, -race -count 2; trap-only config + direct flags require no unused `listen_addr`/`agent_addr`) |
+| Manager-securing single proxy: **usm-manager mode** (now MERGED into usm-gateway as its notification-only deployment shape: `security.mode: usm-gateway` with `gateway.trap_listen_addr` + `gateway.trap_sink_addr` instead of `listen_addr`/`agent_addr`; clear v1/v2c traps/informs at `trap_listen_addr` → v3 USM authPriv notifications toward `trap_sink_addr`, own authoritative engine + first user; inform responses relayed back to the device; usm-manager mode name hard-removed — no alias) | done (tested, gosnmp TrapListener sink incl. auto-inform-response oracle, trap/inform/v1/filter tests ported into `internal/usm/gateway_test.go` (`TestGatewayTrapRelay`, `TestGatewayInformRoundTrip`, `TestGatewayV1TrapNotif`, `TestGatewayNotifFilter`), -race -count 1; validation requires one leg pair or both) |
 | Meaningful challenge tests (adversarial/edge-case tests beyond happy paths, added where they find real issues) + pragmatic polish | done (tested, `internal/usm/gateway_challenge_test.go` + `internal/tunnel/challenge_test.go`: stale engineTime rejected w/ usmStatsNotInTimeWindows report, tampered digest rejected w/ usmStatsWrongDigests, non-reportable silent drop, GetBulk relay, garbage-datagram robustness, wrong-PSK handshake rejection; polish: removed unreachable GetBulk-on-v1 downgrade in gateway.go — `downstreamFor` always returns v2c) |
 | HA pair state sync (failover replicas sharing one engineID converge: digest-verified higher-boots claims adopted as logical reboot via `cache.EngineClock.AdoptInbound`; manager discovery cache follows the wire for same-engine Report regressions) | done (tested, `internal/usm/ha_sync_test.go` wire tests + cache unit test; smoke + all 3 interop suites re-run green) |
-| Notify filtering for the usm-manager manager-side notification path | done (already implemented at birth: `ManagerGateway.handleClearTrap` filters clear notifications before the v3 wrap toward `trap_sink_addr`, `TestManagerGatewayFilter` covers it; the v3 notification is generated from that ingress so the hook covers the whole path) |
+| Notify filtering for the usm-manager manager-side notification path | done (already implemented at birth: `GatewayTranslator.handleClearTrap` filters clear notifications before the v3 wrap toward `trap_sink_addr`, `TestGatewayNotifFilter` covers it; the v3 notification is generated from that ingress so the hook covers the whole path) |
+| Gateway inform consistency (all gateway modes confirm informs): **usm-gateway inform fix** (port of the usm-manager machinery: `readTraps` single-reader v3-vs-clear `msg.Peek` dispatch, `gwInformPend` keyed on the v3 msgID sent to the sink, fresh req-id inform rebuild, `handleSinkResponse` verify/decrypt with keys localized to the SINK's engineID from the wire, clear GetResponse rebuilt with the device's req-id/community, send FROM trapConn not sendUDP, wait goroutine so the read loop never blocks, 15s timeout with pointer-identity delete) + **tsm-gateway inform fix** (same dead-end — `sinkConn` was write-only, `g.inform` never consulted: `serveSinkConn` read loop on the reusable sink DTLS session, `gwInformPending` gains `outReqID`/`ver`/`community`/`ready`, inform keyed on the OUTGOING gateway req-id (`wrapTSM` req-id echo rule), clear GetResponse rebuilt with the device's `info.RequestID`, timeout fail-safe `reqTimeout` 15s) | done (tested, `TestGatewayInformRoundTrip` (gosnmp TrapListener auto-inform-response oracle) + `TestTSMGatewayInformRoundTrip` (in-test raw-DTLS TSM sink that reads and replies), -race -count 1; `TestTSMGatewayTrapDirection` still green) |
 | Static analysis (staticcheck + govulncheck toolset, pragmatic: fix only meaningful findings) | done (tested, staticcheck zero findings — dead code removed, pion/dtls v3.1.4 upgrade for GO-2026-6165, options-API migration; govulncheck clean) |
 | `validate` subcommand (`--role` + same flags/`--config`; `--json` for tooling; pre-flights cert keypairs, CA files, engine-store writability) + `selftest` subcommand (validate + probes: tunnel handshake per endpoint (manager), SNMP GET sysDescr.0 to the real agent (agent/gateway), front-cert expiry (tsm-gateway); `--probe=false`) | done (tested, unit tests + manual live-agent/tunnel/dead-addr verification) |
 | `validate --json` exit-code fix (rc mirrors `ok` in both output modes; previously `validate --json` returned 0 on invalid configs while `selftest --json` always honored rc 1 — README/AGENTS "Exit 0/1" only held for text mode) | done (tested, unit + live rc verification; full race suite re-run green) |
@@ -226,7 +230,7 @@ internal/config/          YAML config + flag overrides
 internal/proxy/           shared proxy wiring
 internal/passthrough/     opaque forwarding of clear SNMP
 internal/notifyfilter/    notification allow/deny OID filtering
-internal/usm/             USM translate + gateway + usm-manager modes + profiles
+internal/usm/             USM translate + gateway modes (incl. notification-only) + profiles
 internal/tsm/             TSM mode + TSM gateway mode
 internal/tunnel/          DTLS/TLS tunnel dialer/listener (+ PSK ciphersuite mapping)
 internal/msg/             SNMP message build/parse helpers
@@ -241,7 +245,8 @@ internal/snmpmetrics/     SNMP health MIB agent + tunnel event traps
 usm, tsm, cache, notifyfilter, snmpmetrics, cmd/snmp-shield. Still empty, reserved:
 discovery (discovery logic lives in internal/usm translate_manager.go),
 securitylevel. Also: configs/ example YAML (manager/agent × psk/usm/tsm +
-gateway-usm + gateway-tsm + gateway-usm-manager), scripts/gen-certs.sh
+gateway-usm + gateway-tsm + gateway-usm-manager [usm-gateway
+notification-only]), scripts/gen-certs.sh
 throwaway test PKI into gitignored certs/, scripts/tsm-sink raw-DTLS
 test receiver for interop, scripts/sbom.sh SBOM+vulnscan entry point,
 deploy/ systemd unit files, examples/
@@ -335,11 +340,12 @@ snmp-shield gateway --security tsm-gateway --listen :10161 \
   [--trap-listen :10162 --trap-sink <manager>:10162]
 ```
 
-USM-manager (single box, protects the manager leg: clear devices in,
-authenticated v3 out toward the manager's trap receiver):
+USM gateway notification-only (single box, protects the manager leg:
+clear devices in, authenticated v3 out toward the manager's trap
+receiver — usm-gateway with only the trap legs):
 
 ```bash
-snmp-shield gateway --security usm-manager \
+snmp-shield gateway --security usm-gateway \
   --trap-listen :162 --trap-sink <manager>:162 \
   --auth-pass <auth> --priv-pass <priv>
 ```
@@ -541,6 +547,27 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   before the peer subscribed are now queued per frame-type and delivered
   on Subscribe — mirrors real tunnel buffering; non-blocking/dropping
   sends made the trap path flake ~20% of runs).
+- **TSM gateway inform fix (bug fix, pinned by e2e)**: the tsm-gateway
+  had the same dead-end as the pre-fix usm-gateway — bookkeeping theater:
+  `handleClearTrap` registered `gwInformPending{addr, deviceID}` in
+  `g.inform` keyed on the DEVICE's req-id, but the sink conn was
+  write-only (no Read anywhere), `g.inform` was never consulted, and the
+  entry was just deleted after the 15s timeout — the manager's TSM
+  GetResponse was dropped, the device retransmitted and timed out. Fixed:
+  `gwInformPending` gained `outReqID/ver/community/resp/ready`; informs
+  are keyed on the **gateway's OUTGOING req-id** (mint once before
+  `wrapTSM` — per the TSM response echo rule the manager echoes that
+  req-id in its GetResponse); each NEW reusable sink DTLS session gets a
+  `serveSinkConn` read loop (one Read = one datagram, DTLS preserves
+  record boundaries) that parses the TSM v3 response, matches
+  `g.inform[fields.ReqID]`, rebuilds the clear v2c GetResponse with the
+  DEVICE's `info.RequestID` + original community and relays it to the
+  device address; the 15s `reqTimeout` is the fail-safe cleanup
+  (pointer-identity delete). On read error the session is dropped so the
+  next notification redials. Pinned by `TestTSMGatewayInformRoundTrip`
+  (in-test raw-DTLS TSM sink that reads and replies — the sink side of
+  the round trip is hand-built with exported msg primitives since
+  `wrapTSM` is unexported).
 - **Pipe-shim test lesson** (`translate_manager_e2e_test.go`): an
   in-memory FrameSink shim must deliver frames via **blocking** channel
   sends — non-blocking sends silently drop frames that arrive before the
@@ -588,30 +615,42 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   (ParseV3 header advance) must re-check against the OUTER buffer.
   General rule: any slice arithmetic combining a parsed length with
   parsed content needs a bounds check against the original datagram.
-- **USM-manager mode** (`internal/usm/manager_gateway.go`,
-  `security.mode: usm-manager`, gateway role): the mirror of usm-gateway —
-  the proxy protects the **manager** leg. Clear v1/v2c traps/informs arrive
+- **USM gateway notification-only shape (former usm-manager mode,
+  MERGED into usm-gateway)** (`internal/usm/gateway.go`,
+  `security.mode: usm-gateway` with `gateway.trap_listen_addr` +
+  `gateway.trap_sink_addr` instead of `listen_addr`/`agent_addr`): the
+  proxy protects the **manager** leg. Clear v1/v2c traps/informs arrive
   at `gateway.trap_listen_addr`; the proxy wraps each into a v3 USM authPriv
   notification (own authoritative engine state from `cache.EngineClock` +
   first configured user; PDUInformRequest for informs, PDUSNMPv2Trap for
   traps; v1 traps translated via V1TrapToV2 first) and sends it to
   `gateway.trap_sink_addr` (the manager's trap receiver). Validation
-  requires users + TrapListenAddr + TrapSinkAddr (gateway branch).
-  **Inform round trip**: informs are confirmed — the proxy tracks a
-  `mgPend{addr, community, ver, clientReqID, ready}` keyed on the v3 msgID
-  it sent, waits up to 15s; the single `readLoop` (same socket, dispatches
-  v3 vs clear by Peek) parses the manager's
-  v3 GetResponse, verifies/decrypts it with keyCache keys localized for the
+  requires (ListenAddr AND AgentAddr) OR (TrapListenAddr AND TrapSinkAddr)
+  — one leg pair or both (gateway branch). `GatewayTranslator.Run` binds
+  front/agent only when ListenAddr != "" (notification-only supported).
+  **Inform round trip** (shared by full and notification-only shapes):
+  informs are confirmed — the proxy tracks a
+  `gwInformPend{addr, community, ver, clientReqID, resp, ready}` keyed on
+  the v3 msgID it sent, waits up to 15s (in a goroutine — the wait must
+  NOT block the trap read loop); the single `readTraps` loop (same socket,
+  dispatches v3 vs clear by Peek) parses the manager's
+  v3 GetResponse, verifies/decrypts it with keys localized for the
   **sink's engineID from the response wire** (`profilesFor(m.USM.EngineID)`
   — the response is signed/encrypted by the sink's own engine, same pattern
   as inbound notifications), matches the pending inform, rebuilds the
   clear v2c GetResponse (device req-id echoed, original community) and
   relays it back to the device address **directly from
-  handleManagerResponse with the pend pointer** — the pend is deleted from
+  handleSinkResponse with the pend pointer** — the pend is deleted from
   the map before the wait goroutine wakes, so a msgID-based re-lookup
   there would dead-end and the device would never see its response.
   Traps are fire-and-forget. Notification filtering applies at the clear
-  ingress.
+  ingress. The inform is sent FROM the trap listener socket (WriteTo),
+  not sendUDP — the manager's response arrives at the packet's source
+  address, which must be the trap listener (one reader dispatches both
+  directions; competing ReadFrom loops would steal each other's
+  datagrams). The old `internal/usm/manager_gateway.go` is DELETED (its
+  4 tests ported into `gateway_test.go`); the mode name is hard-removed
+  (no alias) — `usm-manager` now fails config validation.
 - **Challenge-test semantics** (`internal/usm/gateway_challenge_test.go`,
   `internal/tunnel/challenge_test.go`): the security gate is pinned
   adversarially on the wire — same-boots out-of-window engineTime claims

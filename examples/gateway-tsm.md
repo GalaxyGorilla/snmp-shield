@@ -39,8 +39,9 @@ snmp-shield gateway \
 
 - `--listen` — the raw DTLS front leg.
 - `--ca-file` — client certificates must chain to this CA.
-- `--trap-listen`/`--trap-sink` — clear device traps in, TSM
-  notifications out toward the manager's DTLS trap receiver.
+- `--trap-listen`/`--trap-sink` — clear device traps and informs in, TSM
+  notifications out toward the manager's DTLS trap receiver (informs
+  confirmed: the manager's acknowledgment is relayed back to the device).
 
 Restrict client identities via the config file
 (`security.tsm_identities`; the peer certificate CN must be on the list;

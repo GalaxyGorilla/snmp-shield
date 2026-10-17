@@ -365,7 +365,8 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent 
 // proxy.
 //
 //   - usm-gateway: plain-UDP front leg terminating SNMPv3 USM (this
-//     instance is the authoritative engine).
+//     instance is the authoritative engine). Notification-only
+//     deployments (no gateway.listen_addr) secure a manager leg.
 //   - tsm-gateway: raw DTLS front leg (RFC 6353, one SNMP datagram per
 //     DTLS record, no frame layer); the handshake is the authentication.
 func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
@@ -387,28 +388,6 @@ func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
 			return err
 		}
 		return gw.Run(ctx.Done())
-	case "usm-manager":
-		store, err := cache.Open(opts.Config.Security.EngineStore)
-		if err != nil {
-			return err
-		}
-		engineID, err := parseEngineID(opts.Config.Security.EngineID)
-		if err != nil {
-			return err
-		}
-		clock, err := cache.NewEngineClock(store, engineID, zapLogger{opts.Log})
-		if err != nil {
-			return err
-		}
-		users := usm.ProfilesFromSecurity(opts.Config.Security)
-		if len(users) == 0 {
-			return fmt.Errorf("security.users: usm-manager needs at least one user")
-		}
-		mg, err := usm.NewManagerGateway(opts.Config.Gateway, users, clock, opts.Log, met, filt)
-		if err != nil {
-			return err
-		}
-		return mg.Run(ctx.Done())
 	default:
 		store, err := cache.Open(opts.Config.Security.EngineStore)
 		if err != nil {

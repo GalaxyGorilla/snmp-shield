@@ -7,8 +7,13 @@
 // the front leg is rejected — that rejection is the protection. Clear
 // notifications from the legacy network (trap_listen_addr) are wrapped
 // into authenticated v3 USM notifications toward the manager's trap
-// receiver (trap_sink_addr). No tunnel, no second proxy — 100% standard
-// SNMP on every wire.
+// receiver (trap_sink_addr) — traps fire-and-forget, informs confirmed
+// (the manager's v3 GetResponse is verified/decrypted against the sink's
+// engine keys and the clear response is rebuilt back to the device).
+// The front/agent legs and the notification legs are both optional
+// (at least one pair required): notification-only deployments secure a
+// manager leg without a request path. No tunnel, no second proxy —
+// 100% standard SNMP on every wire.
 package usm
 
 import (
@@ -31,7 +36,8 @@ import (
 // SNMPv3 USM from standard managers on a plain-UDP front leg (this proxy
 // is the authoritative engine), relays authenticated requests as clear
 // v1/v2c to the legacy agent, and wraps clear notifications into
-// authenticated v3 USM notifications toward the manager's trap receiver.
+// authenticated v3 USM notifications toward the manager's trap receiver
+// (informs confirmed, traps fire-and-forget).
 type GatewayTranslator struct {
 	translatorBase
 
@@ -49,6 +55,10 @@ type GatewayTranslator struct {
 	pendMu sync.Mutex
 	pend   map[int32]*gwPending
 
+	// pending informs keyed on the v3 msgID sent to the sink
+	informMu   sync.Mutex
+	informPend map[int32]*gwInformPend
+
 	// front leg (SNMPv3 USM listener), clear agent socket, trap listener
 	conn      net.PacketConn
 	agentConn net.PacketConn
@@ -64,6 +74,16 @@ type gwPending struct {
 	flags       byte     // requested security level flags
 	user        string
 	cancel      chan struct{}
+}
+
+// gwInformPend is one in-flight forwarded inform.
+type gwInformPend struct {
+	addr        net.Addr // device that sent the clear inform
+	community   []byte   // original clear community (echoed back)
+	ver         int      // original SNMP version (1 or 2c)
+	clientReqID int32    // req-id from the clear inform (echoed back)
+	resp        []byte   // rebuilt clear response (stashed on match)
+	ready       chan struct{}
 }
 
 // NewGatewayTranslator builds the single-box gateway translator.
@@ -85,27 +105,33 @@ func NewGatewayTranslator(cfg config.GatewayRole, users []Profile, clock *cache.
 		met:   met,
 		filtr: notifyfilter.From(filt...),
 		pend:  make(map[int32]*gwPending),
+		informPend: make(map[int32]*gwInformPend),
 		stop:  make(chan struct{}),
 	}, nil
 }
 
-// Run binds the front leg, the clear agent socket and (optionally) the
-// clear trap listener, and serves until done is closed. When supplied, ready
-// is closed after every configured listener has been bound.
+// Run binds the configured legs and serves until done is closed. The
+// front leg (ListenAddr), the clear agent socket and the trap listener
+// (TrapListenAddr) are optional: notification-only deployments (no
+// ListenAddr) secure a manager leg without a request path. When
+// supplied, ready is closed after every configured listener has been
+// bound.
 func (g *GatewayTranslator) Run(done <-chan struct{}, ready ...chan<- struct{}) error {
-	conn, err := net.ListenPacket("udp", g.cfg.ListenAddr)
-	if err != nil {
-		return fmt.Errorf("usm gateway: front listener: %w", err)
-	}
-	g.conn = conn
-	defer conn.Close()
+	if g.cfg.ListenAddr != "" {
+		conn, err := net.ListenPacket("udp", g.cfg.ListenAddr)
+		if err != nil {
+			return fmt.Errorf("usm gateway: front listener: %w", err)
+		}
+		g.conn = conn
+		defer conn.Close()
 
-	agentConn, err := net.ListenPacket("udp", "0.0.0.0:0")
-	if err != nil {
-		return fmt.Errorf("usm gateway: clear agent socket: %w", err)
+		agentConn, err := net.ListenPacket("udp", "0.0.0.0:0")
+		if err != nil {
+			return fmt.Errorf("usm gateway: clear agent socket: %w", err)
+		}
+		g.agentConn = agentConn
+		defer agentConn.Close()
 	}
-	g.agentConn = agentConn
-	defer agentConn.Close()
 
 	if g.cfg.TrapListenAddr != "" {
 		tconn, terr := net.ListenPacket("udp", g.cfg.TrapListenAddr)
@@ -116,8 +142,10 @@ func (g *GatewayTranslator) Run(done <-chan struct{}, ready ...chan<- struct{}) 
 		defer tconn.Close()
 	}
 
-	go g.readFront()
-	go g.readAgent()
+	if g.conn != nil {
+		go g.readFront()
+		go g.readAgent()
+	}
 	if g.trapConn != nil {
 		go g.readTraps()
 	}
@@ -519,11 +547,17 @@ func (g *GatewayTranslator) dropOrReport(hdr msg.V3Header, m *msg.V3Message, add
 	_, _ = g.conn.WriteTo(out, addr)
 }
 
-// readTraps reads clear notifications from the legacy network.
+// readTraps reads datagrams from the trap listener socket. Both
+// directions share one socket when the sink answers on it: devices send
+// clear v1/v2c notifications in, and the manager's v3 responses to our
+// wrapped informs come back to the same address (we send from the trap
+// listener, so the response arrives at its source address). A single
+// reader dispatches by type (two competing ReadFrom loops would randomly
+// steal each other's datagrams).
 func (g *GatewayTranslator) readTraps() {
 	buf := make([]byte, 65536)
 	for {
-		n, _, err := g.trapConn.ReadFrom(buf)
+		n, addr, err := g.trapConn.ReadFrom(buf)
 		if err != nil {
 			select {
 			case <-g.stop:
@@ -536,14 +570,22 @@ func (g *GatewayTranslator) readTraps() {
 			continue
 		}
 		dg := append([]byte{}, buf[:n]...)
-		g.handleClearTrap(dg)
+		// v3 from the manager (inform responses) vs clear v1/v2c from
+		// devices: Peek distinguishes them cheaply.
+		if info, perr := msg.Peek(dg); perr == nil && info.Version == msg.Version3 {
+			g.handleSinkResponse(dg)
+			continue
+		}
+		g.handleClearTrap(addr, dg)
 	}
 }
 
 // handleClearTrap wraps a clear v1/v2c notification into an authenticated
 // v3 USM notification (first configured user, this gateway's own engine)
 // and delivers it to the manager's trap receiver (trap_sink_addr).
-func (g *GatewayTranslator) handleClearTrap(dg []byte) {
+// Informs are tracked so the manager's response can be relayed back to
+// the device.
+func (g *GatewayTranslator) handleClearTrap(addr net.Addr, dg []byte) {
 	info, err := msg.Peek(dg)
 	if err != nil {
 		return
@@ -564,6 +606,7 @@ func (g *GatewayTranslator) handleClearTrap(dg []byte) {
 	}
 
 	var pdu []byte
+	var clientReqID int32
 	switch {
 	case info.PDUType == msg.PDUTrap:
 		// v1 trap: translate parameters to v2 per RFC 2576 3.1
@@ -576,11 +619,22 @@ func (g *GatewayTranslator) handleClearTrap(dg []byte) {
 			return
 		}
 		pdu = msg.BuildPDU(msg.PDUSNMPv2Trap, 0, 0, 0, vbs)
+	case msg.IsInform(info.PDUType):
+		// inform: fresh req-id so we can match the manager's response;
+		// keep the original varbinds (BER TLV content after the PDU header)
+		fields, iok := pduCommon(pduTLV)
+		if !iok {
+			return
+		}
+		// remember the DEVICE's req-id: the clear response must echo it
+		// back (the fresh req-id below is only for response matching).
+		clientReqID = fields.ReqID
+		pdu = msg.BuildPDU(msg.PDUInformRequest, int32(g.msgID.Add(1)), 0, 0, fields.Varbinds)
 	default:
 		pdu = pduTLV
 	}
 
-	out, err := g.buildTrapNotif(pdu)
+	out, msgID, err := g.buildTrapNotif(pdu, msg.IsInform(info.PDUType))
 	if err != nil {
 		g.log.Warn("usm gateway: trap wrap failed", zap.Error(err))
 		return
@@ -589,28 +643,150 @@ func (g *GatewayTranslator) handleClearTrap(dg []byte) {
 		g.log.Debug("usm gateway: trap dropped (no trap_sink_addr configured)")
 		return
 	}
-	if err := sendUDP(g.cfg.TrapSinkAddr, out); err != nil {
+	var pendRef *gwInformPend
+	if msg.IsInform(info.PDUType) {
+		pend := &gwInformPend{
+			addr:        addr,
+			community:   community,
+			ver:         info.Version,
+			clientReqID: clientReqID,
+			ready:       make(chan struct{}),
+		}
+		pendRef = pend
+		g.informMu.Lock()
+		g.informPend[msgID] = pend
+		g.informMu.Unlock()
+	}
+	// send FROM the trap listener socket: the manager's inform response
+	// comes back to the packet's source address, which must be the trap
+	// listener (the device's clear response is rebuilt there).
+	sink, serr := net.ResolveUDPAddr("udp", g.cfg.TrapSinkAddr)
+	if serr != nil {
+		g.log.Warn("usm gateway: bad trap_sink_addr", zap.Error(serr))
+		return
+	}
+	if _, err := g.trapConn.WriteTo(out, sink); err != nil {
 		g.log.Warn("usm gateway: trap sink delivery failed", zap.Error(err))
 		return
 	}
 	if g.met != nil {
 		g.met.NotifsRelayed.Inc()
 	}
+	if msg.IsInform(info.PDUType) {
+		// The inform wait must NOT block the read loop: readTraps calls
+		// this handler synchronously, so a blocking 15s wait here stalls
+		// every subsequent datagram (including the manager's response
+		// itself). Wait in a goroutine; handleSinkResponse relays the
+		// clear response directly (with the pend pointer).
+		go func() {
+			select {
+			case <-g.waitForInform(msgID):
+				// ready closed by handleSinkResponse, which relayed the
+				// response already.
+			case <-time.After(15 * time.Second):
+				g.log.Debug("usm gateway: inform response timed out")
+				g.informMu.Lock()
+				if g.informPend[msgID] == pendRef {
+					delete(g.informPend, msgID)
+				}
+				g.informMu.Unlock()
+			case <-g.stop:
+			}
+		}()
+	}
+}
+
+// waitForInform returns the ready channel of the pending inform.
+func (g *GatewayTranslator) waitForInform(msgID int32) <-chan struct{} {
+	g.informMu.Lock()
+	defer g.informMu.Unlock()
+	if p, ok := g.informPend[msgID]; ok {
+		return p.ready
+	}
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+
+// handleSinkResponse verifies/decrypts a v3 message from the manager's
+// trap receiver and, for inform responses, matches the pending inform,
+// stashes the rebuilt clear response PDU, and relays it to the device.
+func (g *GatewayTranslator) handleSinkResponse(dg []byte) {
+	m2, err := msg.ParseV3(dg)
+	if err != nil {
+		g.log.Debug("usm gateway: undecodable v3 from manager sink", zap.Error(err))
+		return
+	}
+	// the response is signed/encrypted by the sink's engine: use keys
+	// localized for the engineID on the wire (same pattern as inbound
+	// notifications).
+	keys, kerr := g.keys.profilesFor(m2.USM.EngineID)
+	if kerr != nil {
+		g.log.Debug("usm gateway: no keys for engine", zap.Error(kerr))
+		return
+	}
+	c, pdu, err := unwrapV3(keys, m2, dg)
+	if err != nil {
+		g.log.Debug("usm gateway: response rejected", zap.Error(err))
+		return
+	}
+	_ = c
+	fields, fieldsOK := pduCommon(pdu)
+	if !fieldsOK || !msg.IsGetResponse(pdu[0]) {
+		return
+	}
+
+	// match the pending inform by the v3 msgID we sent (the manager
+	// echoes msgID in responses)
+	g.informMu.Lock()
+	pend, ok := g.informPend[m2.Header.MsgID]
+	if !ok {
+		g.informMu.Unlock()
+		g.log.Debug("usm gateway: response with no pending inform", zap.Int32("msgID", m2.Header.MsgID))
+		return
+	}
+	delete(g.informPend, m2.Header.MsgID)
+	g.informMu.Unlock()
+
+	resp := msg.BuildPDU(msg.PDUGetResponse, pend.clientReqID, fields.ErrStatus, fields.ErrIndex, fields.Varbinds)
+	out, err := msg.BuildV1V2c(pend.ver, pend.community, resp)
+	if err != nil {
+		return
+	}
+	pend.resp = out
+	close(pend.ready)
+	// relay directly with the pend pointer: the wait goroutine cannot do
+	// the lookup — the pend was already deleted from the map above, so a
+	// msgID-based re-lookup would dead-end and the device would never see
+	// its response.
+	if pend == nil || pend.resp == nil {
+		return
+	}
+	if udp, ok := pend.addr.(*net.UDPAddr); ok {
+		if _, err := g.trapConn.WriteTo(pend.resp, udp); err != nil {
+			g.log.Debug("usm gateway: inform response delivery failed", zap.Error(err))
+		}
+	}
 }
 
 // buildTrapNotif builds a signed+encrypted v3 USM notification for the
 // manager's trap receiver using the first configured user and this
-// gateway's own engine state (no discovery: we are the engine).
-func (g *GatewayTranslator) buildTrapNotif(pdu []byte) ([]byte, error) {
+// gateway's own engine state (no discovery: we are the engine). Returns
+// the marshalled message and the v3 msgID used (for inform matching).
+func (g *GatewayTranslator) buildTrapNotif(pdu []byte, reportable bool) ([]byte, int32, error) {
 	if len(g.users) == 0 {
-		return nil, errors.New("usm gateway: no users configured")
+		return nil, 0, errors.New("usm gateway: no users configured")
 	}
 	c, ok := g.prof.Lookup(g.users[0].Name)
 	if !ok {
-		return nil, fmt.Errorf("usm gateway: user %s not found", g.users[0].Name)
+		return nil, 0, fmt.Errorf("usm gateway: user %s not found", g.users[0].Name)
 	}
 
-	flags := byte(msg.MsgFlagAuth | msg.MsgFlagPriv | msg.MsgFlagReportable)
+	flags := byte(msg.MsgFlagAuth | msg.MsgFlagPriv)
+	if reportable {
+		flags |= msg.MsgFlagReportable
+	}
+	msgID := int32(g.msgID.Add(1))
 	engineID := g.clock.EngineID()
 	boots := g.clock.Boots()
 	etime := g.clock.Time()
@@ -622,7 +798,7 @@ func (g *GatewayTranslator) buildTrapNotif(pdu []byte) ([]byte, error) {
 		return encryptScoped(c.p.PrivProtocol, c.privKey, boots, etime, privParams, plain)
 	}
 	out, err := msg.BuildV3(msg.V3Header{
-		MsgID:      int32(g.msgID.Add(1)),
+		MsgID:      msgID,
 		MsgMaxSize: msg.DefaultMsgMaxSize,
 		MsgFlags:   flags,
 		SecModel:   msg.SecurityModelUSM,
@@ -635,12 +811,12 @@ func (g *GatewayTranslator) buildTrapNotif(pdu []byte) ([]byte, error) {
 		PrivParams: privParams,
 	}, scoped, encrypt)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if err := signV3(out, c.p.AuthProtocol, c.authKey); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
-	return out, nil
+	return out, msgID, nil
 }
 
 // rejectClear drops clear v1/v2c SNMP arriving on the v3 front leg. This

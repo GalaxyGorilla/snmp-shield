@@ -135,7 +135,7 @@ func register(fs *pflag.FlagSet) cliFlags {
 	c.insecure = fs.Bool("insecure", false, "skip tunnel certificate verification (tls mode only; never in production)")
 
 	// direct-flags mode: usm-translate security
-	c.secMode = fs.String("security", "usm-translate", "security mode when using flags: usm-translate or passthrough (gateway: usm-gateway, tsm-gateway or usm-manager)")
+	c.secMode = fs.String("security", "usm-translate", "security mode when using flags: usm-translate or passthrough (gateway: usm-gateway or tsm-gateway)")
 	c.authPass = fs.String("auth-pass", "", "v3 authentication passphrase (usm-translate/gateway mode; user 'proxy', SHA, AES)")
 	c.privPass = fs.String("priv-pass", "", "v3 privacy passphrase (usm-translate/gateway mode)")
 
@@ -312,19 +312,11 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 	// authenticated requests are relayed as clear v2c to the legacy agent.
 	if r == config.RoleGateway {
 		switch o.secMode {
-		case "usm-gateway", "tsm-gateway", "usm-manager":
+		case "usm-gateway", "tsm-gateway":
 		case "usm-translate", "passthrough":
-			return nil, fmt.Errorf("--security %s is not valid for the gateway role (use usm-gateway, tsm-gateway or usm-manager)", o.secMode)
+			return nil, fmt.Errorf("--security %s is not valid for the gateway role (use usm-gateway or tsm-gateway)", o.secMode)
 		default:
-			return nil, fmt.Errorf("--security must be usm-gateway, tsm-gateway or usm-manager for the gateway role, got %q", o.secMode)
-		}
-		if o.secMode != "usm-manager" {
-			if o.listen == "" {
-				return nil, fmt.Errorf("--listen is required for the gateway role (SNMP front listener ip:port)")
-			}
-			if o.agent == "" {
-				return nil, fmt.Errorf("--agent is required for the gateway role (legacy agent ip:port)")
-			}
+			return nil, fmt.Errorf("--security must be usm-gateway or tsm-gateway for the gateway role, got %q", o.secMode)
 		}
 		cfg := &config.Config{Role: r}
 		cfg.Gateway = config.GatewayRole{
@@ -338,6 +330,17 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 		case "usm-gateway":
 			if o.authPass == "" || o.privPass == "" {
 				return nil, fmt.Errorf("--auth-pass and --priv-pass are required in usm-gateway mode (v3 user 'proxy', SHA, AES)")
+			}
+			// Either leg pair (or both): the request path and/or the
+			// notification path.
+			if (o.listen == "") != (o.agent == "") {
+				return nil, fmt.Errorf("--listen and --agent must be given together (request path)")
+			}
+			if (o.trapListen == "") != (o.trapSink == "") {
+				return nil, fmt.Errorf("--trap-listen and --trap-sink must be given together (notification path)")
+			}
+			if o.listen == "" && o.trapListen == "" {
+				return nil, fmt.Errorf("usm-gateway mode needs --listen + --agent (request path) or --trap-listen + --trap-sink (notification path)")
 			}
 			cfg.Security = config.Security{
 				Mode: "usm-gateway",
@@ -353,28 +356,17 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 			if o.certFile == "" || o.keyFile == "" || o.caFile == "" {
 				return nil, fmt.Errorf("--cert-file, --key-file and --ca-file are required in tsm-gateway mode (DTLS front leg, client certificate verification)")
 			}
+			if o.listen == "" {
+				return nil, fmt.Errorf("--listen is required for the gateway role (SNMP front listener ip:port)")
+			}
+			if o.agent == "" {
+				return nil, fmt.Errorf("--agent is required for the gateway role (legacy agent ip:port)")
+			}
 			cfg.Security = config.Security{Mode: "tsm-gateway"}
 			cfg.Tunnel = config.Tunnel{
 				CAFile:   o.caFile,
 				CertFile: o.certFile,
 				KeyFile:  o.keyFile,
-			}
-		case "usm-manager":
-			if o.authPass == "" || o.privPass == "" {
-				return nil, fmt.Errorf("--auth-pass and --priv-pass are required in usm-manager mode (v3 user 'proxy', SHA, AES)")
-			}
-			if o.trapListen == "" || o.trapSink == "" {
-				return nil, fmt.Errorf("--trap-listen and --trap-sink are required in usm-manager mode (clear device notifications in, manager's v3 trap receiver out)")
-			}
-			cfg.Security = config.Security{
-				Mode: "usm-manager",
-				Users: []config.UserCfg{{
-					Name:           "proxy",
-					AuthProtocol:   "sha",
-					AuthPassphrase: o.authPass,
-					PrivProtocol:   "aes",
-					PrivPassphrase: o.privPass,
-				}},
 			}
 		}
 		// Notification filtering (gateway role, flags mode).
@@ -498,9 +490,9 @@ Usage (gateway, single box — no second proxy, standard clients):
       --agent <real-agent:port> --ca-file <ca.pem> --cert-file <cert.pem> \
       --key-file <key.pem> [--community <comm>] \
       [--trap-listen <ip:port>] [--trap-sink <ip:port>]
-  snmp-shield gateway --security usm-manager \
-      --trap-listen <ip:port> --trap-sink <manager-trap-receiver:port> \
-      --auth-pass <pw> --priv-pass <pw>
+  snmp-shield gateway --security usm-gateway --trap-listen <ip:port> \
+      --trap-sink <manager-trap-receiver:port> \
+      --auth-pass <pw> --priv-pass <pw>        # notification-only (manager leg)
 
 Other commands:
   snmp-shield validate --role <manager|agent|gateway> (same flags as the role)
@@ -534,10 +526,11 @@ Both sides must share the same --psk, --auth-pass and --priv-pass.
 The gateway instance is a single box with no tunnel: managers talk to it
 directly and authenticated requests are relayed as clear v2c to the
 legacy agent. usm-gateway terminates SNMPv3 USM (user 'proxy') from any
-standard manager; tsm-gateway speaks SNMP-over-DTLS (RFC 6353) with
-certificate-based client authentication; usm-manager protects the
-manager leg: clear device traps/informs are wrapped into authenticated
-v3 notifications toward the manager's trap receiver. 100%% standard
-SNMP on every wire.
+standard manager and also supports notification-only deployments
+(--trap-listen + --trap-sink instead of --listen + --agent: clear device
+traps/informs are wrapped into authenticated v3 notifications toward the
+manager's trap receiver, informs confirmed end-to-end); tsm-gateway
+speaks SNMP-over-DTLS (RFC 6353) with certificate-based client
+authentication. 100%% standard SNMP on every wire.
 `)
 }

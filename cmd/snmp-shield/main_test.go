@@ -139,7 +139,6 @@ func TestFlagsConfigGatewayUSM(t *testing.T) {
 		authPass:  "authpass",
 		privPass:  "privpass",
 		community: "realcomm",
-		trapSink:  "127.0.0.1:162",
 	})
 	if err != nil {
 		t.Fatalf("gateway usm flagsConfig: %v", err)
@@ -155,19 +154,22 @@ func TestFlagsConfigGatewayUSM(t *testing.T) {
 	}
 }
 
-func TestFlagsConfigGatewayUSMManager(t *testing.T) {
+func TestFlagsConfigGatewayUSMNotifOnly(t *testing.T) {
 	cfg, err := flagsConfig(config.RoleGateway, flagsOpts{
-		secMode:    "usm-manager",
+		secMode:    "usm-gateway",
 		authPass:   "authpass",
 		privPass:   "privpass",
 		trapListen: ":162",
 		trapSink:   "127.0.0.1:10162",
 	})
 	if err != nil {
-		t.Fatalf("gateway usm-manager flagsConfig: %v", err)
+		t.Fatalf("gateway usm-gateway notification-only flagsConfig: %v", err)
+	}
+	if cfg.Security.Mode != "usm-gateway" {
+		t.Fatalf("security mode = %q", cfg.Security.Mode)
 	}
 	if cfg.Gateway.ListenAddr != "" || cfg.Gateway.AgentAddr != "" {
-		t.Fatalf("usm-manager unexpectedly configured request leg: %+v", cfg.Gateway)
+		t.Fatalf("notification-only usm-gateway unexpectedly configured request leg: %+v", cfg.Gateway)
 	}
 	if cfg.Gateway.TrapListenAddr != ":162" || cfg.Gateway.TrapSinkAddr != "127.0.0.1:10162" {
 		t.Fatalf("gateway trap legs = %+v", cfg.Gateway)
@@ -199,10 +201,14 @@ func TestFlagsConfigGatewayErrors(t *testing.T) {
 		name string
 		o    flagsOpts
 	}{
-		{"no listen", flagsOpts{secMode: "usm-gateway", agent: ":161", authPass: "a", privPass: "b"}},
-		{"no agent", flagsOpts{secMode: "usm-gateway", listen: ":161", authPass: "a", privPass: "b"}},
+		{"listen without agent", flagsOpts{secMode: "usm-gateway", listen: ":161", authPass: "a", privPass: "b"}},
+		{"agent without listen", flagsOpts{secMode: "usm-gateway", agent: ":161", authPass: "a", privPass: "b"}},
+		{"trap-listen without trap-sink", flagsOpts{secMode: "usm-gateway", trapListen: ":162", authPass: "a", privPass: "b"}},
+		{"trap-sink without trap-listen", flagsOpts{secMode: "usm-gateway", trapSink: ":10162", authPass: "a", privPass: "b"}},
+		{"no legs at all", flagsOpts{secMode: "usm-gateway", authPass: "a", privPass: "b"}},
 		{"bad secMode usm-translate", flagsOpts{secMode: "usm-translate", listen: ":161", agent: ":162", authPass: "a", privPass: "b"}},
 		{"bad secMode passthrough", flagsOpts{secMode: "passthrough", listen: ":161", agent: ":162"}},
+		{"removed secMode usm-manager", flagsOpts{secMode: "usm-manager", trapListen: ":162", trapSink: ":10162", authPass: "a", privPass: "b"}},
 		{"unknown secMode", flagsOpts{secMode: "bogus", listen: ":161", agent: ":162"}},
 		{"missing passes", flagsOpts{secMode: "usm-gateway", listen: ":161", agent: ":162"}},
 		{"tsm missing certs", flagsOpts{secMode: "tsm-gateway", listen: ":161", agent: ":162"}},

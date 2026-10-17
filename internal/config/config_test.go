@@ -107,14 +107,14 @@ func TestValidateErrors(t *testing.T) {
 	if err := goodA.Validate(); err != nil {
 		t.Errorf("agent validate: %v", err)
 	}
-	goodUSMManager := &Config{
+	goodUSMNotifOnly := &Config{
 		Role: RoleGateway,
 		Gateway: GatewayRole{
 			TrapListenAddr: ":162",
 			TrapSinkAddr:   "127.0.0.1:10162",
 		},
 		Security: Security{
-			Mode: "usm-manager",
+			Mode: "usm-gateway",
 			Users: []UserCfg{{
 				Name:         "proxy",
 				AuthProtocol: "sha",
@@ -122,8 +122,16 @@ func TestValidateErrors(t *testing.T) {
 			}},
 		},
 	}
-	if err := goodUSMManager.Validate(); err != nil {
-		t.Errorf("usm-manager without request leg: %v", err)
+	if err := goodUSMNotifOnly.Validate(); err != nil {
+		t.Errorf("usm-gateway notification-only (trap legs only): %v", err)
+	}
+	halfNotify := &Config{
+		Role:     RoleGateway,
+		Gateway:  GatewayRole{TrapListenAddr: ":162"},
+		Security: Security{Mode: "usm-gateway", Users: []UserCfg{{Name: "proxy", AuthProtocol: "sha", PrivProtocol: "aes"}}},
+	}
+	if err := halfNotify.Validate(); err == nil {
+		t.Error("usm-gateway with trap_listen but no trap_sink accepted")
 	}
 	noAgentAddr := &Config{Role: RoleAgent, Tunnel: Tunnel{Mode: "dtls", ListenAddr: ":10162", PSK: "text:s"}}
 	if err := noAgentAddr.Validate(); err == nil {

@@ -26,6 +26,7 @@ import (
 
 // buildGateway starts a GatewayTranslator on 127.0.0.1:front relaying to
 // 127.0.0.1:agent; trapListen/trapSink enable the trap listener when set.
+// front=agent=0 starts a notification-only gateway (no request path).
 // Optional trailing filters are passed to the translator.
 func buildGateway(t *testing.T, front, agent int, trapListen, trapSink string, filt ...*notifyfilter.Filter) (stop func()) {
 	t.Helper()
@@ -40,11 +41,13 @@ func buildGateway(t *testing.T, front, agent int, trapListen, trapSink string, f
 	}
 
 	cfg := config.GatewayRole{
-		ListenAddr:     net.JoinHostPort("127.0.0.1", itoa(front)),
-		AgentAddr:      net.JoinHostPort("127.0.0.1", itoa(agent)),
 		TrapListenAddr: trapListen,
 		TrapSinkAddr:   trapSink,
 		AgentCommunity: "realcomm",
+	}
+	if front != 0 {
+		cfg.ListenAddr = net.JoinHostPort("127.0.0.1", itoa(front))
+		cfg.AgentAddr = net.JoinHostPort("127.0.0.1", itoa(agent))
 	}
 	users := []usm.Profile{{
 		Name:           "proxy",
@@ -480,5 +483,241 @@ func TestGatewayTrapFiltered(t *testing.T) {
 		case <-drain:
 			t.Fatal("second allowed trap never reached the sink (listener broken?)")
 		}
+	}
+}
+
+// startManagerSink starts a gosnmp TrapListener as the manager's v3 trap
+// receiver. Returns the sink address and a channel of received packets.
+// For informs the TrapListener auto-responds like a real manager
+// (GetResponse signed with its own keys) — the inform round-trip oracle.
+func startManagerSink(t *testing.T) (string, chan *gosnmp.SnmpPacket) {
+	t.Helper()
+	tl := gosnmp.NewTrapListener()
+	tl.Params = &gosnmp.GoSNMP{
+		Version:       gosnmp.Version3,
+		SecurityModel: gosnmp.UserSecurityModel,
+		MsgFlags:      gosnmp.AuthPriv,
+		SecurityParameters: &gosnmp.UsmSecurityParameters{
+			UserName:                 "proxy",
+			AuthenticationProtocol:   gosnmp.SHA,
+			AuthenticationPassphrase: "authpass",
+			PrivacyProtocol:          gosnmp.AES,
+			PrivacyPassphrase:        "privpass",
+		},
+	}
+	trapGot := make(chan *gosnmp.SnmpPacket, 8)
+	tl.OnNewTrap = func(s *gosnmp.SnmpPacket, u *net.UDPAddr) {
+		trapGot <- s
+	}
+	sinkAddr := freeUDPPort(t)
+	go func() { _ = tl.Listen(sinkAddr) }()
+	t.Cleanup(tl.Close)
+	select {
+	case <-tl.Listening():
+	case <-time.After(2 * time.Second):
+		t.Fatal("trap listener never came up")
+	}
+	return sinkAddr, trapGot
+}
+
+// deviceConn returns a UDP socket for firing clear notifications at the
+// gateway's trap listener.
+func deviceConn(t *testing.T, trapListen string) net.PacketConn {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return conn
+}
+
+// buildVBS builds a raw varbind-list (SEQUENCE content) with one varbind:
+// snmpTrapOID.0 = oid (test helper; BuildPDU takes the raw list content).
+func buildVBS(t *testing.T, oid string) []byte {
+	t.Helper()
+	oidTLV := msg.AppendTLV(nil, 0x06, mustOID(t, oid))
+	snmpTrapOIDTLV := msg.AppendTLV(nil, 0x06, msg.OIDSnmpTrapOID)
+	return msg.AppendTLV(nil, 0x30, append(append([]byte{}, snmpTrapOIDTLV...), oidTLV...))
+}
+
+// TestGatewayTrapRelay: a clear v2c device trap is wrapped into an
+// authenticated+encrypted v3 notification and validated by the gosnmp
+// TrapListener sink (notification-only gateway shape, no request path).
+func TestGatewayTrapRelay(t *testing.T) {
+	sinkAddr, trapGot := startManagerSink(t)
+	trapListen := freeUDPPort(t)
+	stop := buildGateway(t, 0, 0, trapListen, sinkAddr)
+	defer stop()
+
+	vbs := msg.BuildPDU(msg.PDUSNMPv2Trap, 0, 0, 0, buildVBS(t, "1.3.6.1.4.1.9999.1"))
+	dg, err := msg.BuildV1V2c(msg.Version2c, []byte("devicecomm"), vbs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := deviceConn(t, trapListen)
+	laddr, _ := net.ResolveUDPAddr("udp", trapListen)
+	if _, err := conn.WriteTo(dg, laddr); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case s := <-trapGot:
+		if s.Version != gosnmp.Version3 {
+			t.Fatalf("wrapped trap version = %v, want v3", s.Version)
+		}
+		sp, ok := s.SecurityParameters.(*gosnmp.UsmSecurityParameters)
+		if !ok {
+			t.Fatal("no USM security parameters on wrapped trap")
+		}
+		if sp.UserName != "proxy" {
+			t.Fatalf("wrapped trap user = %q, want proxy", sp.UserName)
+		}
+		if len(s.Variables) == 0 {
+			t.Fatal("wrapped trap has no varbinds")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("wrapped v3 trap never reached the sink")
+	}
+}
+
+// TestGatewayInformRoundTrip: a clear v2c device inform is wrapped into a
+// v3 inform; the gosnmp TrapListener auto-responds (GetResponse signed
+// with the sink's own keys); the gateway verifies/decrypts the response
+// and relays a clear v2c response back to the device (req-id and
+// community echoed).
+func TestGatewayInformRoundTrip(t *testing.T) {
+	sinkAddr, _ := startManagerSink(t)
+	trapListen := freeUDPPort(t)
+	stop := buildGateway(t, 0, 0, trapListen, sinkAddr)
+	defer stop()
+
+	const reqID = int32(777)
+	vbs := msg.BuildPDU(msg.PDUInformRequest, reqID, 0, 0, buildVBS(t, "1.3.6.1.4.1.9999.1"))
+	dg, err := msg.BuildV1V2c(msg.Version2c, []byte("devicecomm"), vbs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := deviceConn(t, trapListen)
+	laddr, _ := net.ResolveUDPAddr("udp", trapListen)
+	if _, err := conn.WriteTo(dg, laddr); err != nil {
+		t.Fatal(err)
+	}
+
+	// the clear response must come back to this socket
+	buf := make([]byte, 65536)
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, _, err := conn.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("clear inform response never came back: %v", err)
+	}
+	ver, community, pdu, err := msg.SplitV1V2c(buf[:n])
+	if err != nil {
+		t.Fatalf("response undecodable: %v", err)
+	}
+	if ver != msg.Version2c {
+		t.Fatalf("response version = %d, want 2c", ver)
+	}
+	if string(community) != "devicecomm" {
+		t.Fatalf("response community = %q, want devicecomm", community)
+	}
+	pduType, fields, err := msg.ParsePDU(pdu)
+	if err != nil {
+		t.Fatalf("response PDU undecodable: %v", err)
+	}
+	if pduType != msg.PDUGetResponse {
+		t.Fatalf("response PDU type = 0x%02x, want GetResponse", pduType)
+	}
+	if fields.ReqID != reqID {
+		t.Fatalf("response req-id = %d, want %d", fields.ReqID, reqID)
+	}
+}
+
+// TestGatewayV1TrapNotif: a clear v1 trap is translated (RFC 2576) and
+// wrapped like a v2c one.
+func TestGatewayV1TrapNotif(t *testing.T) {
+	sinkAddr, trapGot := startManagerSink(t)
+	trapListen := freeUDPPort(t)
+	stop := buildGateway(t, 0, 0, trapListen, sinkAddr)
+	defer stop()
+
+	trapPDU := msg.BuildV1Trap(msg.V1Trap{
+		Enterprise: mustOID(t, "1.3.6.1.4.1.9999"),
+		AgentAddr:  []byte{10, 0, 0, 1},
+		Generic:    0,
+		Specific:   0,
+		Timestamp:  12345,
+		Varbinds:   []byte{},
+	})
+	dg, err := msg.BuildV1V2c(msg.Version1, []byte("devicecomm"), trapPDU)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := deviceConn(t, trapListen)
+	laddr, _ := net.ResolveUDPAddr("udp", trapListen)
+	if _, err := conn.WriteTo(dg, laddr); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case s := <-trapGot:
+		if s.Version != gosnmp.Version3 {
+			t.Fatalf("wrapped trap version = %v, want v3", s.Version)
+		}
+		if len(s.Variables) == 0 {
+			t.Fatal("wrapped v1 trap has no varbinds (v2 translation failed)")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("wrapped v1 trap never reached the sink")
+	}
+}
+
+// TestGatewayNotifFilter: with a deny filter for an enterprise prefix,
+// device traps inside the prefix never reach the sink while traps outside
+// it do; the listener stays alive for subsequent traps.
+func TestGatewayNotifFilter(t *testing.T) {
+	sinkAddr, trapGot := startManagerSink(t)
+	trapListen := freeUDPPort(t)
+	filt, err := notifyfilter.New("deny", []string{"1.3.6.1.4.1.99"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stop := buildGateway(t, 0, 0, trapListen, sinkAddr, filt)
+	defer stop()
+
+	laddr, _ := net.ResolveUDPAddr("udp", trapListen)
+	conn := deviceConn(t, trapListen)
+	fire := func(oid string) {
+		t.Helper()
+		vbs := msg.BuildPDU(msg.PDUSNMPv2Trap, 0, 0, 0, buildVBS(t, oid))
+		dg, err := msg.BuildV1V2c(msg.Version2c, []byte("devicecomm"), vbs)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.WriteTo(dg, laddr); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fire("1.3.6.1.4.1.99.7")  // denied
+	fire("1.3.6.1.4.1.999.1") // allowed
+
+	select {
+	case <-trapGot:
+	case <-time.After(5 * time.Second):
+		t.Fatal("allowed trap never reached the sink")
+	}
+	// drain: no second packet may arrive (the denied one was dropped)
+	select {
+	case s := <-trapGot:
+		t.Fatalf("denied trap reached the sink: %d varbinds", len(s.Variables))
+	case <-time.After(700 * time.Millisecond):
+	}
+	// the listener must still be alive
+	fire("1.3.6.1.4.1.999.2")
+	select {
+	case <-trapGot:
+	case <-time.After(5 * time.Second):
+		t.Fatal("listener dead after denial")
 	}
 }

@@ -297,16 +297,25 @@ func (c *Config) Validate() error {
 	}
 	// Gateway role: single-box gateway — no tunnel. usm-gateway and
 	// tsm-gateway terminate manager requests and relay them as clear
-	// v1/v2c to a legacy agent. usm-manager instead relays device
-	// notifications to a manager and has no request/agent leg.
+	// v1/v2c to a legacy agent. usm-gateway additionally supports
+	// notification-only deployments (no request/agent leg): the
+	// notification legs secure a manager leg instead.
 	if c.Role == RoleGateway {
 		switch c.Security.Mode {
 		case "usm-gateway":
-			if c.Gateway.ListenAddr == "" {
-				return fmt.Errorf("gateway.listen_addr is required")
+			// Either leg pair (or both): the request path (front
+			// listener + legacy agent) and/or the notification path
+			// (clear trap listener + manager's v3 trap receiver).
+			hasRequest := c.Gateway.ListenAddr != "" && c.Gateway.AgentAddr != ""
+			hasNotify := c.Gateway.TrapListenAddr != "" && c.Gateway.TrapSinkAddr != ""
+			if !hasRequest && !hasNotify {
+				return fmt.Errorf("security.mode usm-gateway requires gateway.listen_addr + gateway.agent_addr (request path) or gateway.trap_listen_addr + gateway.trap_sink_addr (notification path)")
 			}
-			if c.Gateway.AgentAddr == "" {
-				return fmt.Errorf("gateway.agent_addr is required")
+			if (c.Gateway.ListenAddr == "") != (c.Gateway.AgentAddr == "") {
+				return fmt.Errorf("gateway.listen_addr and gateway.agent_addr must be configured together (request path)")
+			}
+			if (c.Gateway.TrapListenAddr == "") != (c.Gateway.TrapSinkAddr == "") {
+				return fmt.Errorf("gateway.trap_listen_addr and gateway.trap_sink_addr must be configured together (notification path)")
 			}
 			if len(c.Security.Users) == 0 {
 				return fmt.Errorf("security.users: usm-gateway needs at least one user")
@@ -318,28 +327,6 @@ func (c *Config) Validate() error {
 				if u.AuthProtocol == "" || u.PrivProtocol == "" {
 					return fmt.Errorf("security.users: user %s needs auth_protocol and priv_protocol", u.Name)
 				}
-			}
-		case "usm-manager":
-			// The manager-securing gateway wraps clear device
-			// notifications into authenticated v3 toward the manager's
-			// trap receiver: it needs users (its own authoritative
-			// engine) and both trap legs.
-			if len(c.Security.Users) == 0 {
-				return fmt.Errorf("security.users: usm-manager needs at least one user")
-			}
-			for _, u := range c.Security.Users {
-				if u.Name == "" {
-					return fmt.Errorf("security.users: user name is required")
-				}
-				if u.AuthProtocol == "" || u.PrivProtocol == "" {
-					return fmt.Errorf("security.users: user %s needs auth_protocol and priv_protocol", u.Name)
-				}
-			}
-			if c.Gateway.TrapListenAddr == "" {
-				return fmt.Errorf("security.mode usm-manager requires gateway.trap_listen_addr (clear notifications from devices)")
-			}
-			if c.Gateway.TrapSinkAddr == "" {
-				return fmt.Errorf("security.mode usm-manager requires gateway.trap_sink_addr (manager's v3 trap receiver)")
 			}
 		case "tsm-gateway":
 			if c.Gateway.ListenAddr == "" {
@@ -358,7 +345,7 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("security.mode tsm-gateway requires tunnel.ca_file to verify client certificates")
 			}
 		default:
-			return fmt.Errorf("gateway role requires security.mode usm-gateway, tsm-gateway or usm-manager, got %q", c.Security.Mode)
+			return fmt.Errorf("gateway role requires security.mode usm-gateway or tsm-gateway, got %q", c.Security.Mode)
 		}
 		return nil
 	}
@@ -398,11 +385,11 @@ func (c *Config) Validate() error {
 		}
 	}
 	switch c.Security.Mode {
-	case "passthrough", "usm-translate", "tsm", "usm-gateway", "tsm-gateway", "usm-manager":
+	case "passthrough", "usm-translate", "tsm", "usm-gateway", "tsm-gateway":
 	default:
-		return fmt.Errorf("security.mode must be passthrough, usm-translate, tsm, usm-gateway, tsm-gateway or usm-manager, got %q", c.Security.Mode)
+		return fmt.Errorf("security.mode must be passthrough, usm-translate, tsm, usm-gateway or tsm-gateway, got %q", c.Security.Mode)
 	}
-	if c.Security.Mode == "usm-gateway" || c.Security.Mode == "tsm-gateway" || c.Security.Mode == "usm-manager" {
+	if c.Security.Mode == "usm-gateway" || c.Security.Mode == "tsm-gateway" {
 		return fmt.Errorf("security.mode %s is only valid with the gateway role", c.Security.Mode)
 	}
 	if c.Security.Mode == "usm-translate" {

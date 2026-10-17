@@ -31,10 +31,15 @@ snmp-shield gateway \
   the agent host itself.
 - `--auth-pass`/`--priv-pass` — creates the USM user `proxy` (SHA auth +
   AES privacy). Managers configure the same credentials.
-- `--trap-listen` — optional: the legacy network fires clear traps here.
-- `--trap-sink` — the manager's v3 trap receiver; clear traps accepted
-  on `--trap-listen` are wrapped into authenticated v3 USM notifications
-  toward it.
+- `--trap-listen` — optional: the legacy network fires clear traps and
+  informs here.
+- `--trap-sink` — the manager's v3 trap receiver; clear traps and
+  informs accepted on `--trap-listen` are wrapped into authenticated v3
+  USM notifications toward it (informs confirmed: the manager's
+  acknowledgment is relayed back to the device).
+- Either leg pair can be used alone: notification-only (this section
+  only) secures a manager leg with no request path — see
+  [usm-manager](usm-manager.md).
 
 ## 2. Point the manager at the gateway
 

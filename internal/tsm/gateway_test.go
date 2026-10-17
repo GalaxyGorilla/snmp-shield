@@ -15,6 +15,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -371,4 +372,144 @@ func tunnelListenRaw(t *testing.T, ca, crt, key string) net.Listener {
 		t.Fatal(err)
 	}
 	return l
+}
+
+// TestTSMGatewayInformRoundTrip: the device sends a clear v2c inform at
+// the trap listener; the gateway wraps it into a TSM v3 inform, delivers
+// it over DTLS to the sink, and the manager's TSM GetResponse (echoing
+// the gateway's request-id) is matched on the sink session; the clear v2c
+// GetResponse — echoing the DEVICE's original request-id and community —
+// is relayed back to the device. Exercises the full confirm path: sink
+// read loop, req-id match, echo rebuild.
+func TestTSMGatewayInformRoundTrip(t *testing.T) {
+	ca, serverCrt, serverKey, _, _ := certFiles(t)
+
+	// TSM trap receiver sink: a raw DTLS listener that READS the wrapped
+	// inform and REPLIES with a TSM v3 GetResponse (echoing the gateway's
+	// request-id) on the same session — the manager-side half of the
+	// inform round trip.
+	sink := tunnelListenRaw(t, ca, serverCrt, serverKey)
+	sinkAddr := sink.Addr().String()
+	sinkGot := make(chan []byte, 1)
+	sinkErr := make(chan error, 1)
+	go func() {
+		c, err := sink.Accept()
+		if err != nil {
+			sinkErr <- err
+			return
+		}
+		defer c.Close()
+		buf := make([]byte, 65536)
+		c.SetReadDeadline(time.Now().Add(10 * time.Second))
+		n, err := c.Read(buf)
+		if err != nil {
+			sinkErr <- err
+			return
+		}
+		got := append([]byte(nil), buf[:n]...)
+		sinkGot <- got
+		// the wrapped inform: parse, take the request-id (the gateway's
+		// outgoing req-id is echoed in responses), reply TSM GetResponse
+		m, err := msg.ParseV3(got)
+		if err != nil {
+			sinkErr <- err
+			return
+		}
+		fields, ok := pduFields(m.PDU)
+		if !ok {
+			sinkErr <- fmt.Errorf("sink: unparseable PDU type %#x", m.PDU[0])
+			return
+		}
+		resp := msg.BuildPDU(msg.PDUGetResponse, fields.ReqID, 0, 0, fields.Varbinds)
+		scoped := msg.BuildScoped(nil, []byte{}, resp)
+		out, err := msg.BuildV3(msg.V3Header{
+			MsgID:      m.Header.MsgID,
+			MsgMaxSize: msg.DefaultMsgMaxSize,
+			MsgFlags:   msg.MsgFlagReportable,
+			SecModel:   msg.SecurityModelTSM,
+		}, msg.USMParams{}, scoped, nil)
+		if err != nil {
+			sinkErr <- err
+			return
+		}
+		c.SetWriteDeadline(time.Now().Add(5 * time.Second))
+		if _, err := c.Write(out); err != nil {
+			sinkErr <- err
+		}
+	}()
+
+	trapListen := freeUDPPort(t)
+	fake, agentAddr := fakeAgentOnFreePort(t)
+	defer fake.Close()
+
+	_, stop := buildTSMGateway(t, ca, serverCrt, serverKey, agentAddr,
+		[]string{"snmp-shield-manager"}, trapListen, sinkAddr)
+	defer stop()
+	waitFrontBound(t, trapListen)
+
+	// device sends a clear v2c inform at the trap listener
+	informPDU := msg.BuildPDU(msg.PDUInformRequest, 777, 0, 0, buildGetVarbinds(t))
+	inform, err := msg.BuildV1V2c(msg.Version2c, []byte("devicecomm"), informPDU)
+	if err != nil {
+		t.Fatal(err)
+	}
+	laddr, _ := net.ResolveUDPAddr("udp", trapListen)
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.WriteTo(inform, laddr); err != nil {
+		t.Fatal(err)
+	}
+
+	// the sink must have received the wrapped inform
+	select {
+	case <-sinkGot:
+	case serr := <-sinkErr:
+		t.Fatalf("sink: %v", serr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("wrapped TSM inform never reached the sink")
+	}
+
+	// the device must get its clear v2c GetResponse back (req-id 777
+	// echoed, devicecomm community)
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	buf := make([]byte, 65536)
+	n, _, err := conn.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("device never received the inform response: %v", err)
+	}
+	respInfo, err := msg.Peek(buf[:n])
+	if err != nil {
+		t.Fatalf("bad response datagram: %v", err)
+	}
+	if respInfo.Version != msg.Version2c {
+		t.Fatalf("response version = %d, want v2c", respInfo.Version)
+	}
+	_, comm, pduTLV, err := msg.SplitV1V2c(buf[:n])
+	if err != nil {
+		t.Fatalf("bad v2c response: %v", err)
+	}
+	if string(comm) != "devicecomm" {
+		t.Fatalf("response community = %q, want devicecomm", comm)
+	}
+	fields, ok := pduFields(pduTLV)
+	if !ok {
+		t.Fatalf("unparseable response PDU type %#x", pduTLV[0])
+	}
+	if fields.ReqID != 777 {
+		t.Fatalf("response req-id = %d, want 777 (device's original)", fields.ReqID)
+	}
+}
+
+// pduFields parses the PDU TLV into fields (test-side helper — the
+// production pduCommon is unexported).
+func pduFields(pduTLV []byte) (msg.PDUFields, bool) {
+	pduType, fields, err := msg.ParsePDU(pduTLV)
+	if err != nil {
+		return msg.PDUFields{}, false
+	}
+	_ = pduType
+	return fields, true
 }

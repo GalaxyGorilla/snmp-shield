@@ -220,7 +220,11 @@ func runSelftest(args []string) int {
 			if cfg.Security.Mode == "tsm-gateway" {
 				rep.Checks = append(rep.Checks, probeCertExpiry(cfg.Tunnel.CertFile))
 			}
-			rep.Checks = append(rep.Checks, probeAgent(ctx, cfg.Gateway.AgentAddr, gatewayCommunity(cfg)))
+			// notification-only usm-gateway (no request path) has no
+			// agent to probe.
+			if cfg.Gateway.AgentAddr != "" {
+				rep.Checks = append(rep.Checks, probeAgent(ctx, cfg.Gateway.AgentAddr, gatewayCommunity(cfg)))
+			}
 		}
 	}
 

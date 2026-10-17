@@ -52,10 +52,18 @@ type tsmGwPending struct {
 }
 
 // gwInformPending tracks one inform awaiting the manager's response: the
-// local device's address (for the echo) and the device's request-id.
+// local device's address and original version/community (the clear
+// response is rebuilt with them), the device's request-id (echoed back
+// to the device) and the gateway's outgoing request-id (the manager
+// echoes it in the TSM response — the match key).
 type gwInformPending struct {
-	addr     net.Addr
-	deviceID int32
+	addr      net.Addr
+	ver       int
+	community []byte
+	deviceID  int32 // device's request-id (echoed in the clear response)
+	outReqID  int32 // gateway's request-id (matched in the TSM response)
+	resp      []byte
+	ready     chan struct{}
 }
 
 // TSMGateway is the single-box TSM gateway: a raw DTLS front leg
@@ -78,7 +86,8 @@ type TSMGateway struct {
 	pendMu sync.Mutex
 	pend   map[int32]*tsmGwPending
 
-	// informs awaiting the manager's response echo
+	// informs awaiting the manager's response echo, keyed on the
+	// gateway's outgoing request-id
 	informMu sync.Mutex
 	inform   map[int32]*gwInformPending
 
@@ -427,7 +436,7 @@ func (g *TSMGateway) handleClearTrap(dg []byte, src net.Addr) {
 			return
 		}
 	}
-	_, _, pduTLV, err := msg.SplitV1V2c(dg)
+	_, community, pduTLV, err := msg.SplitV1V2c(dg)
 	if err != nil {
 		return
 	}
@@ -456,28 +465,116 @@ func (g *TSMGateway) handleClearTrap(dg []byte, src net.Addr) {
 		varbinds = fields.Varbinds
 	}
 
-	out, err := wrapTSM(g.msgID.Add(1), g.reqID.Add(1), pduType, varbinds, nil, msg.MsgFlagReportable, "")
+	msgID := g.msgID.Add(1)
+	reqID := g.reqID.Add(1)
+	out, err := wrapTSM(msgID, reqID, pduType, varbinds, nil, msg.MsgFlagReportable, "")
 	if err != nil {
 		return
 	}
 
 	if isInform {
-		// RFC 5591: the manager's response must be echoed back to the
-		// device as a GetResponse with the device's request-id; the
-		// device address is recorded for the echo path.
-		ip := &gwInformPending{addr: src, deviceID: info.RequestID}
+		// Track the inform BEFORE sending: the manager's TSM response
+		// (GetResponse echoing the gateway's request-id) arrives on the
+		// sink connection and is matched by the sink read loop; the clear
+		// response is rebuilt with the device's request-id and relayed to
+		// src. The 15s timeout is the fail-safe cleanup when the manager
+		// never answers.
+		ip := &gwInformPending{
+			addr:      src,
+			ver:       info.Version,
+			community: community,
+			deviceID:  info.RequestID,
+			outReqID:  reqID,
+			ready:     make(chan struct{}),
+		}
 		g.informMu.Lock()
-		g.inform[info.RequestID] = ip
+		g.inform[reqID] = ip
 		g.informMu.Unlock()
 		go func() {
 			g.trapSinkWrite(out)
-			<-time.After(reqTimeout)
-			g.informMu.Lock()
-			delete(g.inform, info.RequestID)
-			g.informMu.Unlock()
+			select {
+			case <-g.waitForInform(reqID):
+				// matched + relayed by the sink read loop
+			case <-time.After(reqTimeout):
+				g.log.Debug("tsm gateway: inform response timed out")
+				g.informMu.Lock()
+				if g.inform[reqID] == ip {
+					delete(g.inform, reqID)
+				}
+				g.informMu.Unlock()
+			case <-g.stop:
+			}
 		}()
 	} else {
 		go g.trapSinkWrite(out)
+	}
+}
+
+// waitForInform returns the ready channel of the pending inform.
+func (g *TSMGateway) waitForInform(reqID int32) <-chan struct{} {
+	g.informMu.Lock()
+	defer g.informMu.Unlock()
+	if p, ok := g.inform[reqID]; ok {
+		return p.ready
+	}
+	ch := make(chan struct{})
+	close(ch)
+	return ch
+}
+
+// serveSinkConn reads responses from the manager's TSM trap receiver
+// over the reusable DTLS session and matches them against pending
+// informs (the manager echoes the gateway's request-id). Responses that
+// match no pending inform are dropped — the sink speaks SNMP-over-DTLS,
+// one Read = one datagram.
+func (g *TSMGateway) serveSinkConn(conn net.Conn) {
+	defer conn.Close()
+	buf := make([]byte, 65536)
+	for {
+		n, err := conn.Read(buf)
+		if err != nil {
+			// drop the session: the next notification redials
+			g.sinkMu.Lock()
+			if g.sinkConn == conn {
+				g.sinkConn = nil
+			}
+			g.sinkMu.Unlock()
+			return
+		}
+		dg := append([]byte(nil), buf[:n]...)
+		m, perr := msg.ParseV3(dg)
+		if perr != nil || !msg.IsGetResponse(m.PDU[0]) {
+			continue
+		}
+		fields, ok := pduCommon(m.PDU)
+		if !ok {
+			continue
+		}
+		g.informMu.Lock()
+		pend, found := g.inform[fields.ReqID]
+		if found {
+			delete(g.inform, fields.ReqID)
+		}
+		g.informMu.Unlock()
+		if !found {
+			continue
+		}
+		// rebuild the clear response: device's request-id, original
+		// version/community, error status from the manager's response
+		resp := msg.BuildPDU(msg.PDUGetResponse, pend.deviceID, fields.ErrStatus, fields.ErrIndex, fields.Varbinds)
+		out, berr := msg.BuildV1V2c(pend.ver, pend.community, resp)
+		if berr != nil {
+			continue
+		}
+		pend.resp = out
+		close(pend.ready)
+		// relay directly with the pend pointer: the pend was deleted
+		// above, a map re-lookup would dead-end.
+		if udp, ok := pend.addr.(*net.UDPAddr); ok {
+			if _, err := g.trapConn.WriteTo(pend.resp, udp); err != nil {
+				g.log.Debug("tsm gateway: inform response delivery failed", zap.Error(err))
+			}
+		}
 	}
 }
 
@@ -490,9 +587,11 @@ func (g *TSMGateway) drop() {
 // trapSinkWrite delivers one wrapped notification to the manager's TSM
 // trap receiver (trap_sink_addr) over DTLS. The session is dialed lazily
 // on first use and kept for reuse; a failed send drops it so the next
-// notification redials. Dialer material comes from lcfg (the gateway has
-// no Tunnel section of its own — proxy wiring populates it from the same
-// cert material as the front leg).
+// notification redials. Each NEW session gets a read loop (serveSinkConn)
+// that matches the manager's inform responses against pending informs.
+// Dialer material comes from lcfg (the gateway has no Tunnel section of
+// its own — proxy wiring populates it from the same cert material as the
+// front leg).
 func (g *TSMGateway) trapSinkWrite(dg []byte) {
 	g.sinkMu.Lock()
 	conn := g.sinkConn
@@ -524,6 +623,7 @@ func (g *TSMGateway) trapSinkWrite(dg []byte) {
 	g.sinkMu.Lock()
 	g.sinkConn = c
 	g.sinkMu.Unlock()
+	go g.serveSinkConn(c)
 	if _, err := c.Write(dg); err != nil {
 		g.log.Debug("tsm gateway: trap sink write failed", zap.Error(err))
 	}

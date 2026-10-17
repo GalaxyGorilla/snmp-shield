@@ -76,6 +76,7 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | Static analysis (staticcheck + govulncheck toolset, pragmatic: fix only meaningful findings) | done (tested, staticcheck zero findings — dead code removed, pion/dtls v3.1.4 upgrade for GO-2026-6165, options-API migration; govulncheck clean) |
 | `validate` subcommand (`--role` + same flags/`--config`; `--json` for tooling; pre-flights cert keypairs, CA files, engine-store writability) + `selftest` subcommand (validate + probes: tunnel handshake per endpoint (manager), SNMP GET sysDescr.0 to the real agent (agent/gateway), front-cert expiry (tsm-gateway); `--probe=false`) | done (tested, unit tests + manual live-agent/tunnel/dead-addr verification) |
 | Makefile (`make build/test/vet/release`), systemd units (`deploy/*.service`: hardening, CAP_NET_BIND_SERVICE, StateDirectory), examples directory (6 copy-paste walkthroughs), README rewrite | done |
+| Goroutine-leak regression test (`internal/tunnel/leak_test.go`: 30 connect/exchange/close cycles over real PSK-DTLS loopback, goroutine count must return to baseline; server side keyed on `Session.Done()` + production `SetTuning` so there is no test-end accounting noise) | done (tested, -race -count 8 stable: before=after=5) |
 | SBOM + automated vuln-DB comparison (`make sbom` → syft SPDX+CycloneDX into `dist/`; `make vulnscan` → `grype db update` + `grype --fail-on high` vs NVD/GHSA/OSV; `scripts/sbom.sh --sbom-only`) + x/crypto v0.48.0 → v0.58.0 upgrade clearing all Critical/High advisories (go directive 1.24 → 1.26, mandatory for x/crypto ≥ 0.56) | done (tested, `make vulnscan` rc=0 — only residual GO-2026-5932 is Unknown severity/unfixed deprecated-openpgp advisory, below the gate; direct symbol-precise binary scan: 0 findings) |
 
 ### Gateway modes (single proxy, no second proxy required)
@@ -636,6 +637,20 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   (O_RDWR|O_CREATE on the file path; a directory in place fails; parent
   dirs are NOT created). `--json` reports go to stdout (tooling reads
   them), human errors go to stderr with exit 1.
+- **Goroutine-leak testing** (`internal/tunnel/leak_test.go`,
+  `TestSessionGoroutineLeak`): the session layer is pinned against
+  goroutine leaks with 30 connect/exchange/close cycles over a real
+  PSK-DTLS loopback pair — `runtime.NumGoroutine()` must return to
+  baseline. Two harness gotchas learned while building it:
+  (a) the server side MUST key its goroutines on `Session.Done()` and
+  mirror production tuning (`SetTuning(keepalive, 0)`) — a harness
+  parked on a test-end `<-cancel` channel leaks one goroutine set per
+  cycle and flags false positives (63 "leaked" goroutines that were
+  just harness accounting); (b) without `SetTuning`, the server's
+  legacy 90s read deadline outlives the 3s leak-check window, so the
+  pion handshake goroutine + read loop are still parked at measurement
+  time — flaky across runs. With both fixes the count is exactly
+  stable (before=after=5 over 30 cycles, -count 8 green).
 - **SBOM + vuln scan** (`make sbom` / `make vulnscan`, syft + grype):
   syft catalogs the stripped release ELF — Go buildinfo survives
   `-s -w` (the binary pseudo-version is crafted from build settings),

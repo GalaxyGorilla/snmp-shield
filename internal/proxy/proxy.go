@@ -242,7 +242,7 @@ func runManagerUSM(ctx context.Context, opts Options, met *observ.Metrics, sess 
 
 // runAgent runs the agent-side instance: it listens on the tunnel and
 // serves the clear agent leg.
-func runAgent(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent *snmpmetrics.Agent) error {
+func runAgent(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent *snmpmetrics.Agent, ready ...chan<- struct{}) error {
 	psk, err := opts.Config.PSKBytes()
 	if err != nil {
 		return err
@@ -261,6 +261,9 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent 
 		return fmt.Errorf("tunnel listen: %w", err)
 	}
 	defer l.Close()
+	if len(ready) > 0 && ready[0] != nil {
+		close(ready[0])
+	}
 
 	// Unblock Accept on shutdown.
 	done := make(chan struct{})

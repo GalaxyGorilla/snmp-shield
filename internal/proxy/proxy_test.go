@@ -158,8 +158,17 @@ func startAgent(t *testing.T, cfg *config.Config, met *observ.Metrics) (cancel c
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh = make(chan error, 1)
-	go func() { errCh <- runAgent(ctx, Options{Config: cfg, Log: zap.NewNop(), Version: "test"}, met, nil) }()
-	waitBound(t, cfg.Tunnel.ListenAddr)
+	ready := make(chan struct{})
+	go func() {
+		errCh <- runAgent(ctx, Options{Config: cfg, Log: zap.NewNop(), Version: "test"}, met, nil, ready)
+	}()
+	select {
+	case <-ready:
+	case err := <-errCh:
+		t.Fatalf("agent exited during startup: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for agent startup")
+	}
 	return cancel, errCh
 }
 

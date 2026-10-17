@@ -108,6 +108,14 @@ func TestSessionGoroutineLeak(t *testing.T) {
 		}
 	}
 
+	// Stop accepting before waiting: otherwise the accept goroutine can add
+	// another session while Wait is in progress. All clients are closed, so
+	// every server session must now leave through Done.
+	if err := l.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wg.Wait()
+
 	// give lingering goroutines a chance to exit, then compare.
 	runtime.GC()
 	deadline := time.Now().Add(3 * time.Second)

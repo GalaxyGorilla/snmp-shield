@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"sync/atomic"
 )
 
 // AuthProtocol enumerates the supported authentication protocols.
@@ -340,23 +341,23 @@ func Verify(a AuthProtocol, packet, authKey, authParams []byte, authParamsOff in
 // SaltCounter is the per-engine privacy salt source (RFC 3414 8.1.1.1:
 // incremented on every encrypted packet).
 type SaltCounter struct {
-	v uint64
+	v atomic.Uint64
 }
 
 // Next returns the next AES salt (8 bytes BE).
 func (s *SaltCounter) NextAES() []byte {
-	s.v++
+	v := s.v.Add(1)
 	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, s.v)
+	binary.BigEndian.PutUint64(b, v)
 	return b
 }
 
 // NextDES returns the next DES salt: boots(4) | counter(4).
 func (s *SaltCounter) NextDES(boots uint32) []byte {
-	s.v++
+	v := s.v.Add(1)
 	b := make([]byte, 8)
 	binary.BigEndian.PutUint32(b[:4], boots)
-	binary.BigEndian.PutUint32(b[4:], uint32(s.v))
+	binary.BigEndian.PutUint32(b[4:], uint32(v))
 	return b
 }
 

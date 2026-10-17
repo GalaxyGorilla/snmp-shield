@@ -155,6 +155,11 @@ with `validate --json`, and offer a "test connection" button backed by
 - **Engine state** — `security.engine_store` must be on persistent
   storage: engineBoots must never decrease (anti-rollback). systemd's
   `StateDirectory=snmp-proxy` covers this.
+- **Supply chain** — `make sbom` produces SPDX + CycloneDX SBOMs of the
+  release binary into `dist/`; `make vulnscan` matches them against
+  NVD/GHSA/OSV and fails on HIGH-severity findings. Useful for release
+  provenance on the appliance. `scripts/sbom.sh` runs the same flow
+  standalone (`--sbom-only` skips the scan).
 - **Metrics** — Prometheus endpoint via `--metrics-addr`: tunnel
   frames/bytes, forwarded requests, errors, notifications relayed/
   filtered/dropped, reconnects, tunnel-up gauge, forwarding latency.
@@ -180,10 +185,14 @@ make build     # bin/snmp-proxy
 make test      # go test ./... -race -timeout 180s
 make vet       # go vet ./...
 make release   # stripped static binary for deployment
+make sbom      # SPDX + CycloneDX SBOMs for the release binary (syft) into dist/
+make vulnscan  # match the SBOM against NVD/GHSA/OSV; fails on HIGH+ (grype)
 ```
 
 Every commit is expected to pass build + vet + the race suite (run
-manually; the project is CI-free).
+manually; the project is CI-free). `make vulnscan` also runs
+`scripts/sbom.sh`-style supply-chain checks standalone; both targets
+exit 77 (skip) when syft/grype are not installed.
 
 ## Documentation
 

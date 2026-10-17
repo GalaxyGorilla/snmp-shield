@@ -36,18 +36,20 @@ long-haul segment between them.
 
 ## 3. Status / Roadmap
 
-**Current state: fresh scaffold only — no Go source written yet.**
+**Current state: milestone 1 (passthrough tunnel) implemented and tested.
+USM/TSM message-level security not yet started.**
 
 | Milestone | Status |
 |---|---|
 | Scaffold: dirs, go.mod, .gitignore, AGENTS.md | done |
-| Config package (YAML + flags, both roles) | todo |
-| Logging/metrics baseline (zap + Prometheus) | todo |
-| Tunnel: DTLS/UDP + TLS/TCP dialer/listener | todo |
-| Passthrough forwarding v1/v2c/v3 (GET/GETNEXT/GETBULK/SET, traps/informs) | todo |
+| Config package (YAML + flags, both roles) | done (tested) |
+| Logging/metrics baseline (zap + Prometheus) | done |
+| Tunnel: DTLS/UDP + TLS/TCP dialer/listener | done (tested) |
+| Passthrough forwarding v1/v2c/v3 (GET/GETNEXT/GETBULK/SET, traps/informs) | done (tested) |
+| E2E harness (Go/gosnmp client + fake Go agent on loopback) | done |
 | USM translate mode (v1/v2c <-> v3 authPriv, engineID discovery, boots/time cache) | todo |
 | TSM mode (cert-based security model on tunnel leg) | todo |
-| E2E harness (net-snmp tools on loopback) | todo |
+| Net-snmp interop tests (needs `apt-get install snmp snmpd`) | todo |
 | PSK ciphersuites, notify filtering, HA | backlog |
 
 ## 4. Repository Layout
@@ -67,7 +69,10 @@ internal/securitylevel/   securityLevel constants/validation
 internal/observ/          zap logging + Prometheus metrics
 ```
 
-(Directories exist and are empty as of initial scaffold.)
+(Directories with code: config, observ, tunnel, msg, passthrough, proxy,
+cmd/snmp-proxy. Still empty, reserved for milestone 2-3: usm, tsm, cache,
+discovery, securitylevel. Also: configs/ example YAML, scripts/gen-certs.sh
+throwaway test PKI into gitignored certs/.)
 
 ## 5. Build / Test
 
@@ -80,6 +85,8 @@ go test ./... -race
 ```
 
 **Acceptance for every commit**: build + vet + `go test -race ./...` clean.
+Note: non-login shells may not have `go` on PATH — use `/usr/local/go/bin/go`
+or set `-timeout` on `go test` (DTLS tests would hang without one).
 
 ## 6. Key Dependencies (go.mod)
 
@@ -88,6 +95,7 @@ go test ./... -race
 - `github.com/prometheus/client_golang` — metrics
 - `github.com/spf13/pflag` — CLI flags
 - `go.uber.org/zap` — structured logging
+- `gopkg.in/yaml.v3` — config parsing
 
 ## 7. Design Notes
 
@@ -102,6 +110,22 @@ go test ./... -race
   the tunnel handshake then *is* the SNMP authentication.
 - Traps/informs flow both directions: devices -> manager-side proxy -> tunnel
   -> agent-side proxy -> real manager.
+
+### pion/dtls v3 quirks (learned the hard way, do not regress)
+
+- **Server-side handshake starts only on first Read/Write of the accepted
+  conn.** `listener.Accept()` returns a conn whose handshake FSM is idle;
+  the server never answers the ClientHello until the app reads. The proxy
+  serves every accepted conn with `NewServerSession` (readLoop) immediately;
+  tests must do the same (an "accept and discard" test deadlocks).
+- Client needs BOTH `PSK` and `PSKIdentityHint` set (v3 rejects otherwise).
+- DTLS preserves record boundaries per Read: a partial Read consumes the
+  whole record. `streamConn` (internal/tunnel/stream.go) buffers the
+  remainder to give io.ReadFull semantics.
+- Single `Write` of a multi-frame blob >MTU is silently dropped: the session
+  writes each frame separately.
+- 13-byte frame headers fail `Unmarshal` (ErrShort) when payload length >0:
+  readLoop uses header-only `UnmarshalHeader` then reads the payload.
 
 ## 8. AGENTS.md Maintenance Rule
 

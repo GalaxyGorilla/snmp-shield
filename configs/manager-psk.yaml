@@ -1,0 +1,24 @@
+# Manager-side proxy: PSK-secured DTLS tunnel to the agent-side proxy.
+role: manager
+
+tunnel:
+  mode: dtls
+  # Address of the agent-side proxy's tunnel listener.
+  dial_addr: "192.0.2.20:10162"
+  psk_identity: "snmp-proxy-manager"
+  # Accepts "hex:<hex>", "text:<string>", or a bare string (treated as text).
+  psk: "text:change-me-shared-secret"
+  server_name: "snmp-proxy-agent"
+  # insecure_skip_verify is only for PSK mode (no CA); keep false in production.
+  insecure_skip_verify: true
+  keepalive_secs: 15
+  max_reconnect_backoff: 5s
+  max_frame_size: 8192
+
+manager:
+  # Clear SNMP leg: managers point their requests here.
+  listen_addr: ":161"
+  # Where relayed traps/informs are delivered (usually the real manager).
+  trap_sink_addr: "127.0.0.1:10162"
+  # Optional: also accept traps from local devices and relay them.
+  trap_listen_addr: ":10163"

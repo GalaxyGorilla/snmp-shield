@@ -1,0 +1,17 @@
+# Agent-side proxy: PSK-secured DTLS tunnel listener.
+role: agent
+
+tunnel:
+  mode: dtls
+  listen_addr: ":10162"
+  psk_identity: "snmp-proxy-agent"
+  # Must match the manager side.
+  psk: "text:change-me-shared-secret"
+  keepalive_secs: 15
+  max_frame_size: 8192
+
+agent:
+  # Clear SNMP leg: the real SNMP agent behind this proxy.
+  agent_addr: "127.0.0.1:161"
+  # Optional: local devices send traps here; relayed over the tunnel.
+  trap_listen_addr: ":10163"

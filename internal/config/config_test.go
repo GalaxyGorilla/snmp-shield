@@ -1,0 +1,154 @@
+package config
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func writeTemp(t *testing.T, content string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestLoadManagerHexPSK(t *testing.T) {
+	path := writeTemp(t, `
+tunnel:
+  mode: dtls
+  dial_addr: "10.0.0.1:10162"
+  psk: "hex:00112233445566778899aabbccddeeff"
+manager:
+  listen_addr: ":161"
+`)
+	cfg, err := Load(path, RoleManager)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if cfg.Role != RoleManager {
+		t.Errorf("role = %q", cfg.Role)
+	}
+	if cfg.Tunnel.Mode != "dtls" || cfg.Tunnel.DialAddr != "10.0.0.1:10162" {
+		t.Errorf("tunnel = %+v", cfg.Tunnel)
+	}
+	want := []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}
+	got, err := cfg.PSKBytes()
+	if err != nil || string(got) != string(want) {
+		t.Errorf("psk bytes = %x err=%v", got, err)
+	}
+	if cfg.Manager.ListenAddr != ":161" {
+		t.Errorf("manager listen = %q", cfg.Manager.ListenAddr)
+	}
+	// Defaults applied.
+	if cfg.Tunnel.KeepaliveSecs <= 0 {
+		t.Errorf("keepalive default not applied: %d", cfg.Tunnel.KeepaliveSecs)
+	}
+	if cfg.Tunnel.MaxFrameSize <= 0 {
+		t.Errorf("max_frame_size default not applied: %d", cfg.Tunnel.MaxFrameSize)
+	}
+}
+
+func TestLoadAgentTextPSK(t *testing.T) {
+	path := writeTemp(t, `
+tunnel:
+  mode: tls
+  listen_addr: ":10162"
+  psk: "text:shared-secret"
+agent:
+  agent_addr: "127.0.0.1:161"
+`)
+	cfg, err := Load(path, RoleAgent)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	got, err := cfg.PSKBytes()
+	if err != nil || string(got) != "shared-secret" {
+		t.Errorf("psk bytes = %q err=%v", got, err)
+	}
+	if cfg.Agent.AgentAddr != "127.0.0.1:161" {
+		t.Errorf("agent addr = %q", cfg.Agent.AgentAddr)
+	}
+}
+
+func TestPSKBareAndBadHex(t *testing.T) {
+	c := &Config{Tunnel: Tunnel{PSK: "bare-secret"}}
+	got, err := c.PSKBytes()
+	if err != nil || string(got) != "bare-secret" {
+		t.Errorf("bare psk = %q err=%v", got, err)
+	}
+	c = &Config{Tunnel: Tunnel{PSK: "hex:zzzz"}}
+	if _, err := c.PSKBytes(); err == nil {
+		t.Error("bad hex accepted")
+	}
+	empty := &Config{}
+	if _, err := empty.PSKBytes(); err == nil {
+		t.Error("empty psk accepted")
+	}
+}
+
+func TestValidateErrors(t *testing.T) {
+	goodM := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", DialAddr: "x:1", PSK: "text:s"}, Manager: ManagerRole{ListenAddr: ":161"}}
+	if err := goodM.Validate(); err != nil {
+		t.Errorf("manager validate: %v", err)
+	}
+	noDial := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", PSK: "text:s"}, Manager: ManagerRole{ListenAddr: ":161"}}
+	if err := noDial.Validate(); err == nil {
+		t.Error("manager without dial_addr accepted")
+	}
+	noListen := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", DialAddr: "x:1", PSK: "text:s"}}
+	if err := noListen.Validate(); err == nil {
+		t.Error("manager without listen_addr accepted")
+	}
+	goodA := &Config{Role: RoleAgent, Tunnel: Tunnel{Mode: "dtls", ListenAddr: ":10162", PSK: "text:s"}, Agent: AgentRole{AgentAddr: "127.0.0.1:161"}}
+	if err := goodA.Validate(); err != nil {
+		t.Errorf("agent validate: %v", err)
+	}
+	noAgentAddr := &Config{Role: RoleAgent, Tunnel: Tunnel{Mode: "dtls", ListenAddr: ":10162", PSK: "text:s"}}
+	if err := noAgentAddr.Validate(); err == nil {
+		t.Error("agent without agent_addr accepted")
+	}
+	badMode := &Config{Role: RoleAgent, Tunnel: Tunnel{Mode: "quic", ListenAddr: ":10162", PSK: "text:s"}, Agent: AgentRole{AgentAddr: "x"}}
+	if err := badMode.Validate(); err == nil {
+		t.Error("bad tunnel mode accepted")
+	}
+	dtlsNoSecret := &Config{Role: RoleAgent, Tunnel: Tunnel{Mode: "dtls", ListenAddr: ":10162"}, Agent: AgentRole{AgentAddr: "x"}}
+	if err := dtlsNoSecret.Validate(); err == nil {
+		t.Error("dtls without psk/cert accepted")
+	}
+	badRole := &Config{Role: "router", Tunnel: Tunnel{Mode: "dtls", PSK: "text:s"}}
+	if err := badRole.Validate(); err == nil {
+		t.Error("bad role accepted")
+	}
+}
+
+func TestKeepaliveAndBackoff(t *testing.T) {
+	c := &Config{Tunnel: Tunnel{KeepaliveSecs: 7, MaxReconnectBackoff: 3}}
+	if got := c.Keepalive(); got != 7*time.Second {
+		t.Errorf("keepalive = %v", got)
+	}
+	if got := c.Backoff(); got != 3*time.Second {
+		t.Errorf("backoff = %v", got)
+	}
+	zero := &Config{}
+	zero.Defaults()
+	if zero.Keepalive() <= 0 || zero.Backoff() <= 0 {
+		t.Error("zero config must yield positive defaults")
+	}
+}
+
+func TestLoadMissingFile(t *testing.T) {
+	if _, err := Load("/nonexistent/config.yaml", RoleManager); err == nil {
+		t.Error("missing file accepted")
+	}
+}
+
+func TestLoadBadYAML(t *testing.T) {
+	path := writeTemp(t, "tunnel: [unclosed")
+	if _, err := Load(path, RoleManager); err == nil {
+		t.Error("bad yaml accepted")
+	}
+}

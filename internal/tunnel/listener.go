@@ -1,0 +1,130 @@
+// Package tunnel: listener (server) side for DTLS/UDP and TLS/TCP.
+package tunnel
+
+import (
+	"crypto/tls"
+	"crypto/x509"
+	"fmt"
+	"net"
+	"os"
+
+	"github.com/pion/dtls/v3"
+)
+
+// ListenerConfig mirrors Dialer for the server side.
+type ListenerConfig struct {
+	Mode        string // "dtls" or "tls"
+	PSK         []byte
+	PSKIdentity []byte
+	CAFile      string
+	CertFile    string
+	KeyFile     string
+	Insecure    bool // DTLS cert mode: skip client-cert verification
+}
+
+// Listen binds the tunnel listener at laddr. The returned Listener is a
+// net.Adapter-compatible net.Listener (Accept/Close/Addr).
+func Listen(laddr string, cfg ListenerConfig) (net.Listener, error) {
+	switch cfg.Mode {
+	case "dtls":
+		dcfg, err := dtlsServerConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		addr, err := net.ResolveUDPAddr("udp", laddr)
+		if err != nil {
+			return nil, fmt.Errorf("resolve tunnel listen addr: %w", err)
+		}
+		l, err := dtls.Listen("udp", addr, dcfg)
+		if err != nil {
+			return nil, fmt.Errorf("dtls listen: %w", err)
+		}
+		return &streamListener{Listener: l}, nil
+	case "tls":
+		tcfg, err := tlsServerConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		l, err := tls.Listen("tcp", laddr, tcfg)
+		if err != nil {
+			return nil, fmt.Errorf("tls listen: %w", err)
+		}
+		return l, nil
+	default:
+		return nil, fmt.Errorf("unknown tunnel mode %q", cfg.Mode)
+	}
+}
+
+// dtlsServerConfig builds the pion/dtls server config, PSK or
+// certificate-based.
+func dtlsServerConfig(cfg ListenerConfig) (*dtls.Config, error) {
+	if len(cfg.PSK) > 0 {
+		return &dtls.Config{
+			PSK: func(hint []byte) ([]byte, error) {
+				return cfg.PSK, nil
+			},
+			PSKIdentityHint:      cfg.PSKIdentity,
+			CipherSuites:         []dtls.CipherSuiteID{dtls.TLS_PSK_WITH_AES_128_CCM_8},
+			ExtendedMasterSecret: dtls.RequireExtendedMasterSecret,
+		}, nil
+	}
+	tcfg, err := tlsServerConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	dcfg := &dtls.Config{
+		ExtendedMasterSecret: dtls.RequireExtendedMasterSecret,
+		Certificates:         tcfg.Certificates,
+	}
+	if tcfg.ClientCAs != nil {
+		dcfg.ClientCAs = tcfg.ClientCAs
+		dcfg.ClientAuth = dtls.RequireAndVerifyClientCert
+	}
+	if cfg.Insecure {
+		dcfg.ClientAuth = dtls.NoClientCert
+		dcfg.InsecureSkipVerify = true
+	}
+	return dcfg, nil
+}
+
+// tlsServerConfig builds the crypto/tls server config.
+func tlsServerConfig(cfg ListenerConfig) (*tls.Config, error) {
+	if cfg.CertFile == "" || cfg.KeyFile == "" {
+		return nil, fmt.Errorf("tls server needs cert_file and key_file")
+	}
+	cert, err := tls.LoadX509KeyPair(cfg.CertFile, cfg.KeyFile)
+	if err != nil {
+		return nil, fmt.Errorf("load server cert: %w", err)
+	}
+	tcfg := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}
+	if cfg.CAFile != "" {
+		pem, err := os.ReadFile(cfg.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read CA: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("no certs in %s", cfg.CAFile)
+		}
+		tcfg.ClientCAs = pool
+		tcfg.ClientAuth = tls.RequireAndVerifyClientCert
+	}
+	return tcfg, nil
+}
+
+// streamListener wraps a DTLS listener so accepted conns are stream-
+// buffered (DTLS preserves record boundaries per Read).
+type streamListener struct {
+	net.Listener
+}
+
+func (s *streamListener) Accept() (net.Conn, error) {
+	c, err := s.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return newStreamConn(c, true), nil
+}

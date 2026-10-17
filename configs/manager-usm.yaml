@@ -1,0 +1,44 @@
+# Manager-side proxy: USM translate mode. Managers speak plain v1/v2c on
+# the clear leg; the proxy speaks SNMPv3 authPriv to the agent-side proxy
+# over the secured tunnel.
+role: manager
+
+tunnel:
+  mode: dtls
+  # Address of the agent-side proxy's tunnel listener.
+  dial_addr: "192.0.2.20:10162"
+  psk_identity: "snmp-proxy-manager"
+  psk: "text:change-me-shared-secret"
+  server_name: "snmp-proxy-agent"
+  insecure_skip_verify: true
+  keepalive_secs: 15
+  max_reconnect_backoff: 5s
+  max_frame_size: 8192
+
+security:
+  mode: usm-translate
+  # USM users shared with the agent side. The first user is used for
+  # requests forwarded over the tunnel.
+  users:
+    - name: "proxy"
+      auth_protocol: "sha"
+      auth_passphrase: "change-me-auth"
+      priv_protocol: "aes"
+      priv_passphrase: "change-me-priv"
+      # community used on the clear leg toward the real agent
+      community: "public"
+  # SNMPv3 engine ID of the REMOTE (agent-side) engine. Omit to discover
+  # it automatically at startup.
+  # engine_id: "hex:8000...0002"
+  # Persistent engine boots/state (anti-rollback for our own engine).
+  engine_store: "/var/lib/snmp-proxy/engine-manager.json"
+  # Community used in v2c notifications delivered to the trap sink.
+  trap_community: "public"
+
+manager:
+  # Clear SNMP leg: managers point their requests here.
+  listen_addr: ":161"
+  # Where relayed traps/informs are delivered (usually the real manager).
+  trap_sink_addr: "127.0.0.1:10162"
+  # Optional: also accept traps from local devices and relay them.
+  trap_listen_addr: ":10163"

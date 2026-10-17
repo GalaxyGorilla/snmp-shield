@@ -76,14 +76,57 @@ type AgentRole struct {
 	AgentAddr string `yaml:"agent_addr"`
 	// TrapListenAddr is the clear notification listener for devices.
 	TrapListenAddr string `yaml:"trap_listen_addr"`
+	// TrapSinkAddr, when set, receives notifications that arrive over the
+	// tunnel (manager-side traps) as v2c datagrams. Used in USM translate
+	// mode for the reverse trap direction.
+	TrapSinkAddr string `yaml:"trap_sink_addr"`
+	// TrapSinkCommunity is the community used in v2c notifications
+	// delivered to TrapSinkAddr.
+	TrapSinkCommunity string `yaml:"trap_sink_community"`
+}
+
+// Security configures the SNMP message-level security mode (USM
+// translate). When Mode is "usm-translate", the proxies speak SNMPv3
+// authPriv to each other over the tunnel and translate to/from v1/v2c on
+// the clear legs.
+type Security struct {
+	// Mode selects the message-level security: "passthrough" (default)
+	// or "usm-translate".
+	Mode string `yaml:"mode"`
+
+	// Users is the list of USM users shared by both proxy sides.
+	Users []UserCfg `yaml:"users"`
+
+	// EngineID, when set, fixes this instance's SNMP engine ID; otherwise
+	// one is generated and persisted in EngineStore.
+	EngineID string `yaml:"engine_id"`
+	// EngineStore is the path of the engine boots/state store.
+	EngineStore string `yaml:"engine_store"`
+
+	// TrapCommunity is the community used in v2c notifications delivered
+	// to local sinks (default "public").
+	TrapCommunity string `yaml:"trap_community"`
+}
+
+// UserCfg is one USM user: protocols + passphrases. On the agent side,
+// Community maps authenticated requests to the v1/v2c community used
+// toward the real agent.
+type UserCfg struct {
+	Name            string `yaml:"name"`
+	AuthProtocol    string `yaml:"auth_protocol"`
+	AuthPassphrase  string `yaml:"auth_passphrase"`
+	PrivProtocol    string `yaml:"priv_protocol"`
+	PrivPassphrase  string `yaml:"priv_passphrase"`
+	Community       string `yaml:"community"`
 }
 
 // Config is the full per-instance configuration.
 type Config struct {
-	Role    Role        `yaml:"-"`
-	Tunnel  Tunnel      `yaml:"tunnel"`
-	Manager ManagerRole `yaml:"manager"`
-	Agent   AgentRole   `yaml:"agent"`
+	Role     Role        `yaml:"-"`
+	Tunnel   Tunnel      `yaml:"tunnel"`
+	Manager  ManagerRole `yaml:"manager"`
+	Agent    AgentRole   `yaml:"agent"`
+	Security Security    `yaml:"security"`
 }
 
 // Defaults fills unset fields with sane values.
@@ -99,6 +142,12 @@ func (c *Config) Defaults() {
 	}
 	if c.Tunnel.MaxFrameSize <= 0 {
 		c.Tunnel.MaxFrameSize = 65536
+	}
+	if c.Security.Mode == "" {
+		c.Security.Mode = "passthrough"
+	}
+	if c.Security.TrapCommunity == "" {
+		c.Security.TrapCommunity = "public"
 	}
 }
 
@@ -130,6 +179,24 @@ func (c *Config) Validate() error {
 		}
 		if c.Tunnel.ListenAddr == "" {
 			return fmt.Errorf("tunnel.listen_addr is required for agent role")
+		}
+	}
+	switch c.Security.Mode {
+	case "passthrough", "usm-translate":
+	default:
+		return fmt.Errorf("security.mode must be passthrough or usm-translate, got %q", c.Security.Mode)
+	}
+	if c.Security.Mode == "usm-translate" {
+		if len(c.Security.Users) == 0 {
+			return fmt.Errorf("security.users: usm-translate needs at least one user")
+		}
+		for _, u := range c.Security.Users {
+			if u.Name == "" {
+				return fmt.Errorf("security.users: user name is required")
+			}
+			if u.AuthProtocol == "" || u.PrivProtocol == "" {
+				return fmt.Errorf("security.users: user %s needs auth_protocol and priv_protocol", u.Name)
+			}
 		}
 	}
 	return nil

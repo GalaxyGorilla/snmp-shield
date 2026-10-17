@@ -91,7 +91,7 @@ func TestPSKBareAndBadHex(t *testing.T) {
 }
 
 func TestValidateErrors(t *testing.T) {
-	goodM := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", DialAddr: "x:1", PSK: "text:s"}, Manager: ManagerRole{ListenAddr: ":161"}}
+	goodM := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", DialAddr: "x:1", PSK: "text:s"}, Manager: ManagerRole{ListenAddr: ":161"}, Security: Security{Mode: "passthrough"}}
 	if err := goodM.Validate(); err != nil {
 		t.Errorf("manager validate: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestValidateErrors(t *testing.T) {
 	if err := noListen.Validate(); err == nil {
 		t.Error("manager without listen_addr accepted")
 	}
-	goodA := &Config{Role: RoleAgent, Tunnel: Tunnel{Mode: "dtls", ListenAddr: ":10162", PSK: "text:s"}, Agent: AgentRole{AgentAddr: "127.0.0.1:161"}}
+	goodA := &Config{Role: RoleAgent, Tunnel: Tunnel{Mode: "dtls", ListenAddr: ":10162", PSK: "text:s"}, Agent: AgentRole{AgentAddr: "127.0.0.1:161"}, Security: Security{Mode: "passthrough"}}
 	if err := goodA.Validate(); err != nil {
 		t.Errorf("agent validate: %v", err)
 	}

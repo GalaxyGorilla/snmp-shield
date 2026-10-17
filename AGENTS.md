@@ -36,18 +36,18 @@ long-haul segment between them.
 
 ## 3. Status / Roadmap
 
-**Current state: milestone 1 (passthrough tunnel) implemented and tested.
-USM/TSM message-level security not yet started.**
+**Current state: milestone 2 (USM translate) implemented and tested, including
+byte-exact interop against gosnmp v3 authPriv clients.**
 
 | Milestone | Status |
 |---|---|
 | Scaffold: dirs, go.mod, .gitignore, AGENTS.md | done |
-| Config package (YAML + flags, both roles) | done (tested) |
+| Config package (YAML + flags, both roles, security.mode) | done (tested) |
 | Logging/metrics baseline (zap + Prometheus) | done |
 | Tunnel: DTLS/UDP + TLS/TCP dialer/listener | done (tested) |
 | Passthrough forwarding v1/v2c/v3 (GET/GETNEXT/GETBULK/SET, traps/informs) | done (tested) |
 | E2E harness (Go/gosnmp client + fake Go agent on loopback) | done |
-| USM translate mode (v1/v2c <-> v3 authPriv, engineID discovery, boots/time cache) | todo |
+| USM translate mode (v1/v2c <-> v3 authPriv, engineID discovery, boots/time cache) | done (tested, interop vs gosnmp) |
 | TSM mode (cert-based security model on tunnel leg) | todo |
 | Net-snmp interop tests (needs `apt-get install snmp snmpd`) | todo |
 | PSK ciphersuites, notify filtering, HA | backlog |
@@ -70,8 +70,9 @@ internal/observ/          zap logging + Prometheus metrics
 ```
 
 (Directories with code: config, observ, tunnel, msg, passthrough, proxy,
-cmd/snmp-proxy. Still empty, reserved for milestone 2-3: usm, tsm, cache,
-discovery, securitylevel. Also: configs/ example YAML, scripts/gen-certs.sh
+usm, cache, cmd/snmp-proxy. Still empty, reserved: tsm, discovery
+(discovery logic lives in internal/usm translate_manager.go), securitylevel.
+Also: configs/ example YAML (manager/agent × psk/usm), scripts/gen-certs.sh
 throwaway test PKI into gitignored certs/.)
 
 ## 5. Build / Test
@@ -110,6 +111,34 @@ or set `-timeout` on `go test` (DTLS tests would hang without one).
   the tunnel handshake then *is* the SNMP authentication.
 - Traps/informs flow both directions: devices -> manager-side proxy -> tunnel
   -> agent-side proxy -> real manager.
+- USM translate architecture: the agent-side proxy owns the authoritative
+  engine (requests + its own trap engine); the manager-side proxy owns its
+  own engine for traps it originates. Translation is PDU splicing (v1/v2c
+  community wrapper <-> v3 header+USM+scopedPDU), req-id preserved from the
+  client PDU end-to-end. All PDU field access goes through `msg.ParsePDU`
+  (single parser; the old ad-hoc BER walkers were removed after subtle
+  tag/length-position bugs).
+- Engine state: `cache.EngineClock` generates or adopts an engineID,
+  increments boots per start (persisted JSON in `security.engine_store` —
+  REQUIRED, boots must never decrease), engineTime = seconds since start.
+  Inbound timeliness per RFC 3414 §3.2 (±150 s window, anti-rollback).
+- gosnmp quirks (interop oracle; learned the hard way):
+  - gosnmp encrypts the **full scopedPDU TLV** (outer SEQUENCE header
+    included) and expects the same from us — `msg.BuildV3` mirrors this.
+  - Response decrypt uses the client's **cached** engine boots/time (the
+    values from our previously announced message), not the incoming
+    response's USM fields — agent-side responses always encrypt with the
+    engine state the peer last saw.
+  - Discovery = Reportable|NoAuthNoPriv empty GET; ANY response's USM
+    params update its engine state, then it retransmits with authPriv.
+    Our `dropOrReport` Report (reqID = triggering msgID, usmStats OID
+    varbind) is exactly what it needs; reports to authed users are signed
+    with that user, discovery reports stay NoAuthNoPriv.
+  - `UsmSecurityParameters` must be `InitSecurityKeys()` + `InitPacket()`
+    before `MarshalMsg()` in tests.
+  - Response PDU request-id must match the request's req-id (or 0); the
+    v3 header msgID is not validated.
+  - Responses need ≥1 varbind unless errStatus is set.
 
 ### pion/dtls v3 quirks (learned the hard way, do not regress)
 

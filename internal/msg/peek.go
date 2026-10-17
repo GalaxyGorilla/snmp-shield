@@ -142,6 +142,22 @@ func berContent(buf []byte) ([]byte, error) {
 	return rest[:l], nil
 }
 
+// berTLV returns the complete TLV (tag + length + content) at buf.
+func berTLV(buf []byte) ([]byte, error) {
+	if len(buf) < 2 {
+		return nil, errors.New("msg: truncated TLV")
+	}
+	l, rest, err := berLen(buf[1:])
+	if err != nil {
+		return nil, err
+	}
+	if len(rest) < l {
+		return nil, errors.New("msg: truncated TLV")
+	}
+	hdrLen := 1 + (len(buf) - 1 - len(rest))
+	return buf[:hdrLen+l], nil
+}
+
 // berSkip skips one TLV, returning the rest.
 func berSkip(buf []byte) ([]byte, error) {
 	l, rest, err := berLen(buf)

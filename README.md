@@ -35,6 +35,29 @@ still getting authentication and encryption where it matters:
 - **Deploy by paste** — `genpsk`, two commands, done (see
   [examples/](examples/)).
 
+## Is snmp-shield the right tool?
+
+Not always. Prefer the simplest security boundary that solves the
+problem:
+
+- **Devices support SNMPv3** — configure native SNMPv3 USM directly.
+  A proxy adds no security benefit to a device that can already
+  authenticate and encrypt its own traffic.
+- **Only the network path needs protection** — a site-to-site VPN such
+  as WireGuard or IPsec may be simpler.
+- **You need a flexible, programmable SNMP router or translator** —
+  [SNMP Proxy Forwarder (`snmpfwd`)](https://github.com/etingof/snmpfwd/)
+  is an established open-source alternative with broad routing and
+  plugin capabilities.
+
+Use snmp-shield when legacy v1/v2c devices cannot change and you need
+an appliance-like security boundary: standard SNMPv3 USM or
+SNMP-over-DTLS at a gateway, or a PSK-DTLS/TLS two-proxy tunnel between
+sites. It is intentionally opinionated about deployment and operations:
+static binaries, hardened systemd units, configuration validation and
+self-tests, tunnel failover, persistent USM engine state, Prometheus
+and SNMP health metrics, and SBOM/vulnerability tooling.
+
 ## Deployment shapes
 
 | Shape | Topology | Use when |

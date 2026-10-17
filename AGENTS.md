@@ -36,13 +36,15 @@ long-haul segment between them.
 
 ## 3. Status / Roadmap
 
-**Current state: all four security modes complete — passthrough,
-usm-translate (two-proxy tunnel), tsm (two-proxy tunnel), and usm-gateway
-(single box, standard v3 in / clear v2c out); no-YAML CLI mode implemented
-and smoke-tested end-to-end; cache package unit-tested; net-snmp CLI
-interop-tested end-to-end for both the two-proxy chain (incl. trap
-direction) and the USM gateway (incl. trap direction and rejection of
-clear/wrong-user traffic).**
+**Current state: all five security modes complete — passthrough,
+usm-translate (two-proxy tunnel), tsm (two-proxy tunnel), usm-gateway
+(single box, standard v3 in / clear v2c out), and tsm-gateway (single
+box, SNMP-over-DTLS RFC 6353 in / clear v2c out); no-YAML CLI mode
+implemented and smoke-tested end-to-end; cache package unit-tested;
+net-snmp CLI interop-tested end-to-end for the two-proxy chain (incl.
+trap direction), the USM gateway (incl. trap direction and rejection of
+clear/wrong-user traffic), and the TSM gateway (snmpget/getnext/
+bulkwalk/set, untrusted-client rejection, trap direction).**
 
 | Milestone | Status |
 |---|---|
@@ -57,7 +59,7 @@ clear/wrong-user traffic).**
 | Cache package unit tests (store persistence, engine clocks, replay) | done (tested) |
 | Net-snmp interop tests (snmpget/getnext/bulkwalk/set/trap; needs `apt-get install snmp`) | done (tested, `scripts/interop-snmp.sh`) |
 | USM gateway mode (standard v3 manager → single proxy → legacy agent) | done (tested, gosnmp + net-snmp `scripts/interop-gateway.sh`, incl. trap direction) |
-| TSM gateway mode (RFC 6353 SNMP-over-DTLS front leg) | todo (detailed plan below) |
+| TSM gateway mode (RFC 6353 SNMP-over-DTLS front leg) | done (tested, Go harness + net-snmp `scripts/interop-gateway-tsm.sh`, incl. trap direction) |
 | PSK ciphersuites, notify filtering, HA | backlog |
 
 ### Gateway modes (single proxy, no second proxy required)
@@ -126,7 +128,8 @@ device.
   v3 clients (snmpget/getnext/bulkwalk/set, wrong-user + clear-v2c
   rejection, snmptrap direction; skips rc 77 without net-snmp).
 
-**2. TSM gateway (`tsm-gateway`)** — RFC 6353 front leg, near-free:
+**2. TSM gateway (`tsm-gateway`)** — RFC 6353 front leg — **IMPLEMENTED
+(see below)**:
 
 ```
 [standard TSM client] --SNMP-over-DTLS (RFC 6353)--> [proxy] --clear v2c--> [legacy agent]
@@ -140,7 +143,46 @@ device.
   securityName, `tsm_identities` allow-list, unwrap scopedPDU, forward
   clear v2c; responses/traps mirrored.
 - Caveat: almost no industry-standard manager speaks TSM (net-snmp
-  does, Zabbix/PRTG don't) — implement as bonus after USM gateway.
+  does, Zabbix/PRTG don't) — implemented as bonus after USM gateway.
+
+### TSM gateway design (as implemented)
+
+- Same `gateway` role as the USM gateway, `security.mode: tsm-gateway`
+  (no tunnel, no engine clock). Config: `gateway.listen_addr` (raw
+  DTLS front leg), `gateway.agent_addr`, `gateway.agent_community`,
+  optional `gateway.trap_listen_addr` / `gateway.trap_sink_addr`
+  (manager's TSM trap receiver). Cert material on the **tunnel**
+  config keys (`tunnel.ca_file`/`cert_file`/`key_file`): the raw
+  front listener needs a server cert; `security.tsm_identities`
+  allow-lists client certificate identities (empty = accept any valid
+  cert).
+- `internal/tunnel/listener.go` gained `ListenRaw` (raw mode, DTLS
+  only — TLS/TCP is a byte stream with no record boundaries): Accept
+  hands out the `*dtls.Conn` as-is (no `streamConn` buffering), each
+  Read = one SNMP datagram.
+- `internal/tsm/tsm_gateway.go` — `TSMGateway`: front DTLS sessions
+  (one per manager), handshake = authentication (peer cert CN →
+  `tsm_identities`), unwrap TSM v3 (plaintext scopedPDU, secModel 4),
+  forward as clear v2c to the legacy agent; responses correlated by a
+  map keyed on the downstream request-id. Clear v1/v2c traps at
+  `trap_listen_addr` are wrapped into TSM v3 notifications (reusable
+  DTLS session toward `trap_sink_addr`).
+- **TSM response echo rule** (learned from net-snmp
+  `snmpv3_verify_msg`, which validates every field): responses echo
+  the request's msgID, request-id, contextEngineID, securityName and
+  security-level flags (auth/priv bits), even though TSM secParams
+  stay empty.
+- No-YAML CLI: `snmp-proxy gateway --security tsm-gateway --listen
+  :10161 --agent 127.0.0.1:161 --ca-file certs/ca.crt --cert-file
+  certs/server.crt --key-file certs/server.key [--trap-listen :10162
+  --trap-sink <mgr>:10162]`.
+- Tests: `internal/tsm/gateway_test.go` (DTLS client with cert →
+  gateway → fake v2c agent: GET, wrong-identity silence, trap
+  direction); `scripts/interop-gateway-tsm.sh` drives the gateway
+  with real net-snmp TSM clients over `dtls:` (snmpget/getnext/
+  bulkwalk/set, untrusted-client rejection, trap direction via
+  `scripts/tsm-sink` raw-DTLS receiver; skips rc 77 without
+  snmpget/openssl).
 
 ### TSM design (RFC 5591, as implemented)
 
@@ -164,7 +206,7 @@ internal/config/          YAML config + flag overrides
 internal/proxy/           shared proxy wiring
 internal/passthrough/     opaque forwarding of clear SNMP
 internal/usm/             USM translate mode + gateway mode + profiles
-internal/tsm/             TSM mode
+internal/tsm/             TSM mode + TSM gateway mode
 internal/tunnel/          DTLS/TLS tunnel dialer/listener
 internal/msg/             SNMP message build/parse helpers
 internal/cache/           engine boots/time cache (anti-rollback, persistence)
@@ -176,8 +218,9 @@ internal/observ/          zap logging + Prometheus metrics
 (Directories with code: config, observ, tunnel, msg, passthrough, proxy,
 usm, tsm, cache, cmd/snmp-proxy. Still empty, reserved: discovery
 (discovery logic lives in internal/usm translate_manager.go), securitylevel.
-Also: configs/ example YAML (manager/agent × psk/usm/tsm + gateway-usm),
-scripts/gen-certs.sh throwaway test PKI into gitignored certs/.)
+Also: configs/ example YAML (manager/agent × psk/usm/tsm + gateway-usm
++ gateway-tsm), scripts/gen-certs.sh throwaway test PKI into gitignored
+certs/, scripts/tsm-sink raw-DTLS test receiver for interop.)
 
 ## 5. Build / Test
 
@@ -220,6 +263,16 @@ snmp-proxy gateway --listen :161 --agent 127.0.0.1:161 \
   [--trap-listen :162 --trap-sink <manager>:162]
 ```
 
+TSM gateway (single box, RFC 6353 DTLS front leg — cert-based):
+
+```bash
+snmp-proxy gateway --security tsm-gateway --listen :10161 \
+  --agent 127.0.0.1:161 \
+  --ca-file certs/ca.crt --cert-file certs/server.crt \
+  --key-file certs/server.key \
+  [--trap-listen :10162 --trap-sink <manager>:10162]
+```
+
 ### Smoke test
 
 `scripts/smoke-cli.sh` — plug-and-play end-to-end: builds the binary, starts
@@ -253,6 +306,18 @@ clear-v2c rejection on the front leg (the protection), and snmptrap
 direction (clear v2c trap at the gateway's `--trap-listen` → v3 USM
 notification at the sink). Same fake-agent MIB and skip behavior as
 `interop-snmp.sh`. Exit 0 = green.
+
+### net-snmp TSM gateway interop test
+
+`scripts/interop-gateway-tsm.sh` — drives the single-box TSM gateway
+with real net-snmp TSM clients over `dtls:` (RFC 6353): snmpget,
+snmpgetnext, snmpbulkwalk, snmpset (relayed as clear v2c), untrusted-
+client rejection (client cert from an unknown CA), and trap direction
+(clear v2c trap at `--trap-listen` → TSM v3 notification captured by
+`scripts/tsm-sink`, a raw-DTLS receiver). Self-contained: generates a
+throwaway PKI and a temp net-snmp HOME (`tls/ca-certs` + `tls/certs` +
+snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
+`snmpget` + `openssl`; exits 77 (skip) when missing. Exit 0 = green.
 
 ## 6. Key Dependencies (go.mod)
 
@@ -337,6 +402,35 @@ notification at the sink). Same fake-agent MIB and skip behavior as
   `LocalAddr()`): fixed loopback ports flake when the whole suite runs
   with `-race` (packages run in parallel and share the loopback
   namespace). See `fakeAgentOnFreePort` in tsm_e2e_test.go.
+- net-snmp TSM client quirks (learned building
+  `scripts/interop-gateway-tsm.sh`; painful, documented here so nobody
+  re-derives them):
+  - Cert fingerprints must be **SHA-256**: net-snmp stores a cert's
+    fingerprint using the cert's own signature hash (SHA-256 for our
+    EC P-256 PKI), so `clientCert <fp>`/`trustCert <fp>` in snmp.conf
+    need `openssl x509 -noout -fingerprint -sha256` values (SHA-1 fps
+    never match).
+  - Cert dirs are `~/.snmp/tls/{ca-certs,certs,private}` — the CA dir
+    is `ca-certs`, NOT `ca`.
+  - The `trustCert <fp>` token is required: without it the CA cert
+    never reaches the SSL trust store and verification fails with
+    "unable to get local issuer certificate".
+  - `clientCert <fp>` (deprecated but functional) is what feeds the
+    client identity find; `localCert`/`peerCert` do NOT work for this
+    in 5.9.4.pre2, and `certSecName` does not exist in that build.
+  - Use `dtls:localhost:PORT`, not an IP: net-snmp's server-name check
+    only matches DNS SANs ("No matching names in the certificate to
+    match the expected 127.0.0.1").
+  - Env juggling: `HOME` + `SNMPCONFPATH` both pointed at a temp home;
+    `-Ln` silences ALL output including `-D` debug; MIB noise
+    ("Cannot find module", "Cannot adopt OID") is harmless.
+  - snmptrapd `dtls:` server mode is unusable as an interop sink: its
+    main loop never reads the DTLS socket (no sslctx_server invocation
+    at all). `scripts/tsm-sink` (raw-DTLS receiver) is used instead.
+  - A server cert (EKU serverAuth) presented as a client cert is
+    rejected by RequireAndVerifyClientCert sinks with "x509:
+    certificate specifies an incompatible key usage" — the gateway's
+    trap dialer needs a clientAuth cert if the sink checks EKU.
 
 ### pion/dtls v3 quirks (learned the hard way, do not regress)
 

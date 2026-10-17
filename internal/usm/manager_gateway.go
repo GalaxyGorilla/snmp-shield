@@ -83,8 +83,9 @@ func NewManagerGateway(cfg config.GatewayRole, users []Profile, clock *cache.Eng
 	}, nil
 }
 
-// Run binds the clear trap listener and serves until done is closed.
-func (g *ManagerGateway) Run(done <-chan struct{}) error {
+// Run binds the clear trap listener and serves until done is closed. When
+// supplied, ready is closed after the listener has been bound.
+func (g *ManagerGateway) Run(done <-chan struct{}, ready ...chan<- struct{}) error {
 	conn, err := net.ListenPacket("udp", g.cfg.TrapListenAddr)
 	if err != nil {
 		return fmt.Errorf("usm manager gateway: trap listener: %w", err)
@@ -93,6 +94,9 @@ func (g *ManagerGateway) Run(done <-chan struct{}) error {
 	defer conn.Close()
 
 	go g.readLoop()
+	if len(ready) > 0 && ready[0] != nil {
+		close(ready[0])
+	}
 
 	<-done
 	close(g.stop)

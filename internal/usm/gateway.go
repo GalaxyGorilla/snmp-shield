@@ -90,8 +90,9 @@ func NewGatewayTranslator(cfg config.GatewayRole, users []Profile, clock *cache.
 }
 
 // Run binds the front leg, the clear agent socket and (optionally) the
-// clear trap listener, and serves until done is closed.
-func (g *GatewayTranslator) Run(done <-chan struct{}) error {
+// clear trap listener, and serves until done is closed. When supplied, ready
+// is closed after every configured listener has been bound.
+func (g *GatewayTranslator) Run(done <-chan struct{}, ready ...chan<- struct{}) error {
 	conn, err := net.ListenPacket("udp", g.cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("usm gateway: front listener: %w", err)
@@ -119,6 +120,9 @@ func (g *GatewayTranslator) Run(done <-chan struct{}) error {
 	go g.readAgent()
 	if g.trapConn != nil {
 		go g.readTraps()
+	}
+	if len(ready) > 0 && ready[0] != nil {
+		close(ready[0])
 	}
 
 	<-done

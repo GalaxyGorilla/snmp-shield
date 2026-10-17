@@ -52,8 +52,24 @@ func buildManagerGateway(t *testing.T, trapListen, trapSink string, filt ...*not
 		t.Fatal(err)
 	}
 	done := make(chan struct{})
-	go func() { _ = mg.Run(done) }()
-	return func() { close(done) }
+	ready := make(chan struct{})
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- mg.Run(done, ready)
+		close(runErr)
+	}()
+	waitGatewayReady(t, ready, runErr)
+	return func() {
+		close(done)
+		select {
+		case err, ok := <-runErr:
+			if ok && err != nil {
+				t.Errorf("manager gateway exited with error: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("manager gateway did not stop within 5 seconds")
+		}
+	}
 }
 
 // startManagerSink starts a gosnmp TrapListener as the manager's v3 trap
@@ -122,7 +138,6 @@ func TestManagerGatewayTrapRelay(t *testing.T) {
 	trapListen := freeUDPPort(t)
 	stop := buildManagerGateway(t, trapListen, sinkAddr)
 	defer stop()
-	waitBound(t, trapListen)
 
 	vbs := msg.BuildPDU(msg.PDUSNMPv2Trap, 0, 0, 0, buildVBS(t, "1.3.6.1.4.1.9999.1"))
 	dg, err := msg.BuildV1V2c(msg.Version2c, []byte("devicecomm"), vbs)
@@ -164,7 +179,6 @@ func TestManagerGatewayInformRoundTrip(t *testing.T) {
 	trapListen := freeUDPPort(t)
 	stop := buildManagerGateway(t, trapListen, sinkAddr)
 	defer stop()
-	waitBound(t, trapListen)
 
 	const reqID = int32(777)
 	vbs := msg.BuildPDU(msg.PDUInformRequest, reqID, 0, 0, buildVBS(t, "1.3.6.1.4.1.9999.1"))
@@ -214,7 +228,6 @@ func TestManagerGatewayV1Trap(t *testing.T) {
 	trapListen := freeUDPPort(t)
 	stop := buildManagerGateway(t, trapListen, sinkAddr)
 	defer stop()
-	waitBound(t, trapListen)
 
 	trapPDU := msg.BuildV1Trap(msg.V1Trap{
 		Enterprise: mustOID(t, "1.3.6.1.4.1.9999"),
@@ -259,7 +272,6 @@ func TestManagerGatewayFilter(t *testing.T) {
 	}
 	stop := buildManagerGateway(t, trapListen, sinkAddr, filt)
 	defer stop()
-	waitBound(t, trapListen)
 
 	laddr, _ := net.ResolveUDPAddr("udp", trapListen)
 	conn := deviceConn(t, trapListen)

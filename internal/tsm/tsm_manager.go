@@ -206,8 +206,9 @@ func NewManagerTranslator(cfg config.ManagerRole, sec config.Security, sess Fram
 	}, nil
 }
 
-// Run serves until done is closed.
-func (m *ManagerTranslator) Run(done <-chan struct{}) error {
+// Run serves until done is closed. When supplied, ready is closed after all
+// configured sockets have been bound.
+func (m *ManagerTranslator) Run(done <-chan struct{}, ready ...chan<- struct{}) error {
 	conn, err := net.ListenPacket("udp", m.cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("tsm manager: clear socket: %w", err)
@@ -231,6 +232,9 @@ func (m *ManagerTranslator) Run(done <-chan struct{}) error {
 	defer cancelNotif()
 
 	go m.readClear()
+	if len(ready) > 0 && ready[0] != nil {
+		close(ready[0])
+	}
 
 	for {
 		select {

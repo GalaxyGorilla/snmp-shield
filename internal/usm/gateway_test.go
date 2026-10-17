@@ -60,28 +60,42 @@ func buildGateway(t *testing.T, front, agent int, trapListen, trapSink string, f
 		t.Fatal(err)
 	}
 	done := make(chan struct{})
-	go func() { _ = tr.Run(done) }()
-	return func() { close(done) }
+	ready := make(chan struct{})
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- tr.Run(done, ready)
+		close(runErr)
+	}()
+	waitGatewayReady(t, ready, runErr)
+	return func() {
+		close(done)
+		select {
+		case err, ok := <-runErr:
+			if ok && err != nil {
+				t.Errorf("gateway exited with error: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("gateway did not stop within 5 seconds")
+		}
+	}
 }
 
-// waitBound blocks until addr is bound by someone else (our probe bind
-// fails) — removes the startup race against the translator's Run.
-func waitBound(t *testing.T, addr string) {
+// waitGatewayReady waits for an explicit readiness signal and propagates an
+// early Run error. Binding a probe socket to test readiness races with the
+// gateway's own bind on Darwin.
+func waitGatewayReady(t *testing.T, ready <-chan struct{}, runErr <-chan error) {
 	t.Helper()
-	raddr, err := net.ResolveUDPAddr("udp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		c, err := net.ListenUDP("udp", raddr)
-		if err != nil {
-			return // already bound
+	select {
+	case <-ready:
+		return
+	case err, ok := <-runErr:
+		if !ok {
+			t.Fatal("gateway exited during startup without an error")
 		}
-		c.Close()
-		time.Sleep(20 * time.Millisecond)
+		t.Fatalf("gateway exited during startup: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for gateway startup")
 	}
-	t.Fatalf("timeout waiting for %s to be bound", addr)
 }
 
 // recAgent is a fake legacy agent that records every datagram it receives
@@ -175,7 +189,6 @@ func TestGatewayDiscoveryAndGet(t *testing.T) {
 
 	stop := buildGateway(t, front, agent, "", "")
 	defer stop()
-	waitBound(t, frontAddr)
 
 	g := gosnmpV3Client(t, frontAddr)
 	defer g.Conn.Close()
@@ -207,7 +220,6 @@ func TestGatewayWrongUser(t *testing.T) {
 
 	stop := buildGateway(t, front, agent, "", "")
 	defer stop()
-	waitBound(t, frontAddr)
 
 	g := gosnmpV3Client(t, frontAddr)
 	defer g.Conn.Close()
@@ -237,7 +249,6 @@ func TestGatewayClearRejected(t *testing.T) {
 
 	stop := buildGateway(t, front, agent, "", "")
 	defer stop()
-	waitBound(t, frontAddr)
 
 	probe, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -319,7 +330,6 @@ func TestGatewayTrapDirection(t *testing.T) {
 
 	stop := buildGateway(t, front, agent, trapListen, sinkAddr)
 	defer stop()
-	waitBound(t, trapListen)
 
 	// device fires a clear v1 coldStart trap at the gateway's trap listener
 	trapPDU := msg.BuildV1Trap(msg.V1Trap{
@@ -415,7 +425,6 @@ func TestGatewayTrapFiltered(t *testing.T) {
 
 	stop := buildGateway(t, front, agent, trapListen, sinkAddr, filt)
 	defer stop()
-	waitBound(t, trapListen)
 
 	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {

@@ -56,10 +56,8 @@ func TestHAFailoverAdoptsHigherBoots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan struct{})
-	go func() { _ = tr.Run(done) }()
-	defer close(done)
-	waitBoundForChallenge(t, frontAddr)
+	stop := startGatewayForTest(t, tr, frontAddr)
+	defer stop()
 
 	// The manager's cached state: the formerly-active peer was at
 	// boots=5 (engineTime well past our fresh window).
@@ -134,10 +132,8 @@ func TestHAUnverifiedBootsNeverAdopts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan struct{})
-	go func() { _ = tr.Run(done) }()
-	defer close(done)
-	waitBoundForChallenge(t, frontAddr)
+	stop := startGatewayForTest(t, tr, frontAddr)
+	defer stop()
 
 	// NoAuthNoPriv reportable request claiming a HIGHER boots: the
 	// digest-verified gate must keep it out (rejected, nothing adopted).

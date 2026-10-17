@@ -206,29 +206,33 @@ func newTSMPair(t *testing.T, agentCertCN string, identities []string) (*tsmPair
 
 	done := make(chan struct{})
 	go func() { _ = atr.Run(done) }()
-	go func() { _ = mtr.Run(done) }()
-
-	// wait until the manager clear socket is bound (Run binds before its
-	// read loop starts; probe with a UDP connect until it answers or the
-	// port stops being bindable — simplest reliable check: try binding it
-	// ourselves until it fails, meaning the translator owns it)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if c, err := net.ListenUDP("udp", raddr0(mgrAddr)); err != nil {
-			break // translator owns the port now
-		} else {
-			c.Close()
-			time.Sleep(20 * time.Millisecond)
-		}
-	}
+	startTSMManager(t, mtr, done)
 
 	return &tsmPair{stop: func() { close(done); fake.Close() }}, mgrAddr
 }
 
-// raddr0 resolves a UDP address (test helper).
-func raddr0(addr string) *net.UDPAddr {
-	u, _ := net.ResolveUDPAddr("udp", addr)
-	return u
+// startTSMManager starts a manager and waits for its explicit readiness
+// signal. Probing readiness by binding its UDP address races with its own
+// listener startup on Darwin.
+func startTSMManager(t *testing.T, mtr *tsm.ManagerTranslator, done <-chan struct{}) {
+	t.Helper()
+	ready := make(chan struct{})
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- mtr.Run(done, ready)
+		close(runErr)
+	}()
+	select {
+	case <-ready:
+		return
+	case err, ok := <-runErr:
+		if !ok {
+			t.Fatal("TSM manager exited during startup without an error")
+		}
+		t.Fatalf("TSM manager exited during startup: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for TSM manager startup")
+	}
 }
 
 // freeUDPPort returns a free loopback UDP port (binds and closes), with a
@@ -403,19 +407,9 @@ func TestTSMEndToEndTrapPath(t *testing.T) {
 	done := make(chan struct{})
 	defer close(done)
 	go func() { _ = atr.Run(done) }()
-	go func() { _ = mtr.Run(done) }()
+	startTSMManager(t, mtr, done)
 
-	// wait for the trap socket to be bound (same probe as newTSMPair)
 	trapRaddr, _ := net.ResolveUDPAddr("udp", trapAddr)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if c, err := net.ListenUDP("udp", trapRaddr); err != nil {
-			break
-		} else {
-			c.Close()
-			time.Sleep(20 * time.Millisecond)
-		}
-	}
 
 	// send a v1 coldStart trap from a local device (full v1 message:
 	// version + community + Trap-PDU)
@@ -513,7 +507,7 @@ func TestTSMEndToEndInform(t *testing.T) {
 	done := make(chan struct{})
 	defer close(done)
 	go func() { _ = atr.Run(done) }()
-	go func() { _ = mtr.Run(done) }()
+	startTSMManager(t, mtr, done)
 
 	// device socket: the inform's sender address (its reply address)
 	device, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -522,17 +516,7 @@ func TestTSMEndToEndInform(t *testing.T) {
 	}
 	defer device.Close()
 
-	// wait for the trap socket to be bound (same probe as newTSMPair)
 	trapRaddr, _ := net.ResolveUDPAddr("udp", trapAddr)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if c, err := net.ListenUDP("udp", trapRaddr); err != nil {
-			break
-		} else {
-			c.Close()
-			time.Sleep(20 * time.Millisecond)
-		}
-	}
 
 	// clear v2c inform (req-id 777, sysUpTime + snmpTrapOID.0 varbinds)
 	informPDU := msg.BuildPDU(msg.PDUInformRequest, 777, 0, 0, buildInformVarbinds(t))

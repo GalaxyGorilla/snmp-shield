@@ -47,9 +47,35 @@ func challengeGateway(t *testing.T, front, agent int) (*GatewayTranslator, func(
 	if err != nil {
 		t.Fatal(err)
 	}
+	return tr, startGatewayForTest(t, tr, cfg.ListenAddr)
+}
+
+// startGatewayForTest starts a gateway and makes both startup and shutdown
+// failures visible to the test. Run owns its sockets, so returning before it
+// has bound (or after done is closed but before it has exited) makes
+// subsequent tests flaky, especially under the race detector.
+func startGatewayForTest(t *testing.T, tr *GatewayTranslator, addr string) func() {
+	t.Helper()
 	done := make(chan struct{})
-	go func() { _ = tr.Run(done) }()
-	return tr, func() { close(done) }
+	ready := make(chan struct{})
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- tr.Run(done, ready)
+		close(runErr)
+	}()
+	waitGatewayReady(t, addr, ready, runErr)
+
+	return func() {
+		close(done)
+		select {
+		case err, ok := <-runErr:
+			if ok && err != nil {
+				t.Errorf("gateway exited with error: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("gateway did not stop within 5 seconds")
+		}
+	}
 }
 
 // TestGatewayStaleEngineTimeRejected: an authenticated request claiming
@@ -81,7 +107,6 @@ func TestGatewayStaleEngineTimeRejected(t *testing.T) {
 
 	tr, stop := challengeGateway(t, front, agent)
 	defer stop()
-	waitBoundForChallenge(t, frontAddr)
 
 	// The gateway clock is fresh (boots=1, engineTime ~0). A failover
 	// manager sends its OLD higher boots with a valid digest — per RFC
@@ -147,7 +172,6 @@ func TestGatewayTamperedDigestRejected(t *testing.T) {
 
 	tr, stop := challengeGateway(t, front, agent)
 	defer stop()
-	waitBoundForChallenge(t, frontAddr)
 
 	raw := craftV3GET(t, tr.clock.EngineID(), tr.clock.Boots(), tr.clock.Time(), 43)
 
@@ -207,7 +231,6 @@ func TestGatewayNonReportableSilentDrop(t *testing.T) {
 
 	tr, stop := challengeGateway(t, front, agent)
 	defer stop()
-	waitBoundForChallenge(t, frontAddr)
 
 	// The stale-time attack WITHOUT the Reportable flag: same-boots
 	// out-of-window engineTime (now+3600) — rejected in complete
@@ -258,7 +281,6 @@ func TestGatewayGetBulkRelay(t *testing.T) {
 
 	_, stop := challengeGateway(t, front, agent)
 	defer stop()
-	waitBoundForChallenge(t, frontAddr)
 
 	g := gosnmpV3Client(t, frontAddr)
 	defer g.Conn.Close()
@@ -294,7 +316,6 @@ func TestGatewayGarbageDoesNotKillFront(t *testing.T) {
 
 	_, stop := challengeGateway(t, front, agent)
 	defer stop()
-	waitBoundForChallenge(t, frontAddr)
 
 	addr, _ := net.ResolveUDPAddr("udp", frontAddr)
 	probe, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -346,23 +367,22 @@ func gatewayCfgForTest(front, agent int) config.GatewayRole {
 	}
 }
 
-// waitBoundForChallenge blocks until addr is bound by someone else.
-func waitBoundForChallenge(t *testing.T, addr string) {
+// waitGatewayReady waits for an explicit readiness signal, while surfacing an
+// early gateway startup failure. Binding a probe socket to test readiness
+// races with the gateway's own bind on Darwin.
+func waitGatewayReady(t *testing.T, addr string, ready <-chan struct{}, runErr <-chan error) {
 	t.Helper()
-	raddr, err := net.ResolveUDPAddr("udp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		c, err := net.ListenUDP("udp", raddr)
-		if err != nil {
-			return // already bound
+	select {
+	case <-ready:
+		return
+	case err, ok := <-runErr:
+		if !ok {
+			t.Fatalf("gateway at %s exited during startup without an error", addr)
 		}
-		c.Close()
-		time.Sleep(20 * time.Millisecond)
+		t.Fatalf("gateway at %s exited during startup: %v", addr, err)
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timeout waiting for gateway at %s to start", addr)
 	}
-	t.Fatalf("timeout waiting for %s to be bound", addr)
 }
 
 // craftV3GET builds a signed+encrypted v3 GET as a real manager would,

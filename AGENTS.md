@@ -76,6 +76,7 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | Static analysis (staticcheck + govulncheck toolset, pragmatic: fix only meaningful findings) | done (tested, staticcheck zero findings — dead code removed, pion/dtls v3.1.4 upgrade for GO-2026-6165, options-API migration; govulncheck clean) |
 | `validate` subcommand (`--role` + same flags/`--config`; `--json` for tooling; pre-flights cert keypairs, CA files, engine-store writability) + `selftest` subcommand (validate + probes: tunnel handshake per endpoint (manager), SNMP GET sysDescr.0 to the real agent (agent/gateway), front-cert expiry (tsm-gateway); `--probe=false`) | done (tested, unit tests + manual live-agent/tunnel/dead-addr verification) |
 | Makefile (`make build/test/vet/release`), systemd units (`deploy/*.service`: hardening, CAP_NET_BIND_SERVICE, StateDirectory), examples directory (6 copy-paste walkthroughs), README rewrite | done |
+| SBOM + automated vuln-DB comparison (`make sbom` → syft SPDX+CycloneDX into `dist/`; `make vulnscan` → `grype db update` + `grype --fail-on high` vs NVD/GHSA/OSV; `scripts/sbom.sh --sbom-only`) + x/crypto v0.48.0 → v0.58.0 upgrade clearing all Critical/High advisories (go directive 1.24 → 1.26, mandatory for x/crypto ≥ 0.56) | done (tested, `make vulnscan` rc=0 — only residual GO-2026-5932 is Unknown severity/unfixed deprecated-openpgp advisory, below the gate; direct symbol-precise binary scan: 0 findings) |
 
 ### Gateway modes (single proxy, no second proxy required)
 
@@ -237,8 +238,9 @@ discovery (discovery logic lives in internal/usm translate_manager.go),
 securitylevel. Also: configs/ example YAML (manager/agent × psk/usm/tsm +
 gateway-usm + gateway-tsm + gateway-usm-manager), scripts/gen-certs.sh
 throwaway test PKI into gitignored certs/, scripts/tsm-sink raw-DTLS
-test receiver for interop, deploy/ systemd unit files, examples/
-deployment walkthroughs, Makefile (build/test/vet/release).)
+test receiver for interop, scripts/sbom.sh SBOM+vulnscan entry point,
+deploy/ systemd unit files, examples/
+deployment walkthroughs, Makefile (build/test/vet/release/sbom/vulnscan).)
 
 ## 5. Build / Test
 
@@ -262,6 +264,20 @@ change or parser edit — pragmatic: fix only meaningful findings):
 ~/go/bin/staticcheck ./...
 ~/go/bin/govulncheck ./...
 ```
+
+**SBOM + vulnerability scan** (installed in `~/go/bin`, run after every
+dependency change or before a release):
+
+```bash
+make sbom       # release binary -> syft -> dist/snmp-proxy.{spdx,cdx}.json
+make vulnscan   # grype db update + grype --fail-on high vs NVD/GHSA/OSV
+```
+
+`vulnscan` depends on `sbom` (which builds `release` first). Tools:
+syft + grype (Anchore; `GOBIN=$HOME/go/bin go install
+github.com/anchore/{syft/cmd/syft,grype/cmd/grype}@latest`). Missing
+tools → exit 77 (skip), like the interop scripts. `scripts/sbom.sh`
+runs the same flow standalone (`--sbom-only` skips the scan).
 
 **Acceptance for every commit**: build + vet + `go test -race ./...` clean.
 Note: non-login shells may not have `go` on PATH — use `/usr/local/go/bin/go`
@@ -399,6 +415,8 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
 - `github.com/spf13/pflag` — CLI flags
 - `go.uber.org/zap` — structured logging
 - `gopkg.in/yaml.v3` — config parsing
+- `golang.org/x/crypto`, `golang.org/x/sys` — indirect (pion); keep current —
+  `make vulnscan` gates releases on their advisories
 
 ## 7. Design Notes
 
@@ -618,6 +636,30 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   (O_RDWR|O_CREATE on the file path; a directory in place fails; parent
   dirs are NOT created). `--json` reports go to stdout (tooling reads
   them), human errors go to stderr with exit 1.
+- **SBOM + vuln scan** (`make sbom` / `make vulnscan`, syft + grype):
+  syft catalogs the stripped release ELF — Go buildinfo survives
+  `-s -w` (the binary pseudo-version is crafted from build settings),
+  so the SBOM carries every go.mod module with its exact version
+  (21 packages incl. stdlib). **grype DB freshness matters**: a fresh
+  grype install ships a weeks-old DB and refuses to scan (max age 5
+  days) — automation MUST run `grype db update` first. Gate is
+  `grype <sbom> --fail-on high`. **Symbol vs module granularity**:
+  scanning the SBOM matches at module granularity (conservative, may
+  report false positives); scanning the binary directly
+  (`grype bin/snmp-proxy`) matches symbols precisely — e.g. after the
+  x/crypto v0.58.0 upgrade the SBOM still reports GO-2026-5932
+  (module-level "x/crypto/openpgp is unsafe by design", Unknown
+  severity, no fix exists — the package is deprecated, not patched)
+  while the direct binary scan finds 0: openpgp is not linked in (we
+  only pull cryptobyte/chacha20/poly1305 via pion). Both are correct;
+  the SBOM gate at `--fail-on high` passes. Syft's
+  `SYFT_GOLANG_CAPTURE_SYMBOLS=all` did NOT add symbol data to the
+  SBOM in this build (SPDX/CycloneDX identical for stripped and
+  unstripped binaries) — don't fight it; module-granularity SBOM
+  matching + direct-binary spot checks is the pragmatic combination.
+  x/crypto v0.48.0 → v0.58.0 cleared all Critical/High advisories;
+  x/crypto ≥ 0.56 requires `go 1.26.0`, so the module go directive
+  moved 1.24.0 → 1.26.0 (mandatory, not cosmetic).
 - **Notification filtering** (`internal/notifyfilter`, `notifications.filter`):
   one filter (action allow|deny + dotted OID prefixes) applies at the
   **clear-notification ingress points only** (the 6 `handleClearTrap`/

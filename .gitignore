@@ -3,6 +3,9 @@
 /snmp-proxy
 *.exe
 
+# SBOM output
+/dist/
+
 # Test artifacts
 *.test
 *.out

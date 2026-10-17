@@ -52,7 +52,59 @@ net-snmp CLI interop-tested end-to-end (incl. trap direction).**
 | TSM mode (cert-based security model on tunnel leg) | done (tested) |
 | Cache package unit tests (store persistence, engine clocks, replay) | done (tested) |
 | Net-snmp interop tests (snmpget/getnext/bulkwalk/set/trap; needs `apt-get install snmp`) | done (tested, `scripts/interop-snmp.sh`) |
+| USM gateway mode (standard v3 manager → single proxy → legacy agent) | todo (detailed plan below) |
+| TSM gateway mode (RFC 6353 SNMP-over-DTLS front leg) | todo (detailed plan below) |
 | PSK ciphersuites, notify filtering, HA | backlog |
+
+### Gateway modes (planned — single proxy, no second proxy required)
+
+Motivation: today USM/TSM security only exists **between our own two
+proxies** (the tunnel leg). A normal industry-standard manager cannot
+authenticate to a single proxy, because the only USM-termination path
+sits behind the private tunnel envelope (PSK-DTLS + our frame protocol),
+and the manager-facing clear leg only parses v1/v2c. Gateway modes open
+the front door to third-party clients, making the deployment 100%
+standard SNMP on every wire — important for firewalls/ALGs/DPI and
+auditors. The proxy protecting the (v2c-only) agent **is the asset's
+security gate**: unauthenticated traffic never reaches the legacy
+device.
+
+**1. USM gateway (`usm-gateway`)** — the valuable one:
+
+```
+[any standard manager] --SNMPv3 USM authPriv (RFC 3414)--> [proxy] --clear v2c--> [legacy agent]
+```
+
+- Front leg terminates USM directly from any normal manager
+  (net-snmp, Zabbix, PRTG...): proxy is the authoritative engine toward
+  the manager — RFC 3414 discovery Reports, engineBoots/engineTime
+  (persisted, anti-rollback), user database = `security.users`
+  (auth verify + priv decrypt), timeliness/replay window.
+- Clear v1/v2c arriving on the front leg is **rejected** — that
+  rejection is the protection.
+- Back leg relays the authenticated request as clear v1/v2c to the old
+  agent (existing translation path).
+- Traps/informs reverse: old agent fires clear traps at the proxy →
+  proxy wraps them into authenticated v3 USM notifications toward the
+  manager (trap-wrapping code exists, repointed at the manager).
+- Mostly wiring: the engine (`cache.EngineClock`, discovery,
+  verify/decrypt) already exists on the agent-side tunnel leg.
+
+**2. TSM gateway (`tsm-gateway`)** — RFC 6353 front leg, near-free:
+
+```
+[standard TSM client] --SNMP-over-DTLS (RFC 6353)--> [proxy] --clear v2c--> [legacy agent]
+```
+
+- Front leg is a (D)TLS listener in a new **raw mode**: one SNMP
+  datagram = one (D)TLS record, **no frame layer** (DTLS preserves
+  record boundaries per Read — `internal/tunnel/stream.go` already
+  relies on this, so raw mode needs zero framing logic).
+- Reuse `internal/tsm/tsm_agent.go` logic unchanged: peer cert →
+  securityName, `tsm_identities` allow-list, unwrap scopedPDU, forward
+  clear v2c; responses/traps mirrored.
+- Caveat: almost no industry-standard manager speaks TSM (net-snmp
+  does, Zabbix/PRTG don't) — implement as bonus after USM gateway.
 
 ### TSM design (RFC 5591, as implemented)
 

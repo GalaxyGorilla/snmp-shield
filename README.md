@@ -1,8 +1,8 @@
 # snmp-proxy
 
-[![CI](https://github.com/GalaxyGorilla/snmp-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/GalaxyGorilla/snmp-proxy/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/GalaxyGorilla/snmp-proxy.svg)](https://pkg.go.dev/github.com/GalaxyGorilla/snmp-proxy)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Tests](https://img.shields.io/badge/tests-go_test_-race-brightgreen.svg)
 
 A **SNMP securing proxy**. One binary, two instances, one per entity: each
 instance secures its local clear SNMP leg and encrypts the long-haul
@@ -148,7 +148,7 @@ go vet ./...
 go test ./... -race -timeout 180s
 ```
 
-Every commit is expected to pass all three (enforced in CI).
+Every commit is expected to pass all three (run them manually before pushing).
 
 ## Status & roadmap
 

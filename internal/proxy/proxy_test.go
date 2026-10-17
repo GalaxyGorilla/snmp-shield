@@ -137,12 +137,12 @@ func gosnmpV2c(t *testing.T, addr string) *gosnmp.GoSNMP {
 		port = port*10 + int(c-'0')
 	}
 	g := &gosnmp.GoSNMP{
-		Target:   h,
-		Port:     uint16(port),
-		Version:  gosnmp.Version2c,
-		Timeout:  3 * time.Second,
-		Retries:  2,
-		MaxOids:  10,
+		Target:    h,
+		Port:      uint16(port),
+		Version:   gosnmp.Version2c,
+		Timeout:   3 * time.Second,
+		Retries:   2,
+		MaxOids:   10,
 		Community: "public",
 	}
 	if err := g.Connect(); err != nil {

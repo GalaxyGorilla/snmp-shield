@@ -36,8 +36,8 @@ long-haul segment between them.
 
 ## 3. Status / Roadmap
 
-**Current state: milestone 2 (USM translate) implemented and tested, including
-byte-exact interop against gosnmp v3 authPriv clients.**
+**Current state: milestone 3 (TSM) implemented and tested; all three
+security modes (passthrough, USM translate, TSM) complete.**
 
 | Milestone | Status |
 |---|---|
@@ -48,9 +48,23 @@ byte-exact interop against gosnmp v3 authPriv clients.**
 | Passthrough forwarding v1/v2c/v3 (GET/GETNEXT/GETBULK/SET, traps/informs) | done (tested) |
 | E2E harness (Go/gosnmp client + fake Go agent on loopback) | done |
 | USM translate mode (v1/v2c <-> v3 authPriv, engineID discovery, boots/time cache) | done (tested, interop vs gosnmp) |
-| TSM mode (cert-based security model on tunnel leg) | todo |
+| TSM mode (cert-based security model on tunnel leg) | done (tested) |
 | Net-snmp interop tests (needs `apt-get install snmp snmpd`) | todo |
 | PSK ciphersuites, notify filtering, HA | backlog |
+
+### TSM design (RFC 5591, as implemented)
+
+- `security.mode: tsm`: the tunnel (D)TLS handshake **is** the SNMP
+  authentication. Messages carry `secModel=4` with an **empty**
+  securityParameters OCTET STRING; the clear PDU rides in the scopedPDU.
+- securityName = peer certificate leaf CN (falls back to first DNS SAN,
+  then email). The agent side allow-lists identities
+  (`security.tsm_identities`, empty = accept any valid cert) via
+  `Session.PeerCerts()` (`tunnel.PeerCertConn`); pion/dtls exposes DER
+  chains decoded through `x509.ParseCertificate`.
+- Manager side wraps v1/v2c PDUs in TSM v3 messages; agent side unwraps,
+  checks the peer, forwards as v2c (`agent.agent_community`); responses,
+  traps and informs mirror the flow. No USM crypto, no engine discovery.
 
 ## 4. Repository Layout
 

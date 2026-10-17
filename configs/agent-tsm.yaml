@@ -1,0 +1,31 @@
+# Agent-side proxy, TSM mode: the tunnel (D)TLS handshake authenticates
+# the manager-side proxy (RFC 5591). The peer certificate of the tunnel
+# carries the securityName; only allow-listed identities are forwarded.
+role_note: "run with: snmp-proxy agent --config configs/agent-tsm.yaml"
+
+tunnel:
+  mode: dtls
+  listen_addr: ":10162"              # tunnel listener the manager dials
+  # Certificate material for the agent-side tunnel server. Client certs are
+  # verified against this CA (RequireAndVerifyClientCert).
+  ca_file: "certs/ca.pem"
+  cert_file: "certs/agent.pem"
+  key_file: "certs/agent-key.pem"
+  keepalive_secs: 10
+  max_reconnect_backoff_secs: 30
+  max_frame_size: 65536
+
+agent:
+  # the real SNMP agent (requests are forwarded here as v2c)
+  agent_addr: "127.0.0.1:161"
+  agent_community: "public"          # community used toward the real agent
+  # optional: accept notifications from local devices
+  trap_listen_addr: ""
+  # optional: where inbound notifications from the tunnel are relayed
+  trap_sink_addr: ""
+  trap_sink_community: "public"
+
+security:
+  mode: tsm
+  # allow-list of peer certificate CNs; empty = accept any valid cert
+  tsm_identities: ["snmp-proxy-manager"]

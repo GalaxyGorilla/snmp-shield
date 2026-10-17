@@ -83,6 +83,9 @@ type AgentRole struct {
 	// TrapSinkCommunity is the community used in v2c notifications
 	// delivered to TrapSinkAddr.
 	TrapSinkCommunity string `yaml:"trap_sink_community"`
+	// AgentCommunity is the v1/v2c community used toward the real agent
+	// (TSM mode).
+	AgentCommunity string `yaml:"agent_community"`
 }
 
 // Security configures the SNMP message-level security mode (USM
@@ -106,6 +109,11 @@ type Security struct {
 	// TrapCommunity is the community used in v2c notifications delivered
 	// to local sinks (default "public").
 	TrapCommunity string `yaml:"trap_community"`
+
+	// TSMIdentities is the allow-list of peer certificate identities
+	// (TSM mode): the peer leaf CN must be on this list. Empty allows
+	// any certificate-authenticated peer.
+	TSMIdentities []string `yaml:"tsm_identities"`
 }
 
 // UserCfg is one USM user: protocols + passphrases. On the agent side,
@@ -182,9 +190,9 @@ func (c *Config) Validate() error {
 		}
 	}
 	switch c.Security.Mode {
-	case "passthrough", "usm-translate":
+	case "passthrough", "usm-translate", "tsm":
 	default:
-		return fmt.Errorf("security.mode must be passthrough or usm-translate, got %q", c.Security.Mode)
+		return fmt.Errorf("security.mode must be passthrough, usm-translate or tsm, got %q", c.Security.Mode)
 	}
 	if c.Security.Mode == "usm-translate" {
 		if len(c.Security.Users) == 0 {
@@ -197,6 +205,16 @@ func (c *Config) Validate() error {
 			if u.AuthProtocol == "" || u.PrivProtocol == "" {
 				return fmt.Errorf("security.users: user %s needs auth_protocol and priv_protocol", u.Name)
 			}
+		}
+	}
+	if c.Security.Mode == "tsm" {
+		// TSM requires certificate-based tunnel endpoints: the server
+		// presents a cert, the client verifies it (and vice versa).
+		if c.Tunnel.CertFile == "" || c.Tunnel.KeyFile == "" {
+			return fmt.Errorf("security.mode tsm requires tunnel.cert_file and tunnel.key_file")
+		}
+		if c.Role == RoleManager && c.Tunnel.CAFile == "" {
+			return fmt.Errorf("security.mode tsm requires tunnel.ca_file on the agent side to verify client certificates")
 		}
 	}
 	return nil

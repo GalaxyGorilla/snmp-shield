@@ -6,9 +6,13 @@
 package tunnel
 
 import (
+	"crypto/tls"
+	"crypto/x509"
 	"net"
 	"sync"
 	"time"
+
+	"github.com/pion/dtls/v3"
 )
 
 // streamConn wraps a packet-boundary-preserving conn (DTLS) into a
@@ -44,6 +48,47 @@ func (s *streamConn) Read(p []byte) (int, error) {
 	s.buf = s.buf[n:]
 	return n, nil
 }
+
+// PeerCertConn is implemented by connections that can report the peer
+// certificate chain after the handshake (TSM maps this chain to a
+// securityName per RFC 5591).
+type PeerCertConn interface {
+	PeerCerts() []*x509.Certificate
+}
+
+// peerCerts returns the peer certificate chain of the underlying conn,
+// or nil when the transport does not expose one.
+func (s *streamConn) peerCerts() []*x509.Certificate {
+	switch c := s.conn.(type) {
+	case *dtls.Conn:
+		st, ok := c.ConnectionState()
+		if !ok {
+			return nil
+		}
+		return parseDERCerts(st.PeerCertificates)
+	case *tls.Conn:
+		return c.ConnectionState().PeerCertificates
+	default:
+		return nil
+	}
+}
+
+// parseDERCerts decodes DER-encoded certificates (pion/dtls exposes them
+// as raw bytes).
+func parseDERCerts(der [][]byte) []*x509.Certificate {
+	out := make([]*x509.Certificate, 0, len(der))
+	for _, d := range der {
+		cert, err := x509.ParseCertificate(d)
+		if err != nil {
+			return nil
+		}
+		out = append(out, cert)
+	}
+	return out
+}
+
+// PeerCerts implements PeerCertConn.
+func (s *streamConn) PeerCerts() []*x509.Certificate { return s.peerCerts() }
 
 func (s *streamConn) Write(p []byte) (int, error)         { return s.conn.Write(p) }
 func (s *streamConn) Close() error                        { return s.conn.Close() }

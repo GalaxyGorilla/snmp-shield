@@ -15,6 +15,7 @@ import (
 // v3 message constants (RFC 3412 / RFC 3414).
 const (
 	SecurityModelUSM = 3 // snmpV3SecurityModel USM
+	SecurityModelTSM = 4 // snmpV3SecurityModel TSM (RFC 5591)
 
 	MsgFlagNoAuthNoPriv = 0x00
 	MsgFlagAuth         = 0x01 // authentication used
@@ -115,7 +116,13 @@ func ParseV3(data []byte) (*V3Message, error) {
 	if err != nil {
 		return nil, err
 	}
-	if m.USM, err = ParseUSM(m.SecParams); err != nil {
+	if m.Header.SecModel == SecurityModelTSM {
+		// RFC 5591: TSM messages carry an empty securityParameters
+		// OCTET STRING; nothing to parse.
+		if len(m.SecParams) != 0 {
+			return nil, errBadV3
+		}
+	} else if m.USM, err = ParseUSM(m.SecParams); err != nil {
 		return nil, err
 	}
 
@@ -284,23 +291,28 @@ func BuildV3(h V3Header, usm USMParams, scoped []byte, privEncrypt func(plain []
 	hdr = AppendInteger(hdr, h.SecModel)
 	content = AppendTLV(content, 0x30, hdr)
 
-	// USM security parameters (OCTET STRING wrapping a SEQUENCE)
-	var usmBody []byte
-	usmBody = AppendOctetString(usmBody, usm.EngineID)
-	usmBody = AppendUint32(usmBody, usm.Boots)
-	usmBody = AppendUint32(usmBody, usm.Time)
-	usmBody = AppendOctetString(usmBody, []byte(usm.UserName))
-	if h.MsgFlags&MsgFlagAuth != 0 {
-		usmBody = AppendOctetString(usmBody, usm.AuthParams)
+	// security parameters: USM (SEQUENCE) or TSM (empty per RFC 5591)
+	if h.SecModel == SecurityModelTSM {
+		content = append(content, 0x04, 0x00)
 	} else {
-		usmBody = append(usmBody, 0x04, 0x00)
+		// USM security parameters (OCTET STRING wrapping a SEQUENCE)
+		var usmBody []byte
+		usmBody = AppendOctetString(usmBody, usm.EngineID)
+		usmBody = AppendUint32(usmBody, usm.Boots)
+		usmBody = AppendUint32(usmBody, usm.Time)
+		usmBody = AppendOctetString(usmBody, []byte(usm.UserName))
+		if h.MsgFlags&MsgFlagAuth != 0 {
+			usmBody = AppendOctetString(usmBody, usm.AuthParams)
+		} else {
+			usmBody = append(usmBody, 0x04, 0x00)
+		}
+		if h.MsgFlags&MsgFlagPriv != 0 && h.MsgFlags&MsgFlagAuth != 0 {
+			usmBody = AppendOctetString(usmBody, usm.PrivParams)
+		} else {
+			usmBody = append(usmBody, 0x04, 0x00)
+		}
+		content = AppendOctetString(content, AppendTLV(nil, 0x30, usmBody))
 	}
-	if h.MsgFlags&MsgFlagPriv != 0 && h.MsgFlags&MsgFlagAuth != 0 {
-		usmBody = AppendOctetString(usmBody, usm.PrivParams)
-	} else {
-		usmBody = append(usmBody, 0x04, 0x00)
-	}
-	content = AppendOctetString(content, AppendTLV(nil, 0x30, usmBody))
 
 	// scopedPDU: encrypt in place when requested. gosnmp (and RFC 3412
 	// practice) encrypt the FULL scopedPDU TLV (SEQUENCE header included),

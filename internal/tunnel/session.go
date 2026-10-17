@@ -5,6 +5,8 @@ package tunnel
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"net"
 	"sync"
@@ -67,6 +69,25 @@ func NewServerSession(conn net.Conn, maxPayload, chunk int, log *zap.Logger) *Se
 	}
 	s.startReadLoop()
 	return s
+}
+
+// PeerCerts reports the peer certificate chain of the tunnel connection,
+// or nil when the transport does not provide certificates (PSK mode) or
+// the handshake has not completed. For server sessions the handshake
+// completes on the first Read, so call this after the first frame.
+func (s *Session) PeerCerts() []*x509.Certificate {
+	c := s.current()
+	if c == nil {
+		return nil
+	}
+	if pc, ok := c.(PeerCertConn); ok {
+		return pc.PeerCerts()
+	}
+	// TLS mode wraps nothing: the raw *tls.Conn carries the state.
+	if tc, ok := c.(*tls.Conn); ok {
+		return tc.ConnectionState().PeerCertificates
+	}
+	return nil
 }
 
 // Connect eagerly establishes the tunnel connection (client sessions).

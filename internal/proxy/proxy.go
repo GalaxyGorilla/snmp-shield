@@ -21,6 +21,7 @@ import (
 	"github.com/kattelma/snmp-proxy/internal/observ"
 	"github.com/kattelma/snmp-proxy/internal/passthrough"
 	"github.com/kattelma/snmp-proxy/internal/tunnel"
+	"github.com/kattelma/snmp-proxy/internal/tsm"
 	"github.com/kattelma/snmp-proxy/internal/usm"
 	"go.uber.org/zap"
 )
@@ -79,6 +80,12 @@ func runManager(ctx context.Context, opts Options, met *observ.Metrics) error {
 	switch opts.Config.Security.Mode {
 	case "usm-translate":
 		return runManagerUSM(ctx, opts, met, sess)
+	case "tsm":
+		tr, err := tsm.NewManagerTranslator(opts.Config.Manager, opts.Config.Security, sess, opts.Log, met)
+		if err != nil {
+			return err
+		}
+		return tr.Run(ctx.Done())
 	default:
 		mgr := passthrough.NewManager(opts.Config.Manager, sess, opts.Log, met)
 		return mgr.Run(ctx)
@@ -141,6 +148,7 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics) error {
 	// USM mode state is per-instance (one authoritative engine shared by
 	// all tunnel sessions).
 	usmMode := opts.Config.Security.Mode == "usm-translate"
+	tsmMode := opts.Config.Security.Mode == "tsm"
 	var clock *cache.EngineClock
 	if usmMode {
 		store, err := cache.Open(opts.Config.Security.EngineStore)
@@ -178,6 +186,12 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics) error {
 			if usmMode {
 				var tr *usm.AgentTranslator
 				tr, rerr = usm.NewAgentTranslator(opts.Config.Agent, usm.ProfilesFromSecurity(opts.Config.Security), clock, sess, opts.Log, met)
+				if rerr == nil {
+					rerr = tr.Run(ctx.Done())
+				}
+			} else if tsmMode {
+				var tr *tsm.AgentTranslator
+				tr, rerr = tsm.NewAgentTranslator(opts.Config.Agent, opts.Config.Security, sess, opts.Log, met)
 				if rerr == nil {
 					rerr = tr.Run(ctx.Done())
 				}

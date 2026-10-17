@@ -1,0 +1,32 @@
+# Manager-side proxy, TSM mode: the tunnel (D)TLS handshake authenticates
+# the manager-side proxy toward the agent-side proxy (RFC 5591). The peer
+# certificate of the tunnel carries the securityName.
+role_note: "run with: snmp-proxy manager --config configs/manager-tsm.yaml"
+
+tunnel:
+  # dtls (UDP) with certificates, or tls (TCP) as alternative
+  mode: dtls
+  dial_addr: "10.0.0.2:10162"        # agent-side proxy tunnel listener
+  # Certificate material for the manager-side tunnel client. Generate with
+  # scripts/gen-certs.sh; the CA must sign both sides' certificates.
+  ca_file: "certs/ca.pem"
+  cert_file: "certs/manager.pem"
+  key_file: "certs/manager-key.pem"
+  server_name: "snmp-proxy-agent"    # must match the agent cert SAN
+  keepalive_secs: 10
+  max_reconnect_backoff_secs: 30
+  max_frame_size: 65536
+
+manager:
+  # clear SNMP listener managers point at (v1/v2c PDUs are wrapped in
+  # v3 TSM messages toward the agent side)
+  listen_addr: ":10161"
+  # where notifications arriving from the tunnel are relayed (v2c)
+  trap_sink_addr: "127.0.0.1:10162"
+  # optional: also accept notifications from local devices
+  trap_listen_addr: ""
+
+security:
+  mode: tsm
+  # identities allowed on the agent side must include this cert's CN
+  tsm_identities: ["snmp-proxy-manager"]

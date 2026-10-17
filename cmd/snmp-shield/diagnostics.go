@@ -14,6 +14,7 @@ import (
 	"github.com/GalaxyGorilla/snmp-shield/internal/config"
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
+	"github.com/GalaxyGorilla/snmp-shield/internal/usm"
 	"github.com/spf13/pflag"
 )
 
@@ -221,8 +222,13 @@ func runSelftest(args []string) int {
 				rep.Checks = append(rep.Checks, probeCertExpiry(cfg.Tunnel.CertFile))
 			}
 			// notification-only usm-gateway (no request path) has no
-			// agent to probe.
-			if cfg.Gateway.AgentAddr != "" {
+			// agent to probe. usm-manager-gateway fronts a v3 agent:
+			// the clear-v2c probe below cannot authenticate there, so
+			// the agent is probed with a v3 USM authPriv GET instead
+			// (the gateway's own configured credentials).
+			if cfg.Security.Mode == "usm-manager-gateway" {
+				rep.Checks = append(rep.Checks, probeAgentV3(ctx, cfg))
+			} else if cfg.Gateway.AgentAddr != "" {
 				rep.Checks = append(rep.Checks, probeAgent(ctx, cfg.Gateway.AgentAddr, gatewayCommunity(cfg)))
 			}
 		}
@@ -391,6 +397,139 @@ func sysDescrVarbinds() []byte {
 	}
 	varbind := msg.AppendTLV(nil, 0x30, msg.AppendTLV(nil, 0x06, oid))
 	return msg.AppendTLV(nil, 0x30, varbind)
+}
+
+// probeAgentV3 probes the v3 agent behind an usm-manager-gateway: the
+// clear-v2c probeAgent cannot authenticate there, so this performs a
+// full RFC 3414 discovery (Reportable NoAuthNoPriv empty GET) and then
+// one authPriv GET for sysDescr.0 with the gateway's configured
+// credentials, verifying the response digest and decrypting it. This is
+// the exact flow the gateway itself drives per request.
+func probeAgentV3(ctx context.Context, cfg *config.Config) check {
+	name := "agent(v3) " + cfg.Gateway.AgentAddr
+	gw := cfg.Gateway
+	sec := cfg.Security
+	if len(sec.Users) == 0 {
+		return check{Name: name, OK: false, Detail: "no security.users configured"}
+	}
+	u := sec.Users[0]
+	authP, err := usm.ParseAuthProtocol(u.AuthProtocol)
+	if err != nil {
+		return check{Name: name, OK: false, Detail: err.Error()}
+	}
+	privP, err := usm.ParsePrivProtocol(u.PrivProtocol)
+	if err != nil {
+		return check{Name: name, OK: false, Detail: err.Error()}
+	}
+	if authP == usm.AuthNone || privP == usm.PrivNone {
+		return check{Name: name, OK: false, Detail: "usm-manager-gateway needs an authPriv user"}
+	}
+
+	// RFC 3414 discovery: Reportable NoAuthNoPriv empty GET.
+	pdu := msg.BuildPDU(msg.PDUGetRequest, 1, 0, 0, []byte{0})
+	scoped := msg.BuildScoped(nil, []byte{}, pdu)
+	out, err := msg.BuildV3(msg.V3Header{
+		MsgID:      100,
+		MsgMaxSize: msg.DefaultMsgMaxSize,
+		MsgFlags:   msg.MsgFlagReportable,
+		SecModel:   msg.SecurityModelUSM,
+	}, msg.USMParams{}, scoped, nil)
+	if err != nil {
+		return check{Name: name, OK: false, Detail: err.Error()}
+	}
+	resp, err := v3Exchange(ctx, gw.AgentAddr, out, 5*time.Second)
+	if err != nil {
+		return check{Name: name, OK: false, Detail: "discovery: " + err.Error()}
+	}
+	m, err := msg.ParseV3(resp)
+	if err != nil || len(m.USM.EngineID) == 0 {
+		return check{Name: name, OK: false, Detail: "discovery: no engineID in agent report"}
+	}
+
+	// authPriv GET sysDescr.0 with the discovered engine state.
+	profs, err := usm.NewProfilesFromSecurity(sec, m.USM.EngineID)
+	if err != nil {
+		return check{Name: name, OK: false, Detail: err.Error()}
+	}
+	uC, ok := profs.Lookup(sec.Users[0].Name)
+	if !ok {
+		return check{Name: name, OK: false, Detail: "user not compiled: " + sec.Users[0].Name}
+	}
+	getPdu := msg.BuildPDU(msg.PDUGetRequest, 2, 0, 0, sysDescrVarbinds())
+	getScoped := msg.BuildScoped(m.USM.EngineID, []byte{}, getPdu)
+	flags := byte(msg.MsgFlagAuth | msg.MsgFlagPriv | msg.MsgFlagReportable)
+	privParams := make([]byte, 8) // zero salt: one-shot probe
+	authParams := make([]byte, uC.Profile().AuthProtocol.MacLength())
+	get, err := msg.BuildV3(msg.V3Header{
+		MsgID:      101,
+		MsgMaxSize: msg.DefaultMsgMaxSize,
+		MsgFlags:   flags,
+		SecModel:   msg.SecurityModelUSM,
+	}, msg.USMParams{
+		EngineID:   m.USM.EngineID,
+		Boots:      m.USM.Boots,
+		Time:       m.USM.Time,
+		UserName:   sec.Users[0].Name,
+		AuthParams: authParams,
+		PrivParams: privParams,
+	}, getScoped, func(plain []byte) ([]byte, error) {
+		return usm.EncryptScoped(uC.Profile().PrivProtocol, uC.PrivKey(), m.USM.Boots, m.USM.Time, privParams, plain)
+	})
+	if err != nil {
+		return check{Name: name, OK: false, Detail: err.Error()}
+	}
+	if err := usm.SignV3(get, uC.Profile().AuthProtocol, uC.AuthKey()); err != nil {
+		return check{Name: name, OK: false, Detail: err.Error()}
+	}
+
+	resp, err = v3Exchange(ctx, gw.AgentAddr, get, 5*time.Second)
+	if err != nil {
+		return check{Name: name, OK: false, Detail: "authPriv GET: " + err.Error()}
+	}
+	m2, err := msg.ParseV3(resp)
+	if err != nil {
+		return check{Name: name, OK: false, Detail: "response unparseable: " + err.Error()}
+	}
+	if _, _, err := usm.UnwrapV3(profs, m2, resp); err != nil {
+		return check{Name: name, OK: false, Detail: "response rejected: " + err.Error()}
+	}
+	return check{Name: name, OK: true, Detail: fmt.Sprintf("discovery + authPriv GET ok (user %q, engine %x)", sec.Users[0].Name, m.USM.EngineID)}
+}
+
+// v3Exchange sends one datagram to addr and waits for one v3 response on
+// a fresh ephemeral socket.
+func v3Exchange(ctx context.Context, addr string, dg []byte, wait time.Duration) ([]byte, error) {
+	raddr, err := net.ResolveUDPAddr("udp", addr)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero})
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	deadline := time.Now().Add(wait)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+		deadline = dl
+	}
+	if err := conn.SetDeadline(deadline); err != nil {
+		return nil, err
+	}
+	if _, err := conn.WriteTo(dg, raddr); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, 65536)
+	for {
+		n, _, err := conn.ReadFrom(buf)
+		if err != nil {
+			return nil, err
+		}
+		out := append([]byte(nil), buf[:n]...)
+		// skip stray datagrams: we only accept v3 back
+		if info, perr := msg.Peek(out); perr == nil && info.Version == msg.Version3 {
+			return out, nil
+		}
+	}
 }
 
 // probeCertExpiry warns when the tsm-gateway front certificate is

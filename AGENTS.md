@@ -41,13 +41,17 @@ long-haul segment between them.
 usm-translate (two-proxy tunnel), tsm (two-proxy tunnel), usm-gateway
 (single box, standard v3 in / clear v2c out; notification-only and
 both-leg deployment shapes; the former usm-manager mode is merged in as
-the notification-only shape), and tsm-gateway (single box,
+the notification-only shape), usm-manager-gateway (single box, the
+REVERSE of usm-gateway: legacy v2c manager in / v3 USM authPriv out
+toward a real v3-capable agent), and tsm-gateway (single box,
 SNMP-over-DTLS RFC 6353 in / clear v2c out); informs confirmed in ALL
 gateway modes (usm + tsm round-trip e2e-pinned); no-YAML CLI mode
 implemented and smoke-tested end-to-end; cache package unit-tested;
 net-snmp CLI interop-tested end-to-end for the two-proxy chain (incl.
 trap direction), the USM gateway (incl. trap direction and rejection of
-clear/wrong-user traffic), and the TSM gateway (snmpget/getnext/
+clear/wrong-user traffic), the manager-gateway (snmpget/getnext/
+bulkwalk/set vs REAL snmpd, v3-on-front-leg rejection, v3 trap
+direction; needs snmpd), and the TSM gateway (snmpget/getnext/
 bulkwalk/set, untrusted-client rejection, trap direction).**
 
 | Milestone | Status |
@@ -63,6 +67,7 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | Cache package unit tests (store persistence, engine clocks, replay) | done (tested) |
 | Net-snmp interop tests (snmpget/getnext/bulkwalk/set/trap; needs `apt-get install snmp`) | done (tested, `scripts/interop-snmp.sh`) |
 | USM gateway mode (standard v3 manager → single proxy → legacy agent) | done (tested, gosnmp + net-snmp `scripts/interop-gateway.sh`, incl. trap direction) |
+| Manager-gateway mode (legacy v2c manager → single proxy → REAL v3 agent; `internal/usm/manager_gateway.go`, `security.mode: usm-manager-gateway`: clear v1/v2c at `gateway.listen_addr` re-issued as signed+encrypted v3 toward `gateway.agent_addr` — RFC 3414 discovery, 60s engine cache, follow-the-wire Report adoption, `--user` names the agent's configured user; agent traps/informs verified+unwrapped at `gateway.trap_listen_addr` → clear v2c to `gateway.trap_sink_addr`, informs answered by the proxy; v3 on the front leg ignored) | done (tested, Go harness `internal/usm/manager_gateway_test.go` (fake v3 agent via msg primitives: discovery+GET round trip, trap relay, inform relay+ack, tampered-digest drop) + net-snmp `scripts/interop-manager-gateway.sh` vs real snmpd incl. v3 snmptrap direction; `--user` flag added to flags mode) |
 | TSM gateway mode (RFC 6353 SNMP-over-DTLS front leg) | done (tested, Go harness + net-snmp `scripts/interop-gateway-tsm.sh`, incl. trap direction) |
 | PSK ciphersuite variety (`tunnel.psk_ciphersuites`: aes128-ccm-8 default, aes256-ccm-8, aes128-ccm, aes128-gcm, aes128-cbc; YAML + `--psk-ciphersuites` flag) | done (tested, unit + per-suite loopback handshakes + mismatch rejection) |
 | Notification filtering (`notifications.filter`: allow/deny OID prefixes; YAML + `--filter-oid`/`--filter-action` flags) | done (tested, unit + e2e: passthrough relay, USM gateway w/ gosnmp TrapListener; config validation) |
@@ -151,6 +156,69 @@ device.
   `scripts/interop-gateway.sh` drives the gateway with real net-snmp
   v3 clients (snmpget/getnext/bulkwalk/set, wrong-user + clear-v2c
   rejection, snmptrap direction; skips rc 77 without net-snmp).
+
+**Manager-gateway (`usm-manager-gateway`)** — the reverse of
+usm-gateway — **IMPLEMENTED (see below)**:
+
+```
+[legacy manager] --clear v1/v2c--> [proxy] --v3 USM authPriv--> [real v3 agent]
+```
+
+- The manager keeps speaking v2c; the proxy upgrades the proxy→agent
+  wire to standard SNMPv3 USM authPriv. Use when the agent is v3-capable
+  but the manager is not. The proxy is a v3 command GENERATOR (the
+  mirror image of usm-gateway, where it is the authoritative engine).
+
+### Manager-gateway design (as implemented)
+
+- `security.mode: usm-manager-gateway` (gateway role, no tunnel). Config:
+  `gateway.listen_addr` (clear front leg toward the legacy manager),
+  `gateway.agent_addr` (real v3 agent), optional
+  `gateway.trap_listen_addr` (v3 traps/informs FROM the agent) +
+  `gateway.trap_sink_addr` (legacy manager's clear trap receiver) +
+  `gateway.trap_sink_community`. `security.users` = the AGENT's v3
+  credentials (one user; `--user` in flags mode names it, default
+  'proxy'). NO `security.engine_store` — the AGENT is the authoritative
+  engine; the proxy follows it.
+- `internal/usm/manager_gateway.go` — `ManagerGateway`: clear v1/v2c at
+  `listen_addr` → SplitV1V2c + ParsePDU → RFC 3414 discovery against the
+  agent (Reportable NoAuthNoPriv empty GET, one-shot ephemeral socket,
+  5s deadline, 60s cache TTL; Report adoption follows the wire for ANY
+  engine state change so agent reboots re-sync automatically) →
+  BuildScoped(agent engineID) + signed/encrypted v3 request
+  (Auth|Priv|Reportable, salt.NextAES, signV3) sent from a dedicated
+  ephemeral agentConn → pending map keyed on the v3 msgID → agent's
+  GetResponse verified/decrypted (keys localized to the agent's wire
+  engineID) → stripped back to clear v2c with the manager's original
+  req-id/community/version; 15s timeout with pointer-identity delete.
+- Trap direction: v3 traps/informs from the agent at
+  `trap_listen_addr` are verified (receiveNotif: keys localized to the
+  WIRE engineID, replay cache accepts first-seen state → ANY engineID
+  works, no allow-list) and relayed as clear v2c to `trap_sink_addr`;
+  informs are answered by the proxy directly (v3 GetResponse echoing the
+  inform's req-id toward the agent — the confirmation terminates at the
+  proxy) with the payload relayed as a clear v2c trap.
+- v3 arriving on the clear front leg is IGNORED (v2c-only by design) —
+  that rejection is the protection for the manager leg.
+- No-YAML CLI: `snmp-shield gateway --security usm-manager-gateway
+  --listen :161 --agent <v3-agent>:161 --user authPrivUser --auth-pass
+  <agent-auth> --priv-pass <agent-priv> [--trap-listen :162 --trap-sink
+  <mgr>:162]`.
+- Tests: `internal/usm/manager_gateway_test.go` (fake v3 agent built
+  with msg primitives — discovery Report responder + authPriv GET
+  responder with its own engine/keys: discovery+GET round trip with
+  req-id echo, v3 trap relayed clear, v3 inform answered + relayed,
+  tampered digest dropped in silence); `scripts/interop-manager-gateway.sh`
+  drives the gateway against a REAL userspace snmpd (v3 authPriv user,
+  rouser; snmpget/getnext/bulkwalk/set, v3-on-front-leg rejection, v3
+  snmptrap direction; skips rc 77 without snmp/snmpd).
+- Spike: `internal/usm/spike_snmpd_test.go` (`-tags snmpd_spike`,
+  needs userspace snmpd on :1161) proved our v3 REQUEST generation
+  (BuildV3 + encryptScoped boots/time IV + salt.NextAES + signV3) is
+  net-snmp-compatible BEFORE implementation — discovery + authPriv GET
+  accepted by real snmpd. The bug it found was test-side varbind
+  double-wrap (BuildPDU wraps the varbinds arg in the 0x30 SEQUENCE
+  itself — never pre-wrap).
 
 **2. TSM gateway (`tsm-gateway`)** — RFC 6353 front leg — **IMPLEMENTED
 (see below)**:
@@ -245,10 +313,11 @@ internal/snmpmetrics/     SNMP health MIB agent + tunnel event traps
 usm, tsm, cache, notifyfilter, snmpmetrics, cmd/snmp-shield. Still empty, reserved:
 discovery (discovery logic lives in internal/usm translate_manager.go),
 securitylevel. Also: configs/ example YAML (manager/agent × psk/usm/tsm +
-gateway-usm + gateway-tsm + gateway-usm-manager [usm-gateway
-notification-only]), scripts/gen-certs.sh
+gateway-usm + gateway-tsm + gateway-manager-gateway + gateway-usm-manager
+[usm-gateway notification-only]), scripts/gen-certs.sh
 throwaway test PKI into gitignored certs/, scripts/tsm-sink raw-DTLS
-test receiver for interop, scripts/sbom.sh SBOM+vulnscan entry point,
+test receiver for interop, scripts/interop-manager-gateway.sh real-snmpd
+manager-gateway interop, scripts/sbom.sh SBOM+vulnscan entry point,
 deploy/ systemd unit files, examples/
 deployment walkthroughs, Makefile (build/test/vet/release/sbom/vulnscan).)
 
@@ -313,7 +382,9 @@ preferred first; agent role: single listen address), `--psk-identity`,
 (comma-separated DTLS PSK suites, most preferred first: aes128-ccm-8 |
 aes256-ccm-8 | aes128-ccm | aes128-gcm | aes128-cbc; default
 aes128-ccm-8), `--insecure`, `--security` (usm-translate|passthrough),
-`--trap-listen`, `--trap-sink`, `--filter-oid` (repeatable OID prefix) +
+`--trap-listen`, `--trap-sink`, `--user` (v3 username for
+usm-manager-gateway mode — the REAL AGENT's configured user, default
+'proxy'), `--filter-oid` (repeatable OID prefix) +
 `--filter-action` (allow|deny; notification filtering, see §7),
 `--metrics-snmp-listen` / `--metrics-snmp-trap-sink` /
 `--metrics-snmp-community` / `--metrics-snmp-base-oid` (SNMP metrics
@@ -348,6 +419,19 @@ receiver — usm-gateway with only the trap legs):
 snmp-shield gateway --security usm-gateway \
   --trap-listen :162 --trap-sink <manager>:162 \
   --auth-pass <auth> --priv-pass <priv>
+```
+
+Manager-gateway (single box, the reverse of usm-gateway: legacy v2c
+manager in, v3 USM authPriv out toward a real v3-capable agent —
+`--user` names the agent's configured user, `--auth-pass`/`--priv-pass`
+are the AGENT's v3 credentials):
+
+```bash
+snmp-shield gateway --security usm-manager-gateway \
+  --listen :161 --agent <v3-agent>:161 \
+  --user authPrivUser \
+  --auth-pass <agent-auth> --priv-pass <agent-priv> \
+  [--trap-listen :162 --trap-sink <manager>:162]
 ```
 
 ### validate / selftest subcommands

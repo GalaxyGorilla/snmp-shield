@@ -1,0 +1,66 @@
+# Manager-gateway mode: the reverse direction of the USM gateway —
+# single-box deployment, no tunnel, no second proxy.
+#
+#   [legacy manager] --clear v1/v2c--> [gateway] --SNMPv3 USM authPriv
+#       (RFC 3414)--> [real v3 agent]
+#
+# The legacy manager (or any v1/v2c-only NMS) talks clear SNMP to the
+# front leg; the gateway re-issues every request as an authenticated and
+# encrypted SNMPv3 USM authPriv request toward the real v3-capable agent
+# (RFC 3414 engine discovery, engineBoots/engineTime tracking with
+# re-sync on the agent's Reports). Responses are verified, decrypted and
+# stripped back to clear v2c for the manager. The agent's v3 credentials
+# never leave the proxy — the legacy manager never sees them, and the
+# clear leg can be dropped onto a trusted segment while the proxy-agent
+# leg is authenticated and encrypted end to end.
+#
+# Traps reverse: the agent's v3 traps/informs are verified, decrypted
+# and relayed as clear v2c to the manager's trap receiver. Informs are
+# confirmed by the proxy itself (the agent gets its acknowledgment
+# immediately; the payload is relayed as a clear v2c trap).
+role: gateway          # passed via subcommand: snmp-shield gateway --config ...
+
+gateway:
+  listen_addr: ":16161"          # clear v1/v2c listener (legacy manager connects here)
+  agent_addr: "127.0.0.1:8161"   # real SNMPv3 agent (requests re-issued as v3 authPriv)
+  # Optional reverse notification direction: the agent's v3 traps/informs
+  # arrive at trap_listen_addr, are verified + decrypted and relayed as
+  # clear v2c to the legacy manager's trap receiver at trap_sink_addr
+  # (community = trap_sink_community). Informs are confirmed by the proxy.
+  # trap_listen_addr: ":10162"
+  # trap_sink_addr: "127.0.0.1:10162"
+  trap_sink_community: "public"  # community on relayed clear traps
+
+# Optional notification filtering: agent notifications whose trap OID does
+# not pass the filter are dropped before they are relayed to the manager.
+# action: "allow" (forward only matching OIDs) or "deny" (drop matching
+# OIDs); matching is prefix-based on arc boundaries.
+# notifications:
+#   filter:
+#     action: allow
+#     oids:
+#       - "1.3.6.1.4.1.8072"  # forward only this enterprise's traps
+
+security:
+  mode: usm-manager-gateway
+  # The AGENT's v3 credentials: the proxy authenticates toward the agent
+  # as this user (authPriv). The legacy manager never sees them. The
+  # agent is the authoritative engine — the proxy performs RFC 3414
+  # discovery against it and needs no engine_store of its own.
+  users:
+    - name: authPrivUser
+      auth_protocol: sha
+      auth_passphrase: "changeme-agent-auth"
+      priv_protocol: aes
+      priv_passphrase: "changeme-agent-priv"
+
+# Optional SNMP metrics interface: a small read-only SNMPv2c health agent
+# (GET/GETNEXT: identity, tunnel state, counters) and v2c event traps for
+# tunnel lifecycle changes (up/down, HA failover). Lets an SNMP-native
+# monitoring system watch the proxy without the Prometheus endpoint
+# (--metrics-addr stays available alongside).
+# metrics:
+#   listen_addr: "127.0.0.1:10161"    # health MIB (GET/GETNEXT)
+#   trap_sink_addr: "127.0.0.1:10164" # v2c event traps
+#   community: "public"
+#   # base_oid: ".1.3.6.1.4.1.58427.1" # enterprise OID (default)

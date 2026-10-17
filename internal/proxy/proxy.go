@@ -367,6 +367,12 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent 
 //   - usm-gateway: plain-UDP front leg terminating SNMPv3 USM (this
 //     instance is the authoritative engine). Notification-only
 //     deployments (no gateway.listen_addr) secure a manager leg.
+//   - usm-manager-gateway: plain-UDP front leg accepting clear v1/v2c
+//     from a legacy manager; requests are re-issued as SNMPv3 USM
+//     authPriv toward the real (v3-capable) agent. This instance is a
+//     v3 command GENERATOR (RFC 3414 discovery against the agent's
+//     engine). Traps reverse: v3 agent notifications are verified and
+//     relayed as clear v2c to the manager's trap receiver.
 //   - tsm-gateway: raw DTLS front leg (RFC 6353, one SNMP datagram per
 //     DTLS record, no frame layer); the handshake is the authentication.
 func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
@@ -375,6 +381,12 @@ func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
 		return ferr
 	}
 	switch opts.Config.Security.Mode {
+	case "usm-manager-gateway":
+		gw, err := usm.NewManagerGateway(opts.Config.Gateway, opts.Config.Security, opts.Log, met, filt)
+		if err != nil {
+			return err
+		}
+		return gw.Run(ctx.Done())
 	case "tsm-gateway":
 		lcfg := tunnel.ListenerConfig{
 			Mode:     "dtls",

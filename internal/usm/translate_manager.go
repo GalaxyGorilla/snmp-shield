@@ -797,6 +797,14 @@ func ProfilesFromSecurity(sec config.Security) []Profile {
 	return profilesFromConfig(sec)
 }
 
+// NewProfilesFromSecurity compiles the configured users against an
+// engine ID (localized keys), skipping users with unparsable protocols.
+// Exported for the CLI selftest probes (cmd cannot reach unexported
+// helpers).
+func NewProfilesFromSecurity(sec config.Security, engineID []byte) (*Profiles, error) {
+	return NewProfiles(profilesFromConfig(sec), engineID)
+}
+
 // profilesFromConfig converts config users into Profiles.
 func profilesFromConfig(sec config.Security) []Profile {
 	users := make([]Profile, 0, len(sec.Users))

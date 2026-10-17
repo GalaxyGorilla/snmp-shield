@@ -66,6 +66,7 @@ and SNMP health metrics, and SBOM/vulnerability tooling.
 | [Two-proxy USM](examples/two-proxy-usm.md) / [TSM](examples/two-proxy-tsm.md) | `[manager] ⇄ proxy ⇄ secured line ⇄ proxy ⇄ [agent]` | You control both ends; choose USM passphrases or TSM certificates |
 | [Gateway (agent leg)](examples/gateway-usm.md) | `[v3 managers] ⇄ gateway ⇄ clear ⇄ [legacy agent]` | One box; the **agent** is the asset to protect |
 | [Gateway (manager leg)](examples/usm-manager.md) | `[legacy devices] ⇄ clear ⇄ gateway ⇄ v3 ⇄ [manager]` | One box; the **manager** must only accept authenticated notifications (usm-gateway, notification-only) |
+| [Manager-gateway](examples/manager-gateway.md) | `[legacy manager] ⇄ clear ⇄ gateway ⇄ v3 authPriv ⇄ [real v3 agent]` | One box; the **agent** is v3-capable but the manager is not — requests are re-issued as authenticated v3 toward the agent |
 | [HA two-proxy](examples/ha-two-proxy.md) | Two-proxy + redundant agent side | Failover matters |
 
 ## Security modes
@@ -77,6 +78,7 @@ and SNMP health metrics, and SBOM/vulnerability tooling.
 | `tsm` | Two role-specific translators protect clear v1/v2c traffic through a certificate-authenticated (D)TLS tunnel. Per RFC 5591, the tunnel handshake **is** the authentication: the peer certificate CN becomes the securityName (allow-listed on the agent side). No USM passphrases, user database or engine state are used — the certificate layer carries all of the security. | You control both proxies and prefer certificates over PSKs/passphrases. |
 | `usm-gateway` | Single box; plain-UDP front leg terminates **standard SNMPv3 USM** from any manager (net-snmp, Zabbix, PRTG…). The gateway is the authoritative engine; authenticated requests are relayed as clear v2c to the legacy agent. Clear traffic on the front leg is rejected — that is the protection. Also supports **notification-only** deployments (no request path): clear device traps/informs are wrapped into authenticated v3 USM notifications toward the manager's trap receiver, informs confirmed end-to-end. | The agent is the asset; managers speak standard v3. |
 | `tsm-gateway` | Single box; raw DTLS front leg speaks **SNMP-over-DTLS (RFC 6353)**: the client certificate is the authentication (identity allow-list via `security.tsm_identities`). Authenticated requests are relayed as clear v2c to the legacy agent; certificates from untrusted CAs are rejected — that is the protection. Traps and informs relay in both directions with confirmations, same as `usm-gateway`. | Your clients are net-snmp-based with certs (almost no other manager speaks TSM). |
+| `usm-manager-gateway` | Single box; the **reverse** of `usm-gateway`: a legacy v2c manager polls the clear front leg and the gateway re-issues every request as **standard SNMPv3 USM authPriv** toward a real v3-capable agent (`--user` names the agent's configured user). RFC 3414 engine discovery against the agent, responses verified + decrypted before they are stripped back to clear v2c. Agent traps/informs are verified, unwrapped and relayed as clear v2c to the manager's trap receiver (informs confirmed by the gateway). v3 on the clear front leg is ignored — that is the protection. | The agent speaks v3 but the manager is legacy — upgrade the proxy→agent wire without touching the manager. |
 
 All two-proxy modes carry the full operation set in both directions:
 `GET`, `GETNEXT`, `SET`, `GETBULK`, plus **traps and informs** both ways
@@ -149,6 +151,22 @@ informs confirmed end-to-end — no request path):
   --auth-pass myauthpass --priv-pass myprivpass
 ```
 
+Reverse direction (legacy v2c manager in front, real v3-capable agent
+behind — requests re-issued as authenticated v3 toward the agent):
+
+```bash
+./bin/snmp-shield gateway --security usm-manager-gateway \
+  --listen :161 --agent <v3-agent-ip>:161 \
+  --user authPrivUser \
+  --auth-pass agents-auth-pass --priv-pass agents-priv-pass
+```
+
+A legacy v2c manager polls the gateway with any community; the gateway
+performs RFC 3414 engine discovery against the real agent and re-issues
+each request signed and encrypted. Agent traps/informs arrive verified
+at the gateway's `--trap-listen` and are relayed as clear v2c to the
+manager's `--trap-sink`.
+
 ### Config files
 
 Each instance is one YAML file; the role is chosen by the subcommand.
@@ -158,6 +176,7 @@ Templates for every combination live in [`configs/`](configs/):
 ./bin/snmp-shield manager --config configs/manager-usm.yaml
 ./bin/snmp-shield agent   --config configs/agent-usm.yaml
 ./bin/snmp-shield gateway --config configs/gateway-usm.yaml
+./bin/snmp-shield gateway --config configs/gateway-manager-gateway.yaml
 ```
 
 ## Tools

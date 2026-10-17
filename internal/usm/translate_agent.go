@@ -95,6 +95,17 @@ func (ps *Profiles) Lookup(name string) (*compiled, bool) {
 	return c, ok
 }
 
+// Profile returns the compiled profile's user configuration (protocols,
+// passphrases). Exported accessors for the CLI selftest probes (cmd
+// cannot read the unexported fields).
+func (c *compiled) Profile() Profile { return c.p }
+
+// AuthKey returns the localized authentication key.
+func (c *compiled) AuthKey() []byte { return c.authKey }
+
+// PrivKey returns the localized privacy key.
+func (c *compiled) PrivKey() []byte { return c.privKey }
+
 // FrameSink is the subset of the tunnel Session used by the translators.
 type FrameSink interface {
 	Send(ctx context.Context, typ, flags uint8, corrID uint16, payload []byte) error

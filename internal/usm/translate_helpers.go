@@ -257,6 +257,14 @@ func encryptScoped(p PrivProtocol, key []byte, boots, etime uint32, privParams, 
 	}
 }
 
+// EncryptScoped is the exported form of encryptScoped: encrypts a
+// scopedPDU plaintext with the given privacy protocol/key and USM
+// privParams (RFC 3414). Exported for the CLI selftest probes (cmd
+// cannot reach unexported helpers).
+func EncryptScoped(p PrivProtocol, key []byte, boots, etime uint32, privParams, plain []byte) ([]byte, error) {
+	return encryptScoped(p, key, boots, etime, privParams, plain)
+}
+
 // --- PDU byte-level helpers (shared by both translators) --------------
 
 // pduCommon extracts the common fields of a raw PDU TLV (tag octet +

@@ -7,6 +7,14 @@ import (
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 )
 
+// SignV3 is the exported form of signV3: it computes the auth digest
+// over a marshalled v3 message (whose authParams must already be
+// zero-filled) and splices it into the authParams TLV position. Exported
+// for the CLI selftest probes (cmd cannot reach unexported helpers).
+func SignV3(out []byte, auth AuthProtocol, authKey []byte) error {
+	return signV3(out, auth, authKey)
+}
+
 // unwrapV3 authenticates (when flagged) and decrypts (when flagged) an
 // inbound v3 message against the compiled profile named in the message,
 // then unwraps the scopedPDU in place. It returns the matched profile and
@@ -56,6 +64,15 @@ func unwrapV3(keys *Profiles, m *msg.V3Message, packet []byte) (*compiled, []byt
 		}
 	}
 	return c, m.PDU, nil
+}
+
+// UnwrapV3 is the exported form of unwrapV3: it authenticates (when
+// flagged) and decrypts (when flagged) an inbound v3 message against the
+// compiled profile named in the message, then unwraps the scopedPDU in
+// place. Returns the matched profile and the inner PDU TLV. Exported for
+// the CLI selftest probes (cmd cannot reach unexported helpers).
+func UnwrapV3(keys *Profiles, m *msg.V3Message, packet []byte) (profile *compiled, pdu []byte, err error) {
+	return unwrapV3(keys, m, packet)
 }
 
 // signV3 computes the auth digest over a marshalled v3 message (whose

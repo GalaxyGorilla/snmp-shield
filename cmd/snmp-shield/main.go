@@ -97,6 +97,7 @@ type cliFlags struct {
 	secMode       *string
 	authPass      *string
 	privPass      *string
+	v3User        *string
 	caFile        *string
 	certFile      *string
 	keyFile       *string
@@ -135,9 +136,10 @@ func register(fs *pflag.FlagSet) cliFlags {
 	c.insecure = fs.Bool("insecure", false, "skip tunnel certificate verification (tls mode only; never in production)")
 
 	// direct-flags mode: usm-translate security
-	c.secMode = fs.String("security", "usm-translate", "security mode when using flags: usm-translate or passthrough (gateway: usm-gateway or tsm-gateway)")
+	c.secMode = fs.String("security", "usm-translate", "security mode when using flags: usm-translate or passthrough (gateway: usm-gateway, usm-manager-gateway or tsm-gateway)")
 	c.authPass = fs.String("auth-pass", "", "v3 authentication passphrase (usm-translate/gateway mode; user 'proxy', SHA, AES)")
 	c.privPass = fs.String("priv-pass", "", "v3 privacy passphrase (usm-translate/gateway mode)")
+	c.v3User = fs.String("user", "", "v3 username for usm-manager-gateway mode (the REAL AGENT's configured user; default 'proxy')")
 
 	// direct-flags mode: certificate material (tsm tunnel / tsm-gateway)
 	c.caFile = fs.String("ca-file", "", "CA certificate PEM file to verify peers (tsm-gateway)")
@@ -179,6 +181,7 @@ func (c cliFlags) opts() flagsOpts {
 		secMode:      *c.secMode,
 		authPass:     *c.authPass,
 		privPass:     *c.privPass,
+		v3User:       *c.v3User,
 		caFile:       *c.caFile,
 		certFile:     *c.certFile,
 		keyFile:      *c.keyFile,
@@ -268,6 +271,7 @@ type flagsOpts struct {
 	secMode      string
 	authPass     string
 	privPass     string
+	v3User       string
 	caFile       string
 	certFile     string
 	keyFile      string
@@ -312,11 +316,11 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 	// authenticated requests are relayed as clear v2c to the legacy agent.
 	if r == config.RoleGateway {
 		switch o.secMode {
-		case "usm-gateway", "tsm-gateway":
+		case "usm-gateway", "tsm-gateway", "usm-manager-gateway":
 		case "usm-translate", "passthrough":
-			return nil, fmt.Errorf("--security %s is not valid for the gateway role (use usm-gateway or tsm-gateway)", o.secMode)
+			return nil, fmt.Errorf("--security %s is not valid for the gateway role (use usm-gateway, usm-manager-gateway or tsm-gateway)", o.secMode)
 		default:
-			return nil, fmt.Errorf("--security must be usm-gateway or tsm-gateway for the gateway role, got %q", o.secMode)
+			return nil, fmt.Errorf("--security must be usm-gateway, usm-manager-gateway or tsm-gateway for the gateway role, got %q", o.secMode)
 		}
 		cfg := &config.Config{Role: r}
 		cfg.Gateway = config.GatewayRole{
@@ -346,6 +350,30 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 				Mode: "usm-gateway",
 				Users: []config.UserCfg{{
 					Name:           "proxy",
+					AuthProtocol:   "sha",
+					AuthPassphrase: o.authPass,
+					PrivProtocol:   "aes",
+					PrivPassphrase: o.privPass,
+				}},
+			}
+		case "usm-manager-gateway":
+			if o.authPass == "" || o.privPass == "" {
+				return nil, fmt.Errorf("--auth-pass and --priv-pass are required in usm-manager-gateway mode (the REAL AGENT's v3 credentials)")
+			}
+			if o.listen == "" {
+				return nil, fmt.Errorf("--listen is required for the gateway role (legacy manager front listener ip:port)")
+			}
+			if o.agent == "" {
+				return nil, fmt.Errorf("--agent is required for the gateway role (real v3 agent ip:port)")
+			}
+			user := o.v3User
+			if user == "" {
+				user = "proxy"
+			}
+			cfg.Security = config.Security{
+				Mode: "usm-manager-gateway",
+				Users: []config.UserCfg{{
+					Name:           user,
 					AuthProtocol:   "sha",
 					AuthPassphrase: o.authPass,
 					PrivProtocol:   "aes",
@@ -496,6 +524,10 @@ Usage (gateway, single box — no second proxy, standard clients):
   snmp-shield gateway --security usm-gateway --trap-listen <ip:port> \
       --trap-sink <manager-trap-receiver:port> \
       --auth-pass <pw> --priv-pass <pw>        # notification-only (manager leg)
+  snmp-shield gateway --security usm-manager-gateway --listen <ip:port> \
+      --agent <v3-agent:port> --auth-pass <pw> --priv-pass <pw> \
+      [--trap-listen <ip:port>] [--trap-sink <ip:port>]
+                                              # legacy manager front (v3 out)
 
 Other commands:
   snmp-shield validate --role <manager|agent|gateway> (same flags as the role)
@@ -534,6 +566,11 @@ standard manager and also supports notification-only deployments
 traps/informs are wrapped into authenticated v3 notifications toward the
 manager's trap receiver, informs confirmed end-to-end); tsm-gateway
 speaks SNMP-over-DTLS (RFC 6353) with certificate-based client
-authentication. 100%% standard SNMP on every wire.
+authentication; usm-manager-gateway is the reverse direction — a legacy
+v1/v2c manager in front and a v3-capable agent behind: clear requests
+are re-issued as authenticated v3 (USM authPriv, RFC 3414 discovery)
+toward the real agent, agent traps/informs are verified, unwrapped and
+relayed as clear v1/v2c to the manager's trap receiver (informs
+confirmed by the proxy). 100%% standard SNMP on every wire.
 `)
 }

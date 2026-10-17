@@ -16,13 +16,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/kattelma/snmp-proxy/internal/cache"
-	"github.com/kattelma/snmp-proxy/internal/config"
-	"github.com/kattelma/snmp-proxy/internal/observ"
-	"github.com/kattelma/snmp-proxy/internal/passthrough"
-	"github.com/kattelma/snmp-proxy/internal/tunnel"
-	"github.com/kattelma/snmp-proxy/internal/tsm"
-	"github.com/kattelma/snmp-proxy/internal/usm"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/cache"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/passthrough"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/tsm"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/usm"
 	"go.uber.org/zap"
 )
 

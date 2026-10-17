@@ -14,11 +14,11 @@ import (
 	"time"
 
 	"github.com/gosnmp/gosnmp"
-	"github.com/kattelma/snmp-proxy/internal/cache"
-	"github.com/kattelma/snmp-proxy/internal/config"
-	"github.com/kattelma/snmp-proxy/internal/msg"
-	"github.com/kattelma/snmp-proxy/internal/tunnel"
-	"github.com/kattelma/snmp-proxy/internal/usm"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/cache"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/usm"
 	"go.uber.org/zap"
 )
 

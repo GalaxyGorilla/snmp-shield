@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/gosnmp/gosnmp"
-	"github.com/kattelma/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
 )
 
 // TestParseAndDecryptGosnmpAuthPriv feeds a real gosnmp-marshaled authPriv

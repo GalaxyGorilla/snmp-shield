@@ -1,4 +1,4 @@
-module github.com/kattelma/snmp-proxy
+module github.com/GalaxyGorilla/snmp-proxy
 
 go 1.24.0
 

@@ -10,9 +10,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/kattelma/snmp-proxy/internal/config"
-	"github.com/kattelma/snmp-proxy/internal/observ"
-	"github.com/kattelma/snmp-proxy/internal/proxy"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/proxy"
 	"github.com/spf13/pflag"
 	"go.uber.org/zap"
 )

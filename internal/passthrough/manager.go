@@ -8,9 +8,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/kattelma/snmp-proxy/internal/config"
-	"github.com/kattelma/snmp-proxy/internal/observ"
-	"github.com/kattelma/snmp-proxy/internal/tunnel"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
 	"go.uber.org/zap"
 )
 

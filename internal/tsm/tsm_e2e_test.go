@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kattelma/snmp-proxy/internal/config"
-	"github.com/kattelma/snmp-proxy/internal/msg"
-	"github.com/kattelma/snmp-proxy/internal/tsm"
-	"github.com/kattelma/snmp-proxy/internal/tunnel"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/tsm"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
 	"go.uber.org/zap"
 )
 

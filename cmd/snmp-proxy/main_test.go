@@ -5,7 +5,7 @@ package main
 import (
 	"testing"
 
-	"github.com/kattelma/snmp-proxy/internal/config"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
 )
 
 func TestFlagsConfigManager(t *testing.T) {

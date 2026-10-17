@@ -1,7 +1,7 @@
 # snmp-proxy
 
-[![CI](https://github.com/kattelma/snmp-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/kattelma/snmp-proxy/actions/workflows/ci.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/kattelma/snmp-proxy.svg)](https://pkg.go.dev/github.com/kattelma/snmp-proxy)
+[![CI](https://github.com/GalaxyGorilla/snmp-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/GalaxyGorilla/snmp-proxy/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/GalaxyGorilla/snmp-proxy.svg)](https://pkg.go.dev/github.com/GalaxyGorilla/snmp-proxy)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 
 A **SNMP securing proxy**. One binary, two instances, one per entity: each
@@ -59,7 +59,7 @@ The secured segment is plain application-layer crypto over any IP network
 Install Go 1.21+, then:
 
 ```bash
-git clone https://github.com/kattelma/snmp-proxy
+git clone https://github.com/GalaxyGorilla/snmp-proxy
 cd snmp-proxy
 go build ./cmd/snmp-proxy
 ```

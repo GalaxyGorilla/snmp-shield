@@ -22,10 +22,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/tsm"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
+	"github.com/GalaxyGorilla/snmp-shield/internal/config"
+	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
+	"github.com/GalaxyGorilla/snmp-shield/internal/tsm"
+	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
 	"go.uber.org/zap"
 )
 
@@ -88,7 +88,7 @@ func certFiles(t *testing.T) (ca, serverCrt, serverKey, clientCrt, clientKey str
 	}
 
 	serverDER, serverKeyPEM := leaf("127.0.0.1", 2)
-	clientDER, clientKeyPEM := leaf("snmp-proxy-manager", 3)
+	clientDER, clientKeyPEM := leaf("snmp-shield-manager", 3)
 
 	write := func(name string, der []byte) string {
 		p := filepath.Join(dir, name)
@@ -212,7 +212,7 @@ func TestTSMGatewayGet(t *testing.T) {
 	defer fake.Close()
 
 	front, stop := buildTSMGateway(t, ca, serverCrt, serverKey, agentAddr,
-		[]string{"snmp-proxy-manager"}, "", "")
+		[]string{"snmp-shield-manager"}, "", "")
 	defer stop()
 	waitFrontBound(t, front)
 
@@ -262,7 +262,7 @@ func TestTSMGatewayWrongIdentity(t *testing.T) {
 	fake, agentAddr := fakeAgentOnFreePort(t)
 	defer fake.Close()
 
-	// allow-list deliberately excludes the client CN snmp-proxy-manager
+	// allow-list deliberately excludes the client CN snmp-shield-manager
 	front, stop := buildTSMGateway(t, ca, serverCrt, serverKey, agentAddr,
 		[]string{"some-other-identity"}, "", "")
 	defer stop()
@@ -312,7 +312,7 @@ func TestTSMGatewayTrapDirection(t *testing.T) {
 	defer fake.Close()
 
 	_, stop := buildTSMGateway(t, ca, serverCrt, serverKey, agentAddr,
-		[]string{"snmp-proxy-manager"}, trapListen, sinkAddr)
+		[]string{"snmp-shield-manager"}, trapListen, sinkAddr)
 	defer stop()
 	waitFrontBound(t, trapListen)
 

@@ -1,25 +1,25 @@
-# systemd unit — snmp-proxy gateway instance (single-box mode).
-# Install: cp deploy/snmp-proxy-gateway.service /etc/systemd/system/
-#          systemctl daemon-reload && systemctl enable --now snmp-proxy-gateway
+# systemd unit — snmp-shield gateway instance (single-box mode).
+# Install: cp deploy/snmp-shield-gateway.service /etc/systemd/system/
+#          systemctl daemon-reload && systemctl enable --now snmp-shield-gateway
 #
 # The gateway is a single box: it terminates SNMP security from standard
 # clients/managers and relays to the legacy agent. Config from
-# /etc/snmp-proxy/gateway.yaml (see configs/gateway-*.yaml).
+# /etc/snmp-shield/gateway.yaml (see configs/gateway-*.yaml).
 
 [Unit]
 Description=SNMP securing proxy (gateway)
-Documentation=https://github.com/GalaxyGorilla/snmp-proxy
+Documentation=https://github.com/GalaxyGorilla/snmp-shield
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/snmp-proxy gateway --config /etc/snmp-proxy/gateway.yaml
+ExecStart=/usr/local/bin/snmp-shield gateway --config /etc/snmp-shield/gateway.yaml
 Restart=on-failure
 RestartSec=5
 
-StateDirectory=snmp-proxy
-ConfigurationDirectory=snmp-proxy
+StateDirectory=snmp-shield
+ConfigurationDirectory=snmp-shield
 
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -39,8 +39,8 @@ SystemCallArchitectures=native
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
-User=snmp-proxy
-Group=snmp-proxy
+User=snmp-shield
+Group=snmp-shield
 
 [Install]
 WantedBy=multi-user.target

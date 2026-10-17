@@ -4,7 +4,7 @@
 package usm
 
 import (
-	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 )
 
 // unwrapV3 authenticates (when flagged) and decrypts (when flagged) an

@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 )
 
 // Filter classifies notification trap OIDs against a prefix list.

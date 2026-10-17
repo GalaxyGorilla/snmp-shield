@@ -18,7 +18,7 @@ security:
   # Allow-list of peer certificate identities (leaf CN). Empty = any
   # certificate signed by the CA is accepted.
   tsm_identities:
-    - "snmp-proxy-manager"
+    - "snmp-shield-manager"
 
 # Certificate material for the raw DTLS front leg (same keys as the
 # tunnel section; the gateway has no tunnel, but reuses the layout):

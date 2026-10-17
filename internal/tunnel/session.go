@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
+	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
 	"go.uber.org/zap"
 )
 

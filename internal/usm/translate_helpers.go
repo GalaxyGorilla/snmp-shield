@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 )
 
 // --- per-engine key cache ---------------------------------------------------

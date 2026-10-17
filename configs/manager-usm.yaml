@@ -7,9 +7,9 @@ tunnel:
   mode: dtls
   # Address of the agent-side proxy's tunnel listener.
   dial_addr: "192.0.2.20:10162"
-  psk_identity: "snmp-proxy-manager"
+  psk_identity: "snmp-shield-manager"
   psk: "text:change-me-shared-secret"
-  server_name: "snmp-proxy-agent"
+  server_name: "snmp-shield-agent"
   insecure_skip_verify: true
   keepalive_secs: 15
   max_reconnect_backoff: 5s
@@ -31,7 +31,7 @@ security:
   # it automatically at startup.
   # engine_id: "hex:8000...0002"
   # Persistent engine boots/state (anti-rollback for our own engine).
-  engine_store: "/var/lib/snmp-proxy/engine-manager.json"
+  engine_store: "/var/lib/snmp-shield/engine-manager.json"
   # Community used in v2c notifications delivered to the trap sink.
   trap_community: "public"
 

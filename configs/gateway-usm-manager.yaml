@@ -9,7 +9,7 @@
 # (security.users below, authPriv) toward the manager's trap receiver.
 # Informs are confirmed: the manager's response is verified/decrypted and
 # the clear response is relayed back to the device. Traps fire-and-forget.
-role: gateway          # passed via subcommand: snmp-proxy gateway --config ...
+role: gateway          # passed via subcommand: snmp-shield gateway --config ...
 
 gateway:
   # No listen_addr/agent_addr needed in this mode: only the trap legs.
@@ -28,7 +28,7 @@ gateway:
 
 security:
   mode: usm-manager
-  engine_store: /var/lib/snmp-proxy/mgr-gateway-engine.json  # REQUIRED: boots must never decrease
+  engine_store: /var/lib/snmp-shield/mgr-gateway-engine.json  # REQUIRED: boots must never decrease
   # engine_id: "hex:8000b98380736e6d702d70726f7879"           # optional, fixed engine ID
   users:
     - name: nms

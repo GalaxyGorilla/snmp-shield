@@ -16,11 +16,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/snmpmetrics"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
+	"github.com/GalaxyGorilla/snmp-shield/internal/config"
+	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
+	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
+	"github.com/GalaxyGorilla/snmp-shield/internal/snmpmetrics"
+	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
 	"github.com/gosnmp/gosnmp"
 	"go.uber.org/zap"
 )
@@ -265,7 +265,7 @@ func certFiles(t *testing.T) (ca, serverCrt, serverKey, clientCrt, clientKey str
 	}
 
 	serverDER, serverKeyPEM := leaf("127.0.0.1", 2)
-	clientDER, clientKeyPEM := leaf("snmp-proxy-manager", 3)
+	clientDER, clientKeyPEM := leaf("snmp-shield-manager", 3)
 
 	write := func(name string, der []byte) string {
 		p := filepath.Join(dir, name)

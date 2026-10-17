@@ -18,8 +18,8 @@ for tool in snmpget snmpgetnext snmpbulkwalk snmpset snmptrap; do
   command -v "$tool" >/dev/null 2>&1 || { echo "== $tool not found; apt-get install snmp; SKIP"; exit 77; }
 done
 
-BIN=./bin/snmp-proxy
-go build -o "$BIN" ./cmd/snmp-proxy
+BIN=./bin/snmp-shield
+go build -o "$BIN" ./cmd/snmp-shield
 
 AUTH=authpass
 PRIV=privpass

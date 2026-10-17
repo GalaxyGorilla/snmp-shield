@@ -15,7 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"go.uber.org/zap"
@@ -26,7 +26,7 @@ var errNotAVarbind = errors.New("snmpmetrics: varbind is not {OID, value}")
 
 // MIB layout (all under BaseOID, default .1.3.6.1.4.1.58427.1):
 //
-//	<Base>.1   product         OCTET STRING, fixed "snmp-proxy"
+//	<Base>.1   product         OCTET STRING, fixed "snmp-shield"
 //	<Base>.2   version         OCTET STRING
 //	<Base>.3   role            OCTET STRING
 //	<Base>.4   securityMode    OCTET STRING
@@ -105,7 +105,7 @@ func New(cfg Config, counters []prometheus.Counter, latency prometheus.Histogram
 		tunnelMode: cfg.TunnelMode,
 		endpoints:  cfg.Endpoints,
 		version:    cfg.Version,
-		product:    "snmp-proxy",
+		product:    "snmp-shield",
 		startedAt:  time.Now(),
 		counters:   counters,
 		latency:    latency,

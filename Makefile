@@ -1,8 +1,8 @@
-# snmp-proxy — minimal build/test automation.
+# snmp-shield — minimal build/test automation.
 # The project is plain Go: `go build ./...` works without make.
 # This file exists for appliance packaging convenience.
 
-BINARY := snmp-proxy
+BINARY := snmp-shield
 GO     ?= go
 
 .PHONY: all build test vet staticcheck govulncheck race release sbom vulnscan clean
@@ -10,7 +10,7 @@ GO     ?= go
 all: build
 
 build:
-	$(GO) build -o bin/$(BINARY) ./cmd/snmp-proxy
+	$(GO) build -o bin/$(BINARY) ./cmd/snmp-shield
 
 test:
 	$(GO) test ./... -race -timeout 180s
@@ -28,7 +28,7 @@ race: test
 
 # release builds a stripped static binary for appliance deployment.
 release:
-	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w" -o bin/$(BINARY) ./cmd/snmp-proxy
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w" -o bin/$(BINARY) ./cmd/snmp-shield
 
 # sbom generates SPDX + CycloneDX SBOMs for the release binary into dist/.
 # Requires syft (https://github.com/anchore/syft); exits 77 when missing.

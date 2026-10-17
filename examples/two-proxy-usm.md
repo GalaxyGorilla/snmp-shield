@@ -20,17 +20,17 @@ leg). Everything in between is authenticated and encrypted.
 On either box:
 
 ```bash
-snmp-proxy genpsk
+snmp-shield genpsk
 # e.g. 4f0b0c1d... (64 hex chars)
 ```
 
 ## 2. Agent-side box (next to the real agent)
 
 ```bash
-snmp-proxy agent \
+snmp-shield agent \
   --tunnel-addr <agent-box-ip>:19611 \
   --psk <KEY> \
-  --auth-pass myauth --priv-pass mypriv \
+  --auth-pass myauthpass --priv-pass myprivpass \
   --agent 127.0.0.1:161 \
   --community public \
   --trap-listen :162 \
@@ -50,10 +50,10 @@ snmp-proxy agent \
 ## 3. Manager-side box (next to the manager)
 
 ```bash
-snmp-proxy manager \
+snmp-shield manager \
   --tunnel-addr <agent-box-ip>:19611 \
   --psk <KEY> \
-  --auth-pass myauth --priv-pass mypriv \
+  --auth-pass myauthpass --priv-pass myprivpass \
   --listen :161 \
   --community public \
   --trap-listen :10162
@@ -77,16 +77,16 @@ snmp-proxy manager \
 
 ```bash
 # config sanity (also pre-flights nothing external):
-snmp-proxy validate --role manager --tunnel-addr <agent-box-ip>:19611 \
-  --psk <KEY> --auth-pass myauth --priv-pass mypriv --listen :161
+snmp-shield validate --role manager --tunnel-addr <agent-box-ip>:19611 \
+  --psk <KEY> --auth-pass myauthpass --priv-pass myprivpass --listen :161
 
 # full environment check from the manager box (tunnel handshake):
-snmp-proxy selftest --role manager --tunnel-addr <agent-box-ip>:19611 \
-  --psk <KEY> --auth-pass myauth --priv-pass mypriv --listen :161
+snmp-shield selftest --role manager --tunnel-addr <agent-box-ip>:19611 \
+  --psk <KEY> --auth-pass myauthpass --priv-pass myprivpass --listen :161
 
 # from the agent box (SNMP GET to the real agent):
-snmp-proxy selftest --role agent --tunnel-addr :19611 --psk <KEY> \
-  --auth-pass myauth --priv-pass mypriv --agent 127.0.0.1:161
+snmp-shield selftest --role agent --tunnel-addr :19611 --psk <KEY> \
+  --auth-pass myauthpass --priv-pass myprivpass --agent 127.0.0.1:161
 ```
 
 Then poll through the chain with any manager (`snmpget -v2c -c public
@@ -97,8 +97,8 @@ Then poll through the chain with any manager (`snmpget -v2c -c public
 The same deployment via YAML (`--config`):
 
 ```bash
-snmp-proxy manager --config configs/manager-usm.yaml
-snmp-proxy agent   --config configs/agent-usm.yaml
+snmp-shield manager --config configs/manager-usm.yaml
+snmp-shield agent   --config configs/agent-usm.yaml
 ```
 
 Both sides must share `--psk`, `--auth-pass` and `--priv-pass` (the
@@ -113,8 +113,8 @@ authenticates the SNMP messages inside it).
 
   ```bash
   # both sides:
-  snmp-proxy agent --psk-ciphersuites aes256-ccm-8 ...
-  snmp-proxy manager --psk-ciphersuites aes256-ccm-8 ...
+  snmp-shield agent --psk-ciphersuites aes256-ccm-8 ...
+  snmp-shield manager --psk-ciphersuites aes256-ccm-8 ...
   ```
 
   Comma-separated list, most preferred first (see `--help` for the
@@ -125,7 +125,7 @@ authenticates the SNMP messages inside it).
   secured segment:
 
   ```bash
-  snmp-proxy manager --trap-listen :10162 \
+  snmp-shield manager --trap-listen :10162 \
     --filter-oid 1.3.6.1.4.1.99 --filter-action deny ...
   ```
 

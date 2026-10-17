@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
@@ -170,7 +170,7 @@ func TestSNMPGetScalars(t *testing.T) {
 			t.Fatalf("%s: got %q, want %q", oid, string(got[2:]), want)
 		}
 	}
-	check(".1", "snmp-proxy")
+	check(".1", "snmp-shield")
 	check(".2", "9.9.9")
 	check(".3", "manager")
 }

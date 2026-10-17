@@ -1,26 +1,26 @@
-# systemd unit — snmp-proxy manager instance (manager-side proxy).
-# Install: cp deploy/snmp-proxy-manager.service /etc/systemd/system/
-#          systemctl daemon-reload && systemctl enable --now snmp-proxy-manager
+# systemd unit — snmp-shield agent instance (agent-side proxy).
+# Install: cp deploy/snmp-shield-agent.service /etc/systemd/system/
+#          systemctl daemon-reload && systemctl enable --now snmp-shield-agent
 #
-# The instance reads its YAML config from /etc/snmp-proxy/manager.yaml
-# (see configs/manager-*.yaml for templates).
+# The instance reads its YAML config from /etc/snmp-shield/agent.yaml
+# (see configs/agent-*.yaml for templates).
 
 [Unit]
-Description=SNMP securing proxy (manager side)
-Documentation=https://github.com/GalaxyGorilla/snmp-proxy
+Description=SNMP securing proxy (agent side)
+Documentation=https://github.com/GalaxyGorilla/snmp-shield
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/snmp-proxy manager --config /etc/snmp-proxy/manager.yaml
+ExecStart=/usr/local/bin/snmp-shield agent --config /etc/snmp-shield/agent.yaml
 Restart=on-failure
 RestartSec=5
 
 # The engine boots store must persist across restarts (anti-rollback);
 # StateDirectory guarantees it survives package upgrades and reboots.
-StateDirectory=snmp-proxy
-ConfigurationDirectory=snmp-proxy
+StateDirectory=snmp-shield
+ConfigurationDirectory=snmp-shield
 
 # Hardening: the proxy needs only its UDP sockets and the engine store.
 NoNewPrivileges=yes
@@ -43,8 +43,8 @@ SystemCallArchitectures=native
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
-User=snmp-proxy
-Group=snmp-proxy
+User=snmp-shield
+Group=snmp-shield
 
 [Install]
 WantedBy=multi-user.target

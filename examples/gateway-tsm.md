@@ -25,13 +25,13 @@ scripts/gen-certs.sh   # throwaway PKI into certs/
 ## 2. Run it
 
 ```bash
-snmp-proxy gateway \
+snmp-shield gateway \
   --security tsm-gateway \
   --listen :10161 \
   --agent 127.0.0.1:161 \
-  --ca-file /etc/snmp-proxy/ca.crt \
-  --cert-file /etc/snmp-proxy/gateway.crt \
-  --key-file /etc/snmp-proxy/gateway.key \
+  --ca-file /etc/snmp-shield/ca.crt \
+  --cert-file /etc/snmp-shield/gateway.crt \
+  --key-file /etc/snmp-shield/gateway.key \
   --community public \
   --trap-listen :10162 \
   --trap-sink <manager-ip>:10162
@@ -59,10 +59,10 @@ snmpget -v3 -l authPriv -m ALL -M <mibdirs> \
 ## 4. Verify
 
 ```bash
-snmp-proxy selftest --role gateway --security tsm-gateway \
+snmp-shield selftest --role gateway --security tsm-gateway \
   --listen :10161 --agent 127.0.0.1:161 \
-  --ca-file /etc/snmp-proxy/ca.crt --cert-file /etc/snmp-proxy/gateway.crt \
-  --key-file /etc/snmp-proxy/gateway.key
+  --ca-file /etc/snmp-shield/ca.crt --cert-file /etc/snmp-shield/gateway.crt \
+  --key-file /etc/snmp-shield/gateway.key
 ```
 
 The selftest also warns when the front certificate expires within 30
@@ -75,7 +75,7 @@ days.
   TSM notifications toward the manager:
 
   ```bash
-  snmp-proxy gateway --trap-listen :10162 \
+  snmp-shield gateway --trap-listen :10162 \
     --filter-oid 1.3.6.1.4.1.99 --filter-action deny ...
   ```
 

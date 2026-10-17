@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Generate an SBOM for the snmp-proxy release binary and scan it against
+# Generate an SBOM for the snmp-shield release binary and scan it against
 # vulnerability databases (NVD/GHSA/OSV) via grype.
 #
 #   scripts/sbom.sh            build release + generate SBOM + vuln scan
@@ -27,12 +27,12 @@ need grype
 # Release binary (stripped static ELF; syft reads Go buildinfo from it).
 make release >/dev/null
 mkdir -p dist
-syft bin/snmp-proxy -o spdx-json=dist/snmp-proxy.spdx.json -o cyclonedx-json=dist/snmp-proxy.cdx.json
-echo "SBOMs written to dist/snmp-proxy.spdx.json + dist/snmp-proxy.cdx.json"
+syft bin/snmp-shield -o spdx-json=dist/snmp-shield.spdx.json -o cyclonedx-json=dist/snmp-shield.cdx.json
+echo "SBOMs written to dist/snmp-shield.spdx.json + dist/snmp-shield.cdx.json"
 
 [ "$SBOM_ONLY" = "1" ] && exit 0
 
 # Fresh vuln DB (grype refuses to scan with a DB older than 5 days).
 grype db update
-grype dist/snmp-proxy.spdx.json --fail-on high
+grype dist/snmp-shield.spdx.json --fail-on high
 echo "vulnscan: no findings at severity >= high"

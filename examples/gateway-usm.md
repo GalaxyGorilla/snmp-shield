@@ -16,11 +16,11 @@ rejected by design).
 ## 1. Run it
 
 ```bash
-snmp-proxy gateway \
+snmp-shield gateway \
   --security usm-gateway \
   --listen :161 \
   --agent 127.0.0.1:161 \
-  --auth-pass myauth --priv-pass mypriv \
+  --auth-pass myauthpass --priv-pass myprivpass \
   --community public \
   --trap-listen :162 \
   --trap-sink <manager-ip>:162
@@ -41,7 +41,7 @@ snmp-proxy gateway \
 Any standard manager with USM user `proxy`, auth SHA, priv AES:
 
 ```bash
-snmpget -v3 -l authPriv -u proxy -a SHA -A myauth -x AES -X mypriv \
+snmpget -v3 -l authPriv -u proxy -a SHA -A myauthpass -x AES -X myprivpass \
   <gateway-ip> sysDescr.0
 ```
 
@@ -56,7 +56,7 @@ gateway:
   agent_addr: "127.0.0.1:161"
 security:
   mode: usm-gateway
-  engine_store: /var/lib/snmp-proxy/engine.json
+  engine_store: /var/lib/snmp-shield/engine.json
   users:
     - name: noc
       auth_protocol: sha
@@ -78,8 +78,8 @@ The engine boots store is REQUIRED (anti-rollback): point
 
 ```bash
 # environment check: SNMP GET to the legacy agent behind the gateway:
-snmp-proxy selftest --role gateway --security usm-gateway \
-  --listen :161 --agent 127.0.0.1:161 --auth-pass myauth --priv-pass mypriv
+snmp-shield selftest --role gateway --security usm-gateway \
+  --listen :161 --agent 127.0.0.1:161 --auth-pass myauthpass --priv-pass myprivpass
 ```
 
 ## Protection semantics
@@ -95,7 +95,7 @@ snmp-proxy selftest --role gateway --security usm-gateway \
   traps; drop the uninteresting ones before they reach the manager:
 
   ```bash
-  snmp-proxy gateway --trap-listen :162 \
+  snmp-shield gateway --trap-listen :162 \
     --filter-oid 1.3.6.1.4.1.99 --filter-action deny ...
   ```
 

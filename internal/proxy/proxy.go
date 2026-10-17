@@ -16,14 +16,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/GalaxyGorilla/snmp-proxy/internal/cache"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/passthrough"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/snmpmetrics"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/tsm"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/usm"
+	"github.com/GalaxyGorilla/snmp-shield/internal/cache"
+	"github.com/GalaxyGorilla/snmp-shield/internal/config"
+	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
+	"github.com/GalaxyGorilla/snmp-shield/internal/passthrough"
+	"github.com/GalaxyGorilla/snmp-shield/internal/snmpmetrics"
+	"github.com/GalaxyGorilla/snmp-shield/internal/tsm"
+	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
+	"github.com/GalaxyGorilla/snmp-shield/internal/usm"
 	"go.uber.org/zap"
 )
 

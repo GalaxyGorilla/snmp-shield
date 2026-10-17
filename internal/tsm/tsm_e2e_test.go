@@ -18,10 +18,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/tsm"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
+	"github.com/GalaxyGorilla/snmp-shield/internal/config"
+	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
+	"github.com/GalaxyGorilla/snmp-shield/internal/tsm"
+	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
 	"go.uber.org/zap"
 )
 
@@ -257,7 +257,7 @@ func freeUDPPort(t *testing.T) string {
 // TestTSMEndToEndGet: v2c GET -> manager TSM translator -> pipe -> agent TSM
 // translator (peer cert CN allowed) -> fake v2c agent -> response back.
 func TestTSMEndToEndGet(t *testing.T) {
-	pair, mgrAddr := newTSMPair(t, "snmp-proxy-manager", []string{"snmp-proxy-manager"})
+	pair, mgrAddr := newTSMPair(t, "snmp-shield-manager", []string{"snmp-shield-manager"})
 	defer pair.stop()
 
 	client, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -323,7 +323,7 @@ func buildGetVarbinds(t *testing.T) []byte {
 // TestTSMEndToEndWrongPeer: with an identity allow-list that does not
 // contain the shim's peer CN, requests must be dropped (no response).
 func TestTSMEndToEndWrongPeer(t *testing.T) {
-	pair, mgrAddr := newTSMPair(t, "snmp-proxy-manager", []string{"some-other-identity"})
+	pair, mgrAddr := newTSMPair(t, "snmp-shield-manager", []string{"some-other-identity"})
 	defer pair.stop()
 
 	client, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -377,10 +377,10 @@ func TestTSMEndToEndTrapPath(t *testing.T) {
 	fake, fakeAddr := fakeAgentOnFreePort(t)
 	defer fake.Close()
 
-	agentCert := testCert(t, "snmp-proxy-manager")
+	agentCert := testCert(t, "snmp-shield-manager")
 	mgrPipe, agtPipe := newPipePair(agentCert)
 
-	agentSec := config.Security{Mode: "tsm", TSMIdentities: []string{"snmp-proxy-manager"}}
+	agentSec := config.Security{Mode: "tsm", TSMIdentities: []string{"snmp-shield-manager"}}
 	agentRole := config.AgentRole{
 		AgentAddr:         fakeAddr,
 		TrapSinkAddr:      sinkAddr,
@@ -488,10 +488,10 @@ func TestTSMEndToEndInform(t *testing.T) {
 	fake, fakeAddr := fakeAgentOnFreePort(t)
 	defer fake.Close()
 
-	agentCert := testCert(t, "snmp-proxy-manager")
+	agentCert := testCert(t, "snmp-shield-manager")
 	mgrPipe, agtPipe := newPipePair(agentCert)
 
-	agentSec := config.Security{Mode: "tsm", TSMIdentities: []string{"snmp-proxy-manager"}}
+	agentSec := config.Security{Mode: "tsm", TSMIdentities: []string{"snmp-shield-manager"}}
 	agentRole := config.AgentRole{
 		AgentAddr:      fakeAddr,
 		AgentCommunity: "realcomm",
@@ -598,10 +598,10 @@ func buildInformVarbinds(t *testing.T) []byte {
 // (corrID preserved, req-id + securityName + sec-level flags echoed per the
 // TSM response echo rule). Pins the manager-side inbound-inform answering.
 func TestTSMEndToEndAgentInform(t *testing.T) {
-	agentCert := testCert(t, "snmp-proxy-manager")
+	agentCert := testCert(t, "snmp-shield-manager")
 	mgrPipe, agtPipe := newPipePair(agentCert)
 
-	agentSec := config.Security{Mode: "tsm", TSMIdentities: []string{"snmp-proxy-manager"}}
+	agentSec := config.Security{Mode: "tsm", TSMIdentities: []string{"snmp-shield-manager"}}
 	agentRole := config.AgentRole{AgentAddr: "127.0.0.1:9", AgentCommunity: "realcomm"}
 	atr, err := tsm.NewAgentTranslator(agentRole, agentSec, agtPipe, zap.NewNop(), nil)
 	if err != nil {
@@ -634,7 +634,7 @@ func TestTSMEndToEndAgentInform(t *testing.T) {
 		MsgMaxSize: msg.DefaultMsgMaxSize,
 		MsgFlags:   msg.MsgFlagReportable,
 		SecModel:   msg.SecurityModelTSM,
-	}, msg.USMParams{UserName: "snmp-proxy-manager"}, scoped, nil)
+	}, msg.USMParams{UserName: "snmp-shield-manager"}, scoped, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

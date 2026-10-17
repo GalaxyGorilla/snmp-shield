@@ -1,5 +1,5 @@
 #!/bin/sh
-# scripts/smoke-cli.sh — plug-and-play smoke test: two snmp-proxy instances
+# scripts/smoke-cli.sh — plug-and-play smoke test: two snmp-shield instances
 # configured entirely by flags (no YAML), fake Python SNMP agent, gosnmp
 # client GET through the PSK-DTLS tunnel. Exit 0 = green.
 set -e
@@ -8,8 +8,8 @@ cd "$(dirname "$0")/.."
 # non-login shells may lack go on PATH
 PATH="$PATH:/usr/local/go/bin"
 
-BIN=./bin/snmp-proxy
-go build -o "$BIN" ./cmd/snmp-proxy
+BIN=./bin/snmp-shield
+go build -o "$BIN" ./cmd/snmp-shield
 
 PSK=$("$BIN" genpsk)
 AUTH=authpass

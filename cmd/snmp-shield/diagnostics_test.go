@@ -24,23 +24,23 @@ func TestRoleArg(t *testing.T) {
 
 func TestRunValidateFlags(t *testing.T) {
 	// valid flags-mode manager config
-	if rc := swapArgs(t, []string{"snmp-proxy", "validate", "--role", "manager",
+	if rc := swapArgs(t, []string{"snmp-shield", "validate", "--role", "manager",
 		"--tunnel-addr", "127.0.0.1:19611", "--psk", "aabbccdd",
 		"--auth-pass", "a", "--priv-pass", "b", "--listen", ":161"}, run); rc != 0 {
 		t.Fatalf("validate valid manager = %d, want 0", rc)
 	}
 	// invalid: missing priv pass
-	if rc := swapArgs(t, []string{"snmp-proxy", "validate", "--role", "manager",
+	if rc := swapArgs(t, []string{"snmp-shield", "validate", "--role", "manager",
 		"--tunnel-addr", "127.0.0.1:19611", "--psk", "aabbccdd",
 		"--auth-pass", "a", "--listen", ":161"}, run); rc != 1 {
 		t.Fatalf("validate missing pass = %d, want 1", rc)
 	}
 	// invalid role (text output path → rc 1)
-	if rc := swapArgs(t, []string{"snmp-proxy", "validate", "--role", "bogus"}, run); rc != 1 {
+	if rc := swapArgs(t, []string{"snmp-shield", "validate", "--role", "bogus"}, run); rc != 1 {
 		t.Fatalf("validate bogus role = %d, want 1", rc)
 	}
 	// invalid role with --json: report printed, rc 0 (tooling reads ok=false)
-	if rc := swapArgs(t, []string{"snmp-proxy", "validate", "--role", "bogus", "--json"}, run); rc != 0 {
+	if rc := swapArgs(t, []string{"snmp-shield", "validate", "--role", "bogus", "--json"}, run); rc != 0 {
 		t.Fatalf("validate bogus role --json = %d, want 0", rc)
 	}
 }
@@ -65,18 +65,18 @@ security:
 	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if rc := swapArgs(t, []string{"snmp-proxy", "validate", "--role", "agent", "--config", path}, run); rc != 0 {
+	if rc := swapArgs(t, []string{"snmp-shield", "validate", "--role", "agent", "--config", path}, run); rc != 0 {
 		t.Fatalf("validate agent yaml = %d, want 0", rc)
 	}
 	// broken YAML
 	if err := os.WriteFile(path, []byte("tunnel: ["), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if rc := swapArgs(t, []string{"snmp-proxy", "validate", "--role", "agent", "--config", path}, run); rc != 1 {
+	if rc := swapArgs(t, []string{"snmp-shield", "validate", "--role", "agent", "--config", path}, run); rc != 1 {
 		t.Fatalf("validate broken yaml = %d, want 1", rc)
 	}
 	// missing file
-	if rc := swapArgs(t, []string{"snmp-proxy", "validate", "--role", "agent", "--config", filepath.Join(dir, "nope.yaml")}, run); rc != 1 {
+	if rc := swapArgs(t, []string{"snmp-shield", "validate", "--role", "agent", "--config", filepath.Join(dir, "nope.yaml")}, run); rc != 1 {
 		t.Fatalf("validate missing file = %d, want 1", rc)
 	}
 }
@@ -98,7 +98,7 @@ func TestRunValidateJSON(t *testing.T) {
 func TestRunSelftestProbeDisabled(t *testing.T) {
 	dir := t.TempDir()
 	store := filepath.Join(dir, "engine.json")
-	if rc := swapArgs(t, []string{"snmp-proxy", "selftest", "--role", "manager",
+	if rc := swapArgs(t, []string{"snmp-shield", "selftest", "--role", "manager",
 		"--tunnel-addr", "127.0.0.1:19611", "--psk", "aabbccdd",
 		"--auth-pass", "a", "--priv-pass", "b", "--listen", ":161",
 		"--probe=false"}, run); rc != 0 {

@@ -17,11 +17,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/GalaxyGorilla/snmp-proxy/internal/cache"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/notifyfilter"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
+	"github.com/GalaxyGorilla/snmp-shield/internal/cache"
+	"github.com/GalaxyGorilla/snmp-shield/internal/config"
+	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
+	"github.com/GalaxyGorilla/snmp-shield/internal/notifyfilter"
+	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
 	"go.uber.org/zap"
 )
 

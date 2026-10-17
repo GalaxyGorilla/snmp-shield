@@ -26,15 +26,15 @@ for tool in snmpget snmpgetnext snmpbulkwalk snmpset snmptrap openssl; do
 done
 
 fail=0
-BIN=./bin/snmp-proxy
-go build -o "$BIN" ./cmd/snmp-proxy
+BIN=./bin/snmp-shield
+go build -o "$BIN" ./cmd/snmp-shield
 go build -o bin/tsm-sink ./scripts/tsm-sink
 
 # ---------------------------------------------------------------- throwaway PKI
 CERTDIR=$(mktemp -d)
 trap 'kill "$GW_PID" "$AGENT_PID" "$SINK_PID" 2>/dev/null || true; rm -rf "$CERTDIR" "$SNMPHOME"' EXIT INT TERM
 
-CA_CN="snmp-proxy test CA"
+CA_CN="snmp-shield test CA"
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
     -keyout "$CERTDIR/ca.key" -out "$CERTDIR/ca.crt" -days 2 -nodes \
     -subj "/CN=${CA_CN}" \
@@ -42,19 +42,19 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
     -addext "keyUsage=critical,keyCertSign,cRLSign" >/dev/null 2>&1
 openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
     -keyout "$CERTDIR/server.key" -out "$CERTDIR/server.csr" -nodes \
-    -subj "/CN=snmp-proxy-agent" >/dev/null 2>&1
+    -subj "/CN=snmp-shield-agent" >/dev/null 2>&1
 openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
     -keyout "$CERTDIR/client.key" -out "$CERTDIR/client.csr" -nodes \
-    -subj "/CN=snmp-proxy-manager" >/dev/null 2>&1
+    -subj "/CN=snmp-shield-manager" >/dev/null 2>&1
 openssl x509 -req -in "$CERTDIR/server.csr" -CA "$CERTDIR/ca.crt" -CAkey "$CERTDIR/ca.key" \
     -CAcreateserial -out "$CERTDIR/server.crt" -days 2 \
     -extfile <(printf '%s\n' \
-        "subjectAltName=DNS:snmp-proxy-agent,DNS:localhost,IP:127.0.0.1" \
+        "subjectAltName=DNS:snmp-shield-agent,DNS:localhost,IP:127.0.0.1" \
         "extendedKeyUsage=serverAuth") >/dev/null 2>&1
 openssl x509 -req -in "$CERTDIR/client.csr" -CA "$CERTDIR/ca.crt" -CAkey "$CERTDIR/ca.key" \
     -CAcreateserial -out "$CERTDIR/client.crt" -days 2 \
     -extfile <(printf '%s\n' \
-        "subjectAltName=DNS:snmp-proxy-manager" \
+        "subjectAltName=DNS:snmp-shield-manager" \
         "extendedKeyUsage=clientAuth") >/dev/null 2>&1
 
 ca_fp=$(openssl x509 -in "$CERTDIR/ca.crt" -noout -fingerprint -sha256 | cut -d= -f2)
@@ -73,7 +73,7 @@ cp "$CERTDIR/client.crt" "$CERTDIR/client.key" "$SNMPHOME/.snmp/tls/certs/"
 cat > "$SNMPHOME/.snmp/snmp.conf" <<EOF
 defVersion 3
 defSecurityModel tsm
-defSecurityName snmp-proxy-manager
+defSecurityName snmp-shield-manager
 defAuthType SHA
 defAuthPassphrase authpassphrase
 defPrivType AES
@@ -242,7 +242,7 @@ SINK_PID=$!
 sleep 0.5
 
 # ------------------------------------------------------------------- gateway
-./bin/snmp-proxy gateway \
+./bin/snmp-shield gateway \
     --listen "127.0.0.1:$GW_PORT" --agent "127.0.0.1:$AGENT_PORT" \
     --security tsm-gateway \
     --ca-file "$CERTDIR/ca.crt" --cert-file "$CERTDIR/server.crt" --key-file "$CERTDIR/server.key" \

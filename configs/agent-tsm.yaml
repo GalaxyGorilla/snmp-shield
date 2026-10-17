@@ -1,7 +1,7 @@
 # Agent-side proxy, TSM mode: the tunnel (D)TLS handshake authenticates
 # the manager-side proxy (RFC 5591). The peer certificate of the tunnel
 # carries the securityName; only allow-listed identities are forwarded.
-role_note: "run with: snmp-proxy agent --config configs/agent-tsm.yaml"
+role_note: "run with: snmp-shield agent --config configs/agent-tsm.yaml"
 
 tunnel:
   mode: dtls
@@ -28,7 +28,7 @@ agent:
 security:
   mode: tsm
   # allow-list of peer certificate CNs; empty = accept any valid cert
-  tsm_identities: ["snmp-proxy-manager"]
+  tsm_identities: ["snmp-shield-manager"]
 
 # Optional SNMP metrics interface: a small read-only SNMPv2c health agent
 # (GET/GETNEXT: identity, tunnel state, counters) and v2c event traps for

@@ -12,14 +12,14 @@ tunnel:
   #   - "192.0.2.20:10162"
   #   - "192.0.2.21:10162"
   dial_addr: "192.0.2.20:10162"
-  psk_identity: "snmp-proxy-manager"
+  psk_identity: "snmp-shield-manager"
   # Accepts "hex:<hex>", "text:<string>", or a bare string (treated as text).
   psk: "text:change-me-shared-secret"
   # Optional DTLS 1.2 PSK ciphersuites, most preferred first; both sides
   # must share at least one. Supported: aes128-ccm-8 (default),
   # aes256-ccm-8, aes128-ccm, aes128-gcm, aes128-cbc.
   # psk_ciphersuites: ["aes256-ccm-8", "aes128-ccm-8"]
-  server_name: "snmp-proxy-agent"
+  server_name: "snmp-shield-agent"
   # insecure_skip_verify is only for PSK mode (no CA); keep false in production.
   insecure_skip_verify: true
   keepalive_secs: 15

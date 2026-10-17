@@ -13,7 +13,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
+	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
 )
 
 func main() {

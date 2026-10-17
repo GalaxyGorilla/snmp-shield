@@ -1,4 +1,4 @@
-# AGENTS.md — snmp-proxy
+# AGENTS.md — snmp-shield
 
 > **Read this file first. Update it at the end of every task** — behavior,
 > layout, commands, decisions. Treat it as documentation-as-code.
@@ -65,11 +65,11 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | Notification filtering (`notifications.filter`: allow/deny OID prefixes; YAML + `--filter-oid`/`--filter-action` flags) | done (tested, unit + e2e: passthrough relay, USM gateway w/ gosnmp TrapListener; config validation) |
 | HA (manager tunnel failover `tunnel.dial_addrs` sticky walk; keepalive dead-peer detection 3 misses × 3×keepalive; session Done()/per-session cancel; USM cross-engine Report adoption; live `keepalive_secs`/`max_reconnect_backoff_secs` + Reconnects/TunnelUp metrics) | done (tested, failover e2e + dead-peer net.Pipe + config/flags tests; smoke + all 3 interop suites re-run green) |
 | USM two-proxy chain in-Go e2e tests (`internal/usm/translate_manager_e2e_test.go`: full manager+agent translator chain over a pipe shim, fake v2c agent; discovery/GET, trap relay+filter, agent-notif→sink, inform round trip) + **inform relay bug fix** (manager-side informs were never answered) | done (tested, -race -count 2) |
-| msg fuzz tests (`internal/msg/fuzz_test.go`: 7 Go-native fuzz targets — Peek/SplitV1V2c/ParsePDU/SplitV1Trap/ParseV3/UnwrapScopedPDU/TrapOID/DecodeOID; regression corpus in `testdata/fuzz/`) + **2 parser panic fixes** (berOctetStringLike empty-buffer, ParseV3 declared-length overflow) | done (tested, all targets fuzzed 30s green; corpus runs in every `go test`) |
+| msg fuzz tests (`internal/msg/fuzz_test.go`: 8 Go-native fuzz targets — Peek/SplitV1V2c/ParsePDU/SplitV1Trap/ParseV3/UnwrapScopedPDU/TrapOID/DecodeOID; regression corpus in `testdata/fuzz/`) + **2 parser panic fixes** (berOctetStringLike empty-buffer, ParseV3 declared-length overflow) | done (tested, all targets fuzzed 30s green; corpus runs in every `go test`) |
 | TSM inform relay fix + e2e tests (`tsm_e2e_test.go`: inform round trip device→sink→device, agent-originated inform answered; pipe pending-queue fix for the startup race) — same dead-end as USM (FlagInform RESP frames never matched against the inform pending map, `ip.addr` never set) | done (tested, -race -count 2) |
 | internal/proxy wiring e2e tests (`internal/proxy/proxy_test.go`: white-box runAgent/runManager/runGateway over real PSK-DTLS loopback; passthrough + usm-translate two-proxy chains, USM + TSM gateways driven by gosnmp/DTLS clients, parseEngineID) + **2 prod fixes pinned**: TSM gateway accept loop returned "listener closed" error on clean shutdown (pion returns its own sentinel, not net.ErrClosed) and passthrough Manager `m.conn` read races its deferred nil-write (serveClearRequests/awaitResponse now read under socksMu) | done (tested, -race -count 2; proxy 0% → ~72% coverage) |
 | crypto primitive unit tests (`internal/usm/crypto_test.go`: protocol parsers, key lengths, RFC 3414 A.3 password-to-key vectors, Blumenthal/Reeder priv-key extensions, digest/sign/verify round trips + aliasing, DES salt counter) + cmd flags/os.Args coverage (`main_test.go`: gateway branches, psk-ciphersuites + filter flags, parsePskCiphersuites, run() version/help/genpsk/unknown) | done (tested, -race -count 2; crypto.go ~100%, cmd 24% → 57%) |
-| Manager-securing single proxy: **usm-manager mode** (`security.mode: usm-manager`, gateway role; `internal/usm/manager_gateway.go`: clear v1/v2c traps/informs at `trap_listen_addr` → v3 USM authPriv notifications toward `trap_sink_addr`, own authoritative engine + first user; inform responses relayed back to the device) | done (tested, gosnmp TrapListener sink incl. auto-inform-response, trap/inform/v1/filter tests, -race -count 2) |
+| Manager-securing single proxy: **usm-manager mode** (`security.mode: usm-manager`, gateway role; `internal/usm/manager_gateway.go`: clear v1/v2c traps/informs at `trap_listen_addr` → v3 USM authPriv notifications toward `trap_sink_addr`, own authoritative engine + first user; inform responses relayed back to the device) | done (tested, gosnmp TrapListener sink incl. auto-inform-response, trap/inform/v1/filter tests, -race -count 2; trap-only config + direct flags require no unused `listen_addr`/`agent_addr`) |
 | Meaningful challenge tests (adversarial/edge-case tests beyond happy paths, added where they find real issues) + pragmatic polish | done (tested, `internal/usm/gateway_challenge_test.go` + `internal/tunnel/challenge_test.go`: stale engineTime rejected w/ usmStatsNotInTimeWindows report, tampered digest rejected w/ usmStatsWrongDigests, non-reportable silent drop, GetBulk relay, garbage-datagram robustness, wrong-PSK handshake rejection; polish: removed unreachable GetBulk-on-v1 downgrade in gateway.go — `downstreamFor` always returns v2c) |
 | HA pair state sync (failover replicas sharing one engineID converge: digest-verified higher-boots claims adopted as logical reboot via `cache.EngineClock.AdoptInbound`; manager discovery cache follows the wire for same-engine Report regressions) | done (tested, `internal/usm/ha_sync_test.go` wire tests + cache unit test; smoke + all 3 interop suites re-run green) |
 | Notify filtering for the usm-manager manager-side notification path | done (already implemented at birth: `ManagerGateway.handleClearTrap` filters clear notifications before the v3 wrap toward `trap_sink_addr`, `TestManagerGatewayFilter` covers it; the v3 notification is generated from that ingress so the hook covers the whole path) |
@@ -136,7 +136,7 @@ device.
 - Trap direction: clear v1/v2c traps at `trap_listen_addr` are wrapped
   into v3 authPriv notifications (first configured user, own engine
   state) and sent to `trap_sink_addr`.
-- No-YAML CLI mode: `snmp-proxy gateway --listen :161 --agent
+- No-YAML CLI mode: `snmp-shield gateway --listen :161 --agent
   127.0.0.1:161 --community public --auth-pass <auth> --priv-pass
   <priv> [--trap-listen :162 --trap-sink <mgr>:162]`.
 - Tests: `internal/usm/gateway_test.go` (gosnmp v3 authPriv client as
@@ -190,7 +190,7 @@ device.
   the request's msgID, request-id, contextEngineID, securityName and
   security-level flags (auth/priv bits), even though TSM secParams
   stay empty.
-- No-YAML CLI: `snmp-proxy gateway --security tsm-gateway --listen
+- No-YAML CLI: `snmp-shield gateway --security tsm-gateway --listen
   :10161 --agent 127.0.0.1:161 --ca-file certs/ca.crt --cert-file
   certs/server.crt --key-file certs/server.key [--trap-listen :10162
   --trap-sink <mgr>:10162]`.
@@ -219,7 +219,7 @@ device.
 ## 4. Repository Layout
 
 ```
-cmd/snmp-proxy/           main package; role via subcommand (manager|agent|gateway) + validate/selftest/genpsk
+cmd/snmp-shield/           main package; role via subcommand (manager|agent|gateway) + validate/selftest/genpsk
 internal/config/          YAML config + flag overrides
 internal/proxy/           shared proxy wiring
 internal/passthrough/     opaque forwarding of clear SNMP
@@ -236,7 +236,7 @@ internal/snmpmetrics/     SNMP health MIB agent + tunnel event traps
 ```
 
 (Directories with code: config, observ, tunnel, msg, passthrough, proxy,
-usm, tsm, cache, notifyfilter, snmpmetrics, cmd/snmp-proxy. Still empty, reserved:
+usm, tsm, cache, notifyfilter, snmpmetrics, cmd/snmp-shield. Still empty, reserved:
 discovery (discovery logic lives in internal/usm translate_manager.go),
 securitylevel. Also: configs/ example YAML (manager/agent × psk/usm/tsm +
 gateway-usm + gateway-tsm + gateway-usm-manager), scripts/gen-certs.sh
@@ -272,7 +272,7 @@ change or parser edit — pragmatic: fix only meaningful findings):
 dependency change or before a release):
 
 ```bash
-make sbom       # release binary -> syft -> dist/snmp-proxy.{spdx,cdx}.json
+make sbom       # release binary -> syft -> dist/snmp-shield.{spdx,cdx}.json
 make vulnscan   # grype db update + grype --fail-on high vs NVD/GHSA/OSV
 ```
 
@@ -292,10 +292,10 @@ Without `--config`, the subcommands build a validated Config from direct
 flags. Two-proxy deployment is two commands plus a generated key:
 
 ```bash
-KEY=$(snmp-proxy genpsk)   # random 32-byte hex key
-snmp-proxy agent   --tunnel-addr <manager-proxy-ip>:19611 --psk $KEY \
+KEY=$(snmp-shield genpsk)   # random 32-byte hex key
+snmp-shield agent   --tunnel-addr <manager-proxy-ip>:19611 --psk $KEY \
   --auth-pass <auth> --priv-pass <priv> --agent 127.0.0.1:161 --community public
-snmp-proxy manager --tunnel-addr <manager-proxy-ip>:19611 --psk $KEY \
+snmp-shield manager --tunnel-addr <manager-proxy-ip>:19611 --psk $KEY \
   --auth-pass <auth> --priv-pass <priv> --listen :161 --community public
 ```
 
@@ -318,7 +318,7 @@ in flags mode is usm-translate (user 'proxy', SHA, AES).
 Gateway (single box, no tunnel/PSK):
 
 ```bash
-snmp-proxy gateway --listen :161 --agent 127.0.0.1:161 \
+snmp-shield gateway --listen :161 --agent 127.0.0.1:161 \
   --community public --auth-pass <auth> --priv-pass <priv> \
   [--trap-listen :162 --trap-sink <manager>:162]
 ```
@@ -326,7 +326,7 @@ snmp-proxy gateway --listen :161 --agent 127.0.0.1:161 \
 TSM gateway (single box, RFC 6353 DTLS front leg — cert-based):
 
 ```bash
-snmp-proxy gateway --security tsm-gateway --listen :10161 \
+snmp-shield gateway --security tsm-gateway --listen :10161 \
   --agent 127.0.0.1:161 \
   --ca-file certs/ca.crt --cert-file certs/server.crt \
   --key-file certs/server.key \
@@ -337,7 +337,7 @@ USM-manager (single box, protects the manager leg: clear devices in,
 authenticated v3 out toward the manager's trap receiver):
 
 ```bash
-snmp-proxy gateway --security usm-manager \
+snmp-shield gateway --security usm-manager \
   --trap-listen :162 --trap-sink <manager>:162 \
   --auth-pass <auth> --priv-pass <priv>
 ```
@@ -347,9 +347,9 @@ snmp-proxy gateway --security usm-manager \
 Appliance/tooling helpers (web-UI pre-apply + "test connection"):
 
 ```bash
-snmp-proxy validate --role <manager|agent|gateway> \
+snmp-shield validate --role <manager|agent|gateway> \
   [--config <file> | same flags as the role] [--json]
-snmp-proxy selftest --role <manager|agent|gateway> \
+snmp-shield selftest --role <manager|agent|gateway> \
   [--config <file> | same flags as the role] [--json] [--probe=false]
 ```
 
@@ -362,7 +362,7 @@ snmp-proxy selftest --role <manager|agent|gateway> \
   gateway modes), front-cert expiry warning at 30 days (tsm-gateway).
   `--probe=false` for no-network checks. Exit 0 = all checks passed.
 - Both share the full flag set with the role subcommands via one
-  `register()` function (`cmd/snmp-proxy/diagnostics.go`); unknown
+  `register()` function (`cmd/snmp-shield/diagnostics.go`); unknown
   flags for a given subcommand are simply unused. The selftest probes
   work while the service is running (no listener binding needed — the
   tunnel probe is a client dial, the agent probe is a one-shot GET).
@@ -568,7 +568,7 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   after Close — NOT `net.ErrClosed`. Any accept loop that must return
   nil on clean shutdown has to match both (tsm_gateway does a
   strings.Contains fallback).
-- **msg fuzzing** (`internal/msg/fuzz_test.go`): 7 Go-native fuzz
+- **msg fuzzing** (`internal/msg/fuzz_test.go`): 8 Go-native fuzz
   targets cover every parser entry point (Peek, SplitV1V2c, ParsePDU,
   SplitV1Trap, ParseV3, UnwrapScopedPDU, TrapOID, DecodeOID) with
   invariants (version ∈ {0,1}, TLVs inside datagram, TSM ⇒ empty
@@ -631,7 +631,7 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   derives the auth/priv MsgFlags from the SecurityParameters' protocols
   (SHA/AES set the bits even when you pass NoAuthNoPriv — a genuine
   NoAuthNoPriv wire message needs empty protocols).
-- **validate/selftest design** (`cmd/snmp-proxy/diagnostics.go`): the
+- **validate/selftest design** (`cmd/snmp-shield/diagnostics.go`): the
   probes are deliberately non-binding — the tunnel probe is a plain
   client dial (works while the service holds the tunnel), the agent
   probe is a one-shot SNMPv2c GET sysDescr.0 built with `msg.BuildPDU`
@@ -666,7 +666,7 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   `grype <sbom> --fail-on high`. **Symbol vs module granularity**:
   scanning the SBOM matches at module granularity (conservative, may
   report false positives); scanning the binary directly
-  (`grype bin/snmp-proxy`) matches symbols precisely — e.g. after the
+  (`grype bin/snmp-shield`) matches symbols precisely — e.g. after the
   x/crypto v0.58.0 upgrade the SBOM still reports GO-2026-5932
   (module-level "x/crypto/openpgp is unsafe by design", Unknown
   severity, no fix exists — the package is deprecated, not patched)
@@ -697,7 +697,7 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   allow→drop, deny→forward. Non-notification datagrams on trap ports
   pass unchanged. Constructors take a variadic filter (`From(filt...)`),
   keeping existing call sites compiling. Dropped notifications increment
-  `snmp_proxy_notifications_filtered_total`. Validation runs in
+  `snmp_shield_notifications_filtered_total`. Validation runs in
   `Config.Validate` before the gateway branch (which returns early).
 - **SNMP metrics interface** (`internal/snmpmetrics`, `metrics.` config
   section): every role can serve a small read-only SNMPv2c health agent

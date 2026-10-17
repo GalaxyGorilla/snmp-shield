@@ -1,4 +1,4 @@
-// Command snmp-proxy runs one instance of the SNMP securing proxy.
+// Command snmp-shield runs one instance of the SNMP securing proxy.
 // The role is chosen by subcommand: manager or agent. Each subcommand can
 // be configured either by a YAML file (--config) or entirely by flags for
 // plug-and-play deployments without config files.
@@ -11,9 +11,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/proxy"
+	"github.com/GalaxyGorilla/snmp-shield/internal/config"
+	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
+	"github.com/GalaxyGorilla/snmp-shield/internal/proxy"
 	"github.com/spf13/pflag"
 	"go.uber.org/zap"
 )
@@ -31,7 +31,7 @@ func run() int {
 	}
 	switch os.Args[1] {
 	case "version", "--version", "-v":
-		fmt.Printf("snmp-proxy %s\n", version)
+		fmt.Printf("snmp-shield %s\n", version)
 		return 0
 	case "manager", "agent", "gateway":
 		return runRole(os.Args[1], os.Args[2:])
@@ -129,8 +129,8 @@ func register(fs *pflag.FlagSet) cliFlags {
 	// direct-flags mode (no --config): tunnel
 	c.tunnelMode = fs.String("tunnel-mode", "dtls", "secured-segment transport: dtls (UDP) or tls (TCP)")
 	c.tunnelAddr = fs.String("tunnel-addr", "", "tunnel endpoint(s): manager role dials comma-separated addresses (HA failover, most preferred first); agent role listens on ip:port")
-	c.psk = fs.String("psk", "", "pre-shared key for the tunnel (hex; generate with `snmp-proxy genpsk`)")
-	c.pskIdentity = fs.String("psk-identity", "snmp-proxy", "PSK identity string")
+	c.psk = fs.String("psk", "", "pre-shared key for the tunnel (hex; generate with `snmp-shield genpsk`)")
+	c.pskIdentity = fs.String("psk-identity", "snmp-shield", "PSK identity string")
 	c.pskSuites = fs.String("psk-ciphersuites", "", "DTLS PSK ciphersuites, comma-separated, most preferred first (aes128-ccm-8, aes256-ccm-8, aes128-ccm, aes128-gcm, aes128-cbc; default aes128-ccm-8)")
 	c.insecure = fs.Bool("insecure", false, "skip tunnel certificate verification (tls mode only; never in production)")
 
@@ -241,7 +241,7 @@ func runRole(role string, args []string) int {
 	if role != "gateway" {
 		startFields = append(startFields, zap.String("tunnel_mode", cfg.Tunnel.Mode))
 	}
-	log.Info("starting snmp-proxy", startFields...)
+	log.Info("starting snmp-shield", startFields...)
 
 	err = proxy.Run(proxy.Options{
 		Config:      cfg,
@@ -311,18 +311,20 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 	// terminates SNMP security directly from third-party clients;
 	// authenticated requests are relayed as clear v2c to the legacy agent.
 	if r == config.RoleGateway {
-		if o.listen == "" {
-			return nil, fmt.Errorf("--listen is required for the gateway role (SNMP front listener ip:port)")
-		}
-		if o.agent == "" {
-			return nil, fmt.Errorf("--agent is required for the gateway role (legacy agent ip:port)")
-		}
 		switch o.secMode {
 		case "usm-gateway", "tsm-gateway", "usm-manager":
 		case "usm-translate", "passthrough":
 			return nil, fmt.Errorf("--security %s is not valid for the gateway role (use usm-gateway, tsm-gateway or usm-manager)", o.secMode)
 		default:
 			return nil, fmt.Errorf("--security must be usm-gateway, tsm-gateway or usm-manager for the gateway role, got %q", o.secMode)
+		}
+		if o.secMode != "usm-manager" {
+			if o.listen == "" {
+				return nil, fmt.Errorf("--listen is required for the gateway role (SNMP front listener ip:port)")
+			}
+			if o.agent == "" {
+				return nil, fmt.Errorf("--agent is required for the gateway role (legacy agent ip:port)")
+			}
 		}
 		cfg := &config.Config{Role: r}
 		cfg.Gateway = config.GatewayRole{
@@ -393,7 +395,7 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 		return nil, fmt.Errorf("--tunnel-addr is required (tunnel endpoint ip:port)")
 	}
 	if o.psk == "" {
-		return nil, fmt.Errorf("--psk is required (generate one with `snmp-proxy genpsk`)")
+		return nil, fmt.Errorf("--psk is required (generate one with `snmp-shield genpsk`)")
 	}
 	if o.secMode != "usm-translate" && o.secMode != "passthrough" {
 		return nil, fmt.Errorf("--security must be usm-translate or passthrough, got %q", o.secMode)
@@ -473,45 +475,45 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 }
 
 func usage(w *os.File) {
-	fmt.Fprintf(w, `snmp-proxy — SNMP securing proxy
+	fmt.Fprintf(w, `snmp-shield — SNMP securing proxy
 
 Usage (config file):
-  snmp-proxy manager --config <file> [--metrics-addr <addr>]
-  snmp-proxy agent   --config <file> [--metrics-addr <addr>]
-  snmp-proxy gateway --config <file> [--metrics-addr <addr>]
+  snmp-shield manager --config <file> [--metrics-addr <addr>]
+  snmp-shield agent   --config <file> [--metrics-addr <addr>]
+  snmp-shield gateway --config <file> [--metrics-addr <addr>]
 
 Usage (flags, no config file — plug and play):
-  snmp-proxy manager --tunnel-addr <agent-proxy:port> --psk <hex> \
+  snmp-shield manager --tunnel-addr <agent-proxy:port> --psk <hex> \
       --auth-pass <pw> --priv-pass <pw> --listen <ip:port> \
       [--trap-sink <ip:port>] [--trap-listen <ip:port>]
-  snmp-proxy agent --tunnel-addr <ip:port> --psk <hex> \
+  snmp-shield agent --tunnel-addr <ip:port> --psk <hex> \
       --auth-pass <pw> --priv-pass <pw> --agent <real-agent:port> \
       [--community <comm>] [--trap-listen <ip:port>] [--trap-sink <ip:port>]
 
 Usage (gateway, single box — no second proxy, standard clients):
-  snmp-proxy gateway --security usm-gateway --listen <ip:port> \
+  snmp-shield gateway --security usm-gateway --listen <ip:port> \
       --agent <real-agent:port> --auth-pass <pw> --priv-pass <pw> \
       [--community <comm>] [--trap-listen <ip:port>] [--trap-sink <ip:port>]
-  snmp-proxy gateway --security tsm-gateway --listen <ip:port> \
+  snmp-shield gateway --security tsm-gateway --listen <ip:port> \
       --agent <real-agent:port> --ca-file <ca.pem> --cert-file <cert.pem> \
       --key-file <key.pem> [--community <comm>] \
       [--trap-listen <ip:port>] [--trap-sink <ip:port>]
-  snmp-proxy gateway --security usm-manager \
+  snmp-shield gateway --security usm-manager \
       --trap-listen <ip:port> --trap-sink <manager-trap-receiver:port> \
       --auth-pass <pw> --priv-pass <pw>
 
 Other commands:
-  snmp-proxy validate --role <manager|agent|gateway> (same flags as the role)
+  snmp-shield validate --role <manager|agent|gateway> (same flags as the role)
       [--config <file>] [--json]
       check a configuration without running (pre-apply for tooling /
       web UIs); pre-flights certs, keys and the engine store
-  snmp-proxy selftest --role <manager|agent|gateway> (same flags as the role)
+  snmp-shield selftest --role <manager|agent|gateway> (same flags as the role)
       [--config <file>] [--json] [--probe=false]
       validate + probe the environment: cert expiry, engine store,
       tunnel handshake (manager), SNMP GET to the real agent
       (agent/gateway)
-  snmp-proxy genpsk     print a fresh random pre-shared key (hex)
-  snmp-proxy version
+  snmp-shield genpsk     print a fresh random pre-shared key (hex)
+  snmp-shield version
 
 Notification filtering (flags mode): --filter-oid <prefix> (repeatable)
 with --filter-action allow|deny drops notifications whose trap OID does

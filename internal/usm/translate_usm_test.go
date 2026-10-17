@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GalaxyGorilla/snmp-proxy/internal/cache"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
+	"github.com/GalaxyGorilla/snmp-shield/internal/cache"
+	"github.com/GalaxyGorilla/snmp-shield/internal/config"
+	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
+	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
 	"github.com/gosnmp/gosnmp"
 	"go.uber.org/zap"
 )

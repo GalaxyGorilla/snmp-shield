@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
+	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"go.uber.org/zap"
 )

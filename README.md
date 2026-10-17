@@ -1,6 +1,6 @@
-# snmp-proxy
+# snmp-shield
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/GalaxyGorilla/snmp-proxy.svg)](https://pkg.go.dev/github.com/GalaxyGorilla/snmp-proxy)
+[![Go Reference](https://pkg.go.dev/badge/github.com/GalaxyGorilla/snmp-shield.svg)](https://pkg.go.dev/github.com/GalaxyGorilla/snmp-shield)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Tests](https://img.shields.io/badge/tests-go_test_-race-brightgreen.svg)
 
@@ -20,7 +20,7 @@ plain SNMP; the proxy does all the security work.
 ## Why
 
 Legacy devices often can't do SNMPv3 — weak CPUs, ancient firmware, no
-budget for an upgrade. snmp-proxy keeps those devices untouched while
+budget for an upgrade. snmp-shield keeps those devices untouched while
 still getting authentication and encryption where it matters:
 
 - **Zero-touch on end devices** — they keep speaking v1/v2c; the proxy
@@ -28,8 +28,10 @@ still getting authentication and encryption where it matters:
 - **One box is enough** — the gateway modes secure a single leg
   (in front of the agent *or* the manager) with standard SNMPv3 or
   SNMP-over-DTLS on the front.
-- **100% standard SNMP on every wire** — important for firewalls, ALGs,
-  DPI and auditors.
+- **Standard SNMP at deployment boundaries** — gateway front legs use
+  standard SNMPv3 or SNMP-over-DTLS; two-proxy deployments use a
+  snmp-shield framed (D)TLS tunnel on their secured segment. This keeps
+  endpoint-facing traffic friendly to firewalls, ALGs, DPI and auditors.
 - **Deploy by paste** — `genpsk`, two commands, done (see
   [examples/](examples/)).
 
@@ -76,22 +78,22 @@ endpoints.
 Build (plain Go, no dependencies to install beyond the toolchain):
 
 ```bash
-make            # or: go build -o bin/snmp-proxy ./cmd/snmp-proxy
+make            # or: go build -o bin/snmp-shield ./cmd/snmp-shield
 ```
 
 ### Plug and play (no config files)
 
 ```bash
-KEY=$(./bin/snmp-proxy genpsk)   # random 32-byte hex key
+KEY=$(./bin/snmp-shield genpsk)   # random 32-byte hex key
 
 # agent-side box (faces the real agent)
-./bin/snmp-proxy agent --tunnel-addr <agent-box-ip>:19611 --psk $KEY \
-  --auth-pass myauth --priv-pass mypriv \
+./bin/snmp-shield agent --tunnel-addr <agent-box-ip>:19611 --psk $KEY \
+  --auth-pass myauthpass --priv-pass myprivpass \
   --agent 127.0.0.1:161 --community public
 
 # manager-side box (faces the monitoring station)
-./bin/snmp-proxy manager --tunnel-addr <agent-box-ip>:19611 --psk $KEY \
-  --auth-pass myauth --priv-pass mypriv \
+./bin/snmp-shield manager --tunnel-addr <agent-box-ip>:19611 --psk $KEY \
+  --auth-pass myauthpass --priv-pass myprivpass \
   --listen :161 --community public
 ```
 
@@ -104,9 +106,9 @@ Full walkthroughs for every deployment shape: [examples/](examples/).
 ### Single-box gateway
 
 ```bash
-./bin/snmp-proxy gateway --security usm-gateway \
+./bin/snmp-shield gateway --security usm-gateway \
   --listen :161 --agent 127.0.0.1:161 \
-  --auth-pass myauth --priv-pass mypriv
+  --auth-pass myauthpass --priv-pass myprivpass
 ```
 
 Any standard v3 manager now polls the gateway with user `proxy`
@@ -118,9 +120,9 @@ Each instance is one YAML file; the role is chosen by the subcommand.
 Templates for every combination live in [`configs/`](configs/):
 
 ```bash
-./bin/snmp-proxy manager --config configs/manager-usm.yaml
-./bin/snmp-proxy agent   --config configs/agent-usm.yaml
-./bin/snmp-proxy gateway --config configs/gateway-usm.yaml
+./bin/snmp-shield manager --config configs/manager-usm.yaml
+./bin/snmp-shield agent   --config configs/agent-usm.yaml
+./bin/snmp-shield gateway --config configs/gateway-usm.yaml
 ```
 
 ## Tools
@@ -128,15 +130,15 @@ Templates for every combination live in [`configs/`](configs/):
 ```bash
 # validate a config without running (pre-apply hook for tooling/web UIs;
 # --json for machine-readable output):
-snmp-proxy validate --role gateway --config /etc/snmp-proxy/gateway.yaml
+snmp-shield validate --role gateway --config /etc/snmp-shield/gateway.yaml
 
 # validate + probe the environment (cert expiry, engine store, tunnel
 # handshake, SNMP GET to the real agent; --probe=false skips network):
-snmp-proxy selftest --role gateway --config /etc/snmp-proxy/gateway.yaml
+snmp-shield selftest --role gateway --config /etc/snmp-shield/gateway.yaml
 
 # other commands:
-snmp-proxy genpsk     # fresh random pre-shared key
-snmp-proxy version
+snmp-shield genpsk     # fresh random pre-shared key
+snmp-shield version
 ```
 
 Both `validate` and `selftest` accept the same flags as the role
@@ -154,7 +156,7 @@ with `validate --json`, and offer a "test connection" button backed by
   boots store).
 - **Engine state** — `security.engine_store` must be on persistent
   storage: engineBoots must never decrease (anti-rollback). systemd's
-  `StateDirectory=snmp-proxy` covers this.
+  `StateDirectory=snmp-shield` covers this.
 - **Supply chain** — `make sbom` produces SPDX + CycloneDX SBOMs of the
   release binary into `dist/`; `make vulnscan` matches them against
   NVD/GHSA/OSV and fails on HIGH-severity findings. Useful for release
@@ -189,7 +191,7 @@ with `validate --json`, and offer a "test connection" button backed by
 ## Building and testing
 
 ```bash
-make build     # bin/snmp-proxy
+make build     # bin/snmp-shield
 make test      # go test ./... -race -timeout 180s
 make vet       # go vet ./...
 make release   # stripped static binary for deployment

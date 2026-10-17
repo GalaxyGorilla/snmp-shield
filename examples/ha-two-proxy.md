@@ -16,9 +16,9 @@ their engine clocks after a failover.
 Manager side — `--tunnel-addr` accepts a comma-separated list:
 
 ```bash
-snmp-proxy manager \
+snmp-shield manager \
   --tunnel-addr <agent-a-ip>:19611,<agent-b-ip>:19611 \
-  --psk <KEY> --auth-pass myauth --priv-pass mypriv \
+  --psk <KEY> --auth-pass myauthpass --priv-pass myprivpass \
   --listen :161
 ```
 
@@ -47,17 +47,17 @@ Both agent-side replicas must use the SAME `security.engine_id` so
 managers see one engine across the failover:
 
 ```yaml
-# /etc/snmp-proxy/agent.yaml (both replicas)
+# /etc/snmp-shield/agent.yaml (both replicas)
 security:
   mode: usm-translate
   engine_id: "hex:8000f2a4..."
-  engine_store: /var/lib/snmp-proxy/engine.json   # local per replica
+  engine_store: /var/lib/snmp-shield/engine.json   # local per replica
 ```
 
 Generate the engine ID once:
 
 ```bash
-snmp-proxy genpsk   # or any hex string; engine IDs are opaque bytes
+snmp-shield genpsk   # or any hex string; engine IDs are opaque bytes
 ```
 
 Engine-state convergence is automatic: after a failover, a verified
@@ -69,13 +69,13 @@ cache follows the wire. Managers do not need to re-discover.
 
 ```bash
 # from the manager box: both endpoints must handshake
-snmp-proxy selftest --role manager \
+snmp-shield selftest --role manager \
   --tunnel-addr <agent-a-ip>:19611 --psk <KEY> \
-  --auth-pass myauth --priv-pass mypriv --listen :161
+  --auth-pass myauthpass --priv-pass myprivpass --listen :161
 
-snmp-proxy selftest --role manager \
+snmp-shield selftest --role manager \
   --tunnel-addr <agent-b-ip>:19611 --psk <KEY> \
-  --auth-pass myauth --priv-pass mypriv --listen :161
+  --auth-pass myauthpass --priv-pass myprivpass --listen :161
 ```
 
 Kill proxy A and watch the manager-side log: the tunnel drops, the
@@ -88,8 +88,8 @@ dialer walks to B, and polling resumes without manager reconfiguration.
   entry):
 
   ```bash
-  snmp-proxy manager --psk-ciphersuites aes256-ccm-8 ...
-  snmp-proxy agent   --psk-ciphersuites aes256-ccm-8 ...
+  snmp-shield manager --psk-ciphersuites aes256-ccm-8 ...
+  snmp-shield agent   --psk-ciphersuites aes256-ccm-8 ...
   ```
 
   Comma-separated, most preferred first (see `--help`). In YAML:
@@ -99,7 +99,7 @@ dialer walks to B, and polling resumes without manager reconfiguration.
   `--trap-listen` before they enter the secured segment:
 
   ```bash
-  snmp-proxy manager --trap-listen :10162 \
+  snmp-shield manager --trap-listen :10162 \
     --filter-oid 1.3.6.1.4.1.99 --filter-action deny ...
   ```
 

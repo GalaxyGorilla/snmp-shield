@@ -107,6 +107,24 @@ func TestValidateErrors(t *testing.T) {
 	if err := goodA.Validate(); err != nil {
 		t.Errorf("agent validate: %v", err)
 	}
+	goodUSMManager := &Config{
+		Role: RoleGateway,
+		Gateway: GatewayRole{
+			TrapListenAddr: ":162",
+			TrapSinkAddr:   "127.0.0.1:10162",
+		},
+		Security: Security{
+			Mode: "usm-manager",
+			Users: []UserCfg{{
+				Name:         "proxy",
+				AuthProtocol: "sha",
+				PrivProtocol: "aes",
+			}},
+		},
+	}
+	if err := goodUSMManager.Validate(); err != nil {
+		t.Errorf("usm-manager without request leg: %v", err)
+	}
 	noAgentAddr := &Config{Role: RoleAgent, Tunnel: Tunnel{Mode: "dtls", ListenAddr: ":10162", PSK: "text:s"}}
 	if err := noAgentAddr.Validate(); err == nil {
 		t.Error("agent without agent_addr accepted")

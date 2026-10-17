@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
+	"github.com/GalaxyGorilla/snmp-shield/internal/config"
 )
 
 func TestFlagsConfigManager(t *testing.T) {
@@ -155,6 +155,25 @@ func TestFlagsConfigGatewayUSM(t *testing.T) {
 	}
 }
 
+func TestFlagsConfigGatewayUSMManager(t *testing.T) {
+	cfg, err := flagsConfig(config.RoleGateway, flagsOpts{
+		secMode:    "usm-manager",
+		authPass:   "authpass",
+		privPass:   "privpass",
+		trapListen: ":162",
+		trapSink:   "127.0.0.1:10162",
+	})
+	if err != nil {
+		t.Fatalf("gateway usm-manager flagsConfig: %v", err)
+	}
+	if cfg.Gateway.ListenAddr != "" || cfg.Gateway.AgentAddr != "" {
+		t.Fatalf("usm-manager unexpectedly configured request leg: %+v", cfg.Gateway)
+	}
+	if cfg.Gateway.TrapListenAddr != ":162" || cfg.Gateway.TrapSinkAddr != "127.0.0.1:10162" {
+		t.Fatalf("gateway trap legs = %+v", cfg.Gateway)
+	}
+}
+
 func TestFlagsConfigGatewayTSM(t *testing.T) {
 	cfg, err := flagsConfig(config.RoleGateway, flagsOpts{
 		secMode:  "tsm-gateway",
@@ -288,27 +307,27 @@ func swapArgs(t *testing.T, args []string, f func() int) int {
 
 func TestRunOsArgs(t *testing.T) {
 	// version variants return 0
-	for _, args := range [][]string{{"snmp-proxy", "version"}, {"snmp-proxy", "--version"}, {"snmp-proxy", "-v"}} {
+	for _, args := range [][]string{{"snmp-shield", "version"}, {"snmp-shield", "--version"}, {"snmp-shield", "-v"}} {
 		if rc := swapArgs(t, args, run); rc != 0 {
 			t.Fatalf("run(%v) = %d, want 0", args, rc)
 		}
 	}
 	// help variants return 0
-	for _, args := range [][]string{{"snmp-proxy", "help"}, {"snmp-proxy", "--help"}, {"snmp-proxy", "-h"}} {
+	for _, args := range [][]string{{"snmp-shield", "help"}, {"snmp-shield", "--help"}, {"snmp-shield", "-h"}} {
 		if rc := swapArgs(t, args, run); rc != 0 {
 			t.Fatalf("run(%v) = %d, want 0", args, rc)
 		}
 	}
 	// genpsk returns 0 and prints 64 hex chars
-	if rc := swapArgs(t, []string{"snmp-proxy", "genpsk"}, run); rc != 0 {
+	if rc := swapArgs(t, []string{"snmp-shield", "genpsk"}, run); rc != 0 {
 		t.Fatalf("run(genpsk) = %d, want 0", rc)
 	}
 	// unknown command returns 2
-	if rc := swapArgs(t, []string{"snmp-proxy", "bogus"}, run); rc != 2 {
+	if rc := swapArgs(t, []string{"snmp-shield", "bogus"}, run); rc != 2 {
 		t.Fatalf("run(bogus) = %d, want 2", rc)
 	}
 	// no args returns 2
-	if rc := swapArgs(t, []string{"snmp-proxy"}, run); rc != 2 {
+	if rc := swapArgs(t, []string{"snmp-shield"}, run); rc != 2 {
 		t.Fatalf("run(no args) = %d, want 2", rc)
 	}
 }
@@ -326,7 +345,7 @@ func TestUsage(t *testing.T) {
 	buf := make([]byte, 4096)
 	n, _ := r.Read(buf)
 	_ = r.Close()
-	if !strings.Contains(string(buf[:n]), "snmp-proxy") {
+	if !strings.Contains(string(buf[:n]), "snmp-shield") {
 		t.Fatalf("usage output missing program name: %q", string(buf[:n]))
 	}
 }

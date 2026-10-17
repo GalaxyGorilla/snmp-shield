@@ -4,8 +4,8 @@ role: agent
 tunnel:
   mode: dtls
   listen_addr: ":10162"
-  psk_identity: "snmp-proxy-agent"
-  # Must match the manager side.
+  psk_identity: "snmp-shield-agent"
+  # The PSK must match the manager side; this identity label may differ.
   psk: "text:change-me-shared-secret"
   # Optional DTLS 1.2 PSK ciphersuites, most preferred first; both sides
   # must share at least one. Supported: aes128-ccm-8 (default),

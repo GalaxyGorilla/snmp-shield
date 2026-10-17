@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Generate a throwaway PKI for TLS/DTLS tunnel testing:
 #   certs/ca.{crt,key}, certs/{server,client}.{crt,key}
-# Server SANs: snmp-proxy-agent, localhost, 127.0.0.1
-# Client SANs: snmp-proxy-manager
+# Server SANs: snmp-shield-agent, localhost, 127.0.0.1
+# Client SANs: snmp-shield-manager
 #
 # Output lands in certs/ (gitignored). For testing only.
 set -euo pipefail
@@ -11,9 +11,9 @@ cd "$(dirname "$0")/.."
 mkdir -p certs
 
 DAYS=825
-CA_CN="snmp-proxy test CA"
-SRV_CN="snmp-proxy-agent"
-CLI_CN="snmp-proxy-manager"
+CA_CN="snmp-shield test CA"
+SRV_CN="snmp-shield-agent"
+CLI_CN="snmp-shield-manager"
 
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
   -keyout certs/ca.key -out certs/ca.crt -days "$DAYS" -nodes \
@@ -32,13 +32,13 @@ openssl req -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
 openssl x509 -req -in certs/server.csr -CA certs/ca.crt -CAkey certs/ca.key \
   -CAcreateserial -out certs/server.crt -days "$DAYS" \
   -extfile <(printf '%s\n' \
-    "subjectAltName=DNS:snmp-proxy-agent,DNS:localhost,IP:127.0.0.1" \
+    "subjectAltName=DNS:snmp-shield-agent,DNS:localhost,IP:127.0.0.1" \
     "extendedKeyUsage=serverAuth")
 
 openssl x509 -req -in certs/client.csr -CA certs/ca.crt -CAkey certs/ca.key \
   -CAcreateserial -out certs/client.crt -days "$DAYS" \
   -extfile <(printf '%s\n' \
-    "subjectAltName=DNS:snmp-proxy-manager" \
+    "subjectAltName=DNS:snmp-shield-manager" \
     "extendedKeyUsage=clientAuth")
 
 rm -f certs/server.csr certs/client.csr

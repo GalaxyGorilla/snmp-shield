@@ -16,11 +16,11 @@ management VLANs).
 ## 1. Run it
 
 ```bash
-snmp-proxy gateway \
+snmp-shield gateway \
   --security usm-manager \
   --trap-listen :162 \
   --trap-sink <manager-ip>:162 \
-  --auth-pass myauth --priv-pass mypriv
+  --auth-pass myauthpass --priv-pass myprivpass
 ```
 
 - `--trap-listen` — what the devices fire at (the proxy's clear leg).
@@ -41,9 +41,9 @@ the proxy to the device.
 
 ```bash
 # device-reachability check from the proxy box:
-snmp-proxy selftest --role gateway --security usm-manager \
+snmp-shield selftest --role gateway --security usm-manager \
   --trap-listen :162 --trap-sink <manager-ip>:162 \
-  --auth-pass myauth --priv-pass mypriv --agent 127.0.0.1:161 --probe=false
+  --auth-pass myauthpass --priv-pass myprivpass --probe=false
 ```
 
 (USM-manager has no request path — it secures notifications only. The
@@ -56,7 +56,7 @@ selftest validates config + engine store.)
   that matter are wrapped into authenticated v3 toward the manager:
 
   ```bash
-  snmp-proxy gateway --trap-listen :162 \
+  snmp-shield gateway --trap-listen :162 \
     --filter-oid 1.3.6.1.4.1.99 --filter-action deny ...
   ```
 

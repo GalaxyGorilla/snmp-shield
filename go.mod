@@ -1,4 +1,4 @@
-module github.com/GalaxyGorilla/snmp-proxy
+module github.com/GalaxyGorilla/snmp-shield
 
 go 1.26.0
 
@@ -6,6 +6,7 @@ require (
 	github.com/gosnmp/gosnmp v1.45.0
 	github.com/pion/dtls/v3 v3.1.4
 	github.com/prometheus/client_golang v1.23.2
+	github.com/prometheus/client_model v0.6.2
 	github.com/spf13/pflag v1.0.10
 	go.uber.org/zap v1.27.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -18,7 +19,6 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/pion/logging v0.2.4 // indirect
 	github.com/pion/transport/v4 v4.0.1 // indirect
-	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
 	go.uber.org/multierr v1.10.0 // indirect

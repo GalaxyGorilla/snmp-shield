@@ -1,6 +1,6 @@
 # Binaries
 /bin/
-/snmp-proxy
+/snmp-shield
 *.exe
 
 # SBOM output

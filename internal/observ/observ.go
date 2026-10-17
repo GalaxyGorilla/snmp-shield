@@ -51,23 +51,23 @@ type Metrics struct {
 // NewMetrics registers a fresh metric set on a new registry.
 func NewMetrics() *Metrics {
 	m := &Metrics{reg: prometheus.NewRegistry()}
-	m.FramesSent = mustCounter(m.reg, "snmp_proxy_tunnel_frames_sent_total", "Tunnel frames sent.")
-	m.FramesRecv = mustCounter(m.reg, "snmp_proxy_tunnel_frames_received_total", "Tunnel frames received.")
-	m.BytesSent = mustCounter(m.reg, "snmp_proxy_tunnel_bytes_sent_total", "Tunnel payload bytes sent.")
-	m.BytesRecv = mustCounter(m.reg, "snmp_proxy_tunnel_bytes_received_total", "Tunnel payload bytes received.")
-	m.ReqForwarded = mustCounter(m.reg, "snmp_proxy_requests_forwarded_total", "SNMP requests forwarded end to end.")
-	m.ReqErrors = mustCounter(m.reg, "snmp_proxy_request_errors_total", "SNMP request forwarding errors.")
-	m.NotifsRelayed = mustCounter(m.reg, "snmp_proxy_notifications_relayed_total", "Traps/informs relayed.")
-	m.NotifsFiltered = mustCounter(m.reg, "snmp_proxy_notifications_filtered_total", "Notifications dropped by the configured filter.")
-	m.DropTotal = mustCounter(m.reg, "snmp_proxy_drops_total", "Datagrams or frames dropped.")
-	m.Reconnects = mustCounter(m.reg, "snmp_proxy_tunnel_reconnects_total", "Tunnel reconnections.")
+	m.FramesSent = mustCounter(m.reg, "snmp_shield_tunnel_frames_sent_total", "Tunnel frames sent.")
+	m.FramesRecv = mustCounter(m.reg, "snmp_shield_tunnel_frames_received_total", "Tunnel frames received.")
+	m.BytesSent = mustCounter(m.reg, "snmp_shield_tunnel_bytes_sent_total", "Tunnel payload bytes sent.")
+	m.BytesRecv = mustCounter(m.reg, "snmp_shield_tunnel_bytes_received_total", "Tunnel payload bytes received.")
+	m.ReqForwarded = mustCounter(m.reg, "snmp_shield_requests_forwarded_total", "SNMP requests forwarded end to end.")
+	m.ReqErrors = mustCounter(m.reg, "snmp_shield_request_errors_total", "SNMP request forwarding errors.")
+	m.NotifsRelayed = mustCounter(m.reg, "snmp_shield_notifications_relayed_total", "Traps/informs relayed.")
+	m.NotifsFiltered = mustCounter(m.reg, "snmp_shield_notifications_filtered_total", "Notifications dropped by the configured filter.")
+	m.DropTotal = mustCounter(m.reg, "snmp_shield_drops_total", "Datagrams or frames dropped.")
+	m.Reconnects = mustCounter(m.reg, "snmp_shield_tunnel_reconnects_total", "Tunnel reconnections.")
 	m.TunnelUp = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "snmp_proxy_tunnel_up",
+		Name: "snmp_shield_tunnel_up",
 		Help: "1 when the tunnel session is established.",
 	})
 	m.reg.MustRegister(m.TunnelUp)
 	m.ForwardLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
-		Name:    "snmp_proxy_forward_latency_seconds",
+		Name:    "snmp_shield_forward_latency_seconds",
 		Help:    "End-to-end request forwarding latency.",
 		Buckets: prometheus.ExponentialBuckets(0.0005, 2, 16),
 	})

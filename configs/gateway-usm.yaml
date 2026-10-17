@@ -9,7 +9,7 @@
 # clear v1/v2c to the legacy agent; clear v1/v2c arriving on the front
 # leg is rejected — unauthenticated traffic never reaches the legacy
 # device. 100% standard SNMP on every wire.
-role: gateway          # passed via subcommand: snmp-proxy gateway --config ...
+role: gateway          # passed via subcommand: snmp-shield gateway --config ...
 
 gateway:
   listen_addr: ":16161"        # SNMPv3 USM listener (managers connect here)
@@ -34,7 +34,7 @@ gateway:
 
 security:
   mode: usm-gateway
-  engine_store: /var/lib/snmp-proxy/gateway-engine.json  # REQUIRED: boots must never decrease
+  engine_store: /var/lib/snmp-shield/gateway-engine.json  # REQUIRED: boots must never decrease
   # engine_id: "hex:8000b98380736e6d702d70726f7879"       # optional, fixed engine ID
   users:
     - name: nms

@@ -1,4 +1,4 @@
-// Package config loads per-instance configuration for the snmp-proxy
+// Package config loads per-instance configuration for the snmp-shield
 // binary. One YAML file describes one proxy instance; the role is chosen
 // by the subcommand (manager or agent) and validated accordingly.
 package config
@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/notifyfilter"
-	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
+	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
+	"github.com/GalaxyGorilla/snmp-shield/internal/notifyfilter"
+	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
 	"gopkg.in/yaml.v3"
 )
 
@@ -295,20 +295,19 @@ func (c *Config) Validate() error {
 		}
 		c.Metrics.BaseOID = "." + dotted
 	}
-	// Gateway role: single-box gateway — no tunnel. The front leg
-	// terminates SNMP security directly from third-party clients:
-	// usm-gateway (plain-UDP SNMPv3 USM) or tsm-gateway (raw SNMP-over-
-	// DTLS per RFC 6353); authenticated requests are relayed as clear
-	// v1/v2c to the legacy agent.
+	// Gateway role: single-box gateway — no tunnel. usm-gateway and
+	// tsm-gateway terminate manager requests and relay them as clear
+	// v1/v2c to a legacy agent. usm-manager instead relays device
+	// notifications to a manager and has no request/agent leg.
 	if c.Role == RoleGateway {
-		if c.Gateway.ListenAddr == "" {
-			return fmt.Errorf("gateway.listen_addr is required")
-		}
-		if c.Gateway.AgentAddr == "" {
-			return fmt.Errorf("gateway.agent_addr is required")
-		}
 		switch c.Security.Mode {
 		case "usm-gateway":
+			if c.Gateway.ListenAddr == "" {
+				return fmt.Errorf("gateway.listen_addr is required")
+			}
+			if c.Gateway.AgentAddr == "" {
+				return fmt.Errorf("gateway.agent_addr is required")
+			}
 			if len(c.Security.Users) == 0 {
 				return fmt.Errorf("security.users: usm-gateway needs at least one user")
 			}
@@ -343,6 +342,12 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("security.mode usm-manager requires gateway.trap_sink_addr (manager's v3 trap receiver)")
 			}
 		case "tsm-gateway":
+			if c.Gateway.ListenAddr == "" {
+				return fmt.Errorf("gateway.listen_addr is required")
+			}
+			if c.Gateway.AgentAddr == "" {
+				return fmt.Errorf("gateway.agent_addr is required")
+			}
 			// The raw DTLS front leg is certificate-based: the gateway
 			// presents a cert and verifies client certificates against
 			// the CA.

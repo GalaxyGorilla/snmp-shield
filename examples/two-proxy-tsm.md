@@ -25,13 +25,13 @@ In production use your appliance PKI.
 ## 2. Agent-side box
 
 ```bash
-snmp-proxy agent \
+snmp-shield agent \
   --tunnel-addr <agent-box-ip>:19611 \
   --tunnel-mode dtls \
   --security passthrough \
-  --ca-file /etc/snmp-proxy/ca.crt \
-  --cert-file /etc/snmp-proxy/agent.crt \
-  --key-file /etc/snmp-proxy/agent.key \
+  --ca-file /etc/snmp-shield/ca.crt \
+  --cert-file /etc/snmp-shield/agent.crt \
+  --key-file /etc/snmp-shield/agent.key \
   --agent 127.0.0.1:161 \
   --community public
 ```
@@ -44,23 +44,23 @@ TSM end-to-end via the YAML config (`configs/agent-tsm.yaml`).
 ## 3. Manager-side box
 
 ```bash
-snmp-proxy manager \
+snmp-shield manager \
   --tunnel-addr <agent-box-ip>:19611 \
   --tunnel-mode dtls \
   --security passthrough \
-  --ca-file /etc/snmp-proxy/ca.crt \
-  --cert-file /etc/snmp-proxy/manager.crt \
-  --key-file /etc/snmp-proxy/manager.key \
+  --ca-file /etc/snmp-shield/ca.crt \
+  --cert-file /etc/snmp-shield/manager.crt \
+  --key-file /etc/snmp-shield/manager.key \
   --listen :161
 ```
 
 ## 4. Verify
 
 ```bash
-snmp-proxy selftest --role manager --tunnel-addr <agent-box-ip>:19611 \
+snmp-shield selftest --role manager --tunnel-addr <agent-box-ip>:19611 \
   --tunnel-mode dtls --security passthrough \
-  --ca-file /etc/snmp-proxy/ca.crt --cert-file /etc/snmp-proxy/manager.crt \
-  --key-file /etc/snmp-proxy/manager.key --listen :161
+  --ca-file /etc/snmp-shield/ca.crt --cert-file /etc/snmp-shield/manager.crt \
+  --key-file /etc/snmp-shield/manager.key --listen :161
 ```
 
 A failed handshake (untrusted cert, wrong CA) shows up immediately:
@@ -82,7 +82,7 @@ securityName, the agent side checks `security.tsm_identities`.
   secured segment:
 
   ```bash
-  snmp-proxy manager --trap-listen :10162 \
+  snmp-shield manager --trap-listen :10162 \
     --filter-oid 1.3.6.1.4.1.99 --filter-action deny ...
   ```
 

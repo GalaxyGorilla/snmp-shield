@@ -6,8 +6,8 @@ role: agent
 tunnel:
   mode: dtls
   listen_addr: ":10162"
-  psk_identity: "snmp-proxy-agent"
-  # Must match the manager side.
+  psk_identity: "snmp-shield-agent"
+  # The PSK must match the manager side; this identity label may differ.
   psk: "text:change-me-shared-secret"
   keepalive_secs: 15
   max_frame_size: 8192
@@ -28,7 +28,7 @@ security:
   # engine_id: "hex:8000...0001"
   # Persistent engine boots/state (anti-rollback; REQUIRED for correctness
   # across restarts — boots must never decrease).
-  engine_store: "/var/lib/snmp-proxy/engine-agent.json"
+  engine_store: "/var/lib/snmp-shield/engine-agent.json"
   # Community used in v2c notifications delivered to the trap sink.
   trap_community: "public"
 

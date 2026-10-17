@@ -8,7 +8,7 @@ are confirmed end-to-end: the manager's acknowledgment flows back through
 the proxy to the device.
 
 ```
-[legacy devices] --clear v2c/v1 traps/informs--> [proxy] --SNMPv3 USM authPriv--> [manager's trap receiver]
+[manager's trap receiver] <--SNMPv3 USM authPriv-- [proxy] <--clear v2c/v1 traps/informs-- [legacy devices]
 ```
 
 Use when the devices are too old for v3 but the manager side must only

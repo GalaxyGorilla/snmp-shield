@@ -282,6 +282,28 @@ func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
 			return err
 		}
 		return gw.Run(ctx.Done())
+	case "usm-manager":
+		store, err := cache.Open(opts.Config.Security.EngineStore)
+		if err != nil {
+			return err
+		}
+		engineID, err := parseEngineID(opts.Config.Security.EngineID)
+		if err != nil {
+			return err
+		}
+		clock, err := cache.NewEngineClock(store, engineID, zapLogger{opts.Log})
+		if err != nil {
+			return err
+		}
+		users := usm.ProfilesFromSecurity(opts.Config.Security)
+		if len(users) == 0 {
+			return fmt.Errorf("security.users: usm-manager needs at least one user")
+		}
+		mg, err := usm.NewManagerGateway(opts.Config.Gateway, users, clock, opts.Log, met, filt)
+		if err != nil {
+			return err
+		}
+		return mg.Run(ctx.Done())
 	default:
 		store, err := cache.Open(opts.Config.Security.EngineStore)
 		if err != nil {

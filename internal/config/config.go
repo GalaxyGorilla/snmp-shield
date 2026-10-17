@@ -271,6 +271,28 @@ func (c *Config) Validate() error {
 					return fmt.Errorf("security.users: user %s needs auth_protocol and priv_protocol", u.Name)
 				}
 			}
+		case "usm-manager":
+			// The manager-securing gateway wraps clear device
+			// notifications into authenticated v3 toward the manager's
+			// trap receiver: it needs users (its own authoritative
+			// engine) and both trap legs.
+			if len(c.Security.Users) == 0 {
+				return fmt.Errorf("security.users: usm-manager needs at least one user")
+			}
+			for _, u := range c.Security.Users {
+				if u.Name == "" {
+					return fmt.Errorf("security.users: user name is required")
+				}
+				if u.AuthProtocol == "" || u.PrivProtocol == "" {
+					return fmt.Errorf("security.users: user %s needs auth_protocol and priv_protocol", u.Name)
+				}
+			}
+			if c.Gateway.TrapListenAddr == "" {
+				return fmt.Errorf("security.mode usm-manager requires gateway.trap_listen_addr (clear notifications from devices)")
+			}
+			if c.Gateway.TrapSinkAddr == "" {
+				return fmt.Errorf("security.mode usm-manager requires gateway.trap_sink_addr (manager's v3 trap receiver)")
+			}
 		case "tsm-gateway":
 			// The raw DTLS front leg is certificate-based: the gateway
 			// presents a cert and verifies client certificates against
@@ -282,7 +304,7 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("security.mode tsm-gateway requires tunnel.ca_file to verify client certificates")
 			}
 		default:
-			return fmt.Errorf("gateway role requires security.mode usm-gateway or tsm-gateway, got %q", c.Security.Mode)
+			return fmt.Errorf("gateway role requires security.mode usm-gateway, tsm-gateway or usm-manager, got %q", c.Security.Mode)
 		}
 		return nil
 	}
@@ -322,11 +344,11 @@ func (c *Config) Validate() error {
 		}
 	}
 	switch c.Security.Mode {
-	case "passthrough", "usm-translate", "tsm", "usm-gateway", "tsm-gateway":
+	case "passthrough", "usm-translate", "tsm", "usm-gateway", "tsm-gateway", "usm-manager":
 	default:
-		return fmt.Errorf("security.mode must be passthrough, usm-translate, tsm, usm-gateway or tsm-gateway, got %q", c.Security.Mode)
+		return fmt.Errorf("security.mode must be passthrough, usm-translate, tsm, usm-gateway, tsm-gateway or usm-manager, got %q", c.Security.Mode)
 	}
-	if c.Security.Mode == "usm-gateway" || c.Security.Mode == "tsm-gateway" {
+	if c.Security.Mode == "usm-gateway" || c.Security.Mode == "tsm-gateway" || c.Security.Mode == "usm-manager" {
 		return fmt.Errorf("security.mode %s is only valid with the gateway role", c.Security.Mode)
 	}
 	if c.Security.Mode == "usm-translate" {

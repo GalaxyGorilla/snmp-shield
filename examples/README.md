@@ -19,7 +19,8 @@ Which one do I want?
 - Devices can't do SNMPv3, and you control both ends → **two-proxy-usm**.
 - Same, but you prefer certificates over PSKs → **two-proxy-tsm**.
 - You can only put a box next to the **agent** (managers are off-limits,
-  or you want one box per site) → **gateway-usm**.
+  or you want one box per site) → **gateway-usm** (or **gateway-tsm**
+  for net-snmp-based certificate clients).
 - You can only put a box next to the **manager** → **manager-gateway**
   (legacy manager keeps talking v2c, requests re-issued as authenticated
   v3 toward a real v3-capable agent) or **usm-manager** (usm-gateway

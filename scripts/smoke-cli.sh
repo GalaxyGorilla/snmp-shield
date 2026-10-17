@@ -1,7 +1,7 @@
 #!/bin/sh
 # scripts/smoke-cli.sh — plug-and-play smoke test: two snmp-proxy instances
-# configured entirely by flags (no YAML), fake Go SNMP agent, gosnmp client
-# GET through the PSK-DTLS tunnel. Requires the repo built (go build).
+# configured entirely by flags (no YAML), fake Python SNMP agent, gosnmp
+# client GET through the PSK-DTLS tunnel. Exit 0 = green.
 set -e
 cd "$(dirname "$0")/.."
 
@@ -12,7 +12,6 @@ BIN=./bin/snmp-proxy
 go build -o "$BIN" ./cmd/snmp-proxy
 
 PSK=$("$BIN" genpsk)
-AUTH=authpass CLI=privpass
 AUTH=authpass
 PRIV=privpass
 
@@ -40,7 +39,7 @@ echo "== psk: $PSK"
   --agent "127.0.0.1:$AGENT_PORT" --community realcomm \
   --metrics-addr "127.0.0.1:$MET2" --log-level debug &
 AGENT_PID=$!
-trap 'kill $AGENT_PID $MGR_PID $FAKE_PID 2>/dev/null || true' EXIT
+trap 'kill $AGENT_PID $MGR_PID $FAKE_PID 2>/dev/null || true' EXIT INT TERM
 sleep 0.5
 
 "$BIN" manager --tunnel-addr "127.0.0.1:$TUNNEL_PORT" --psk "$PSK" \
@@ -51,16 +50,14 @@ MGR_PID=$!
 sleep 0.5
 
 # fake SNMP agent (v2c, community realcomm) answering sysDescr.0
-FAKE_PID=$(
 python3 - "$AGENT_PORT" <<'EOF' &
-import socket, sys, threading
+import socket, sys
 port=int(sys.argv[1])
 s=socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(("127.0.0.1",port))
 # v2c GET response builder: echo reqID, answer first varbind with a string
 def build_resp(req):
-    # minimal parse: version int, community, PDU tag/len, reqID int
-    # request: 30 len 02 01 01 04 len comm A0 len 02 len reqid ...
+    # minimal parse: version TLV, community, PDU tag/len, reqID int
     def ber_len(b,i):
         n=b[i]
         if n<0x80: return n,i+1
@@ -70,13 +67,12 @@ def build_resp(req):
     l,i=ber_len(req,i)          # outer content len
     i+=3                        # skip version TLV 02 01 01
     i+=1                        # skip community TAG 0x04; ber_len starts at length
-    cl,i=ber_len(req,i)          # community len
+    cl,i=ber_len(req,i)         # community len
     comm=req[i:i+cl]; i+=cl
     ptag=req[i]; i+=1
     pl,i=ber_len(req,i)
     body=req[i:i+pl]
-    # reqID = first integer in body
-    assert body[0]==0x02
+    assert body[0]==0x02, "no reqid"
     rl=body[1]
     reqid=body[2:2+rl]
     # response PDU: A2, same reqID, err 0 0, varbind with sysDescr
@@ -95,14 +91,16 @@ while True:
     except Exception as e:
         print("fake agent error:",e,file=sys.stderr)
 EOF
-echo $!
-)
+FAKE_PID=$!
 
 sleep 0.5
 
-# gosnmp client GET through the whole chain
-go run ./scripts/smoke-client "$MGR_PORT"
-
-RC=$?
-echo "== smoke client rc=$RC"
-exit $RC
+# gosnmp client GET through the whole chain (bounded: the client has its
+# own 5s timeout and 2 retries, so this cannot hang forever)
+if go run ./scripts/smoke-client "$MGR_PORT"; then
+  echo "== smoke: PASS"
+  exit 0
+else
+  echo "== smoke: FAIL" >&2
+  exit 1
+fi

@@ -2,7 +2,6 @@
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/GalaxyGorilla/snmp-shield.svg)](https://pkg.go.dev/github.com/GalaxyGorilla/snmp-shield)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
-![Tests](https://img.shields.io/badge/tests-go_test_-race-brightgreen.svg)
 
 A **SNMP securing proxy** for legacy networks. One static binary; three
 shapes of deployment: two proxies around a secured line, or a single

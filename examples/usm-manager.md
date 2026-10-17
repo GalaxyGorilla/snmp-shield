@@ -49,6 +49,21 @@ snmp-proxy selftest --role gateway --security usm-manager \
 (USM-manager has no request path — it secures notifications only. The
 selftest validates config + engine store.)
 
+## Hardening option
+
+- **Notification filtering** — the natural place for it: drop the
+  uninteresting device traps at the clear ingress, so only the ones
+  that matter are wrapped into authenticated v3 toward the manager:
+
+  ```bash
+  snmp-proxy gateway --trap-listen :162 \
+    --filter-oid 1.3.6.1.4.1.99 --filter-action deny ...
+  ```
+
+  `--filter-oid` is an OID prefix (repeatable, arc-boundary match),
+  `--filter-action` is `allow` or `deny`. In YAML:
+  `notifications.filter` (see `configs/gateway-usm-manager.yaml`).
+
 ## Config file
 
 `configs/gateway-usm-manager.yaml` — engine store placement and user

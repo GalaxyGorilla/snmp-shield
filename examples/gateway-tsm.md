@@ -67,3 +67,21 @@ snmp-proxy selftest --role gateway --security tsm-gateway \
 
 The selftest also warns when the front certificate expires within 30
 days.
+
+## Hardening option
+
+- **Notification filtering** — drop the uninteresting device traps at
+  the clear ingress (`--trap-listen`) before they are wrapped into
+  TSM notifications toward the manager:
+
+  ```bash
+  snmp-proxy gateway --trap-listen :10162 \
+    --filter-oid 1.3.6.1.4.1.99 --filter-action deny ...
+  ```
+
+  `--filter-oid` is an OID prefix (repeatable, arc-boundary match),
+  `--filter-action` is `allow` or `deny`. In YAML:
+  `notifications.filter`.
+
+- **PSK ciphersuite** — not applicable here (the front leg is
+  certificate-based DTLS, no PSK suites involved).

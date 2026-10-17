@@ -88,3 +88,21 @@ snmp-proxy selftest --role gateway --security usm-gateway \
   rejection is the protection.
 - Wrong user / wrong credentials: rejected with RFC 3414 Reports.
 - Replay / stale engine boots: rejected (persisted engine state).
+
+## Hardening options
+
+- **Notification filtering** — the legacy network fires all kinds of
+  traps; drop the uninteresting ones before they reach the manager:
+
+  ```bash
+  snmp-proxy gateway --trap-listen :162 \
+    --filter-oid 1.3.6.1.4.1.99 --filter-action deny ...
+  ```
+
+  `--filter-oid` is an OID prefix (repeatable, arc-boundary match),
+  `--filter-action` is `allow` or `deny`. In YAML:
+  `notifications.filter` (see `configs/gateway-usm.yaml`).
+
+- **PSK ciphersuite** — not applicable here (the front leg is plain
+  UDP; there is no tunnel PSK). Only relevant for the two-proxy
+  deployments.

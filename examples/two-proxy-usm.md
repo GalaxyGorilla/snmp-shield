@@ -104,3 +104,31 @@ snmp-proxy agent   --config configs/agent-usm.yaml
 Both sides must share `--psk`, `--auth-pass` and `--priv-pass` (the
 tunnel PSK authenticates the transport; the USM user `proxy`
 authenticates the SNMP messages inside it).
+
+## Hardening options
+
+- **PSK ciphersuite** — the DTLS tunnel defaults to
+  `TLS_PSK_WITH_AES_128_CCM_8`. To pin a stronger suite (and reject
+  peers offering only weaker ones):
+
+  ```bash
+  # both sides:
+  snmp-proxy agent --psk-ciphersuites aes256-ccm-8 ...
+  snmp-proxy manager --psk-ciphersuites aes256-ccm-8 ...
+  ```
+
+  Comma-separated list, most preferred first (see `--help` for the
+  available suites). Both sides must share at least one entry.
+
+- **Notification filtering** — drop unwanted traps/informs at the
+  clear-ingress point (the box's `--trap-listen`) before they enter the
+  secured segment:
+
+  ```bash
+  snmp-proxy manager --trap-listen :10162 \
+    --filter-oid 1.3.6.1.4.1.99 --filter-action deny ...
+  ```
+
+  `--filter-oid` is an OID prefix (repeatable, arc-boundary match),
+  `--filter-action` is `allow` or `deny`. In YAML:
+  `notifications.filter`.

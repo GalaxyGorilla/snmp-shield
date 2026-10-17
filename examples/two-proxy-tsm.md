@@ -74,3 +74,21 @@ A failed handshake (untrusted cert, wrong CA) shows up immediately:
 `configs/manager-tsm.yaml` + `configs/agent-tsm.yaml` — full TSM mode
 (`security.mode: tsm`): the tunnel handshake maps to the SNMP
 securityName, the agent side checks `security.tsm_identities`.
+
+## Hardening option
+
+- **Notification filtering** — drop unwanted notifications at the
+  clear-ingress point (the box's `--trap-listen`) before they enter the
+  secured segment:
+
+  ```bash
+  snmp-proxy manager --trap-listen :10162 \
+    --filter-oid 1.3.6.1.4.1.99 --filter-action deny ...
+  ```
+
+  `--filter-oid` is an OID prefix (repeatable, arc-boundary match),
+  `--filter-action` is `allow` or `deny`. In YAML:
+  `notifications.filter`.
+
+- **PSK ciphersuite** — not applicable in TSM mode (the handshake is
+  certificate-based, no PSK suites involved).

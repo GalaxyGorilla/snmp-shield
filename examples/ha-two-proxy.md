@@ -80,3 +80,29 @@ snmp-proxy selftest --role manager \
 
 Kill proxy A and watch the manager-side log: the tunnel drops, the
 dialer walks to B, and polling resumes without manager reconfiguration.
+
+## Hardening options
+
+- **PSK ciphersuite** — pin the DTLS tunnel suite on all boxes (both
+  manager sides and both agent-side replicas must share at least one
+  entry):
+
+  ```bash
+  snmp-proxy manager --psk-ciphersuites aes256-ccm-8 ...
+  snmp-proxy agent   --psk-ciphersuites aes256-ccm-8 ...
+  ```
+
+  Comma-separated, most preferred first (see `--help`). In YAML:
+  `tunnel.psk_ciphersuites`.
+
+- **Notification filtering** — drop unwanted traps/informs at any
+  `--trap-listen` before they enter the secured segment:
+
+  ```bash
+  snmp-proxy manager --trap-listen :10162 \
+    --filter-oid 1.3.6.1.4.1.99 --filter-action deny ...
+  ```
+
+  `--filter-oid` is an OID prefix (repeatable, arc-boundary match),
+  `--filter-action` is `allow` or `deny`. In YAML:
+  `notifications.filter`.

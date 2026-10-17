@@ -23,8 +23,11 @@ func TestFlagsConfigManager(t *testing.T) {
 	if err != nil {
 		t.Fatalf("manager flagsConfig: %v", err)
 	}
-	if cfg.Tunnel.DialAddr != "10.0.0.2:10162" {
-		t.Fatalf("dial addr = %q", cfg.Tunnel.DialAddr)
+	if len(cfg.Tunnel.DialAddrs) != 1 || cfg.Tunnel.DialAddrs[0] != "10.0.0.2:10162" {
+		t.Fatalf("dial addrs = %v", cfg.Tunnel.DialAddrs)
+	}
+	if addrs := cfg.DialEndpoints(); len(addrs) != 1 || addrs[0] != "10.0.0.2:10162" {
+		t.Fatalf("dial endpoints = %v", addrs)
 	}
 	if cfg.Tunnel.PSK != "hex:aabbccdd" {
 		t.Fatalf("psk = %q", cfg.Tunnel.PSK)

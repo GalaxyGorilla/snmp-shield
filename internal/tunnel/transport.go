@@ -10,15 +10,22 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/pion/dtls/v3"
 )
 
-// Dialer dials a tunnel endpoint.
+// Dialer dials a tunnel endpoint. When RemoteAddrs lists more than one
+// endpoint, Dial walks them (HA failover, sticky: the last-known-good
+// endpoint is tried first on every dial).
 type Dialer struct {
-	Mode        string // "dtls" or "tls"
-	RemoteAddr  string // tunnel endpoint address to dial
+	Mode       string // "dtls" or "tls"
+	RemoteAddr string // tunnel endpoint address to dial (single-endpoint mode)
+	// RemoteAddrs lists the tunnel endpoints, most preferred first. When
+	// set, Dial ignores RemoteAddr and walks the list starting at the
+	// last-known-good index. The first success pins the index.
+	RemoteAddrs []string
 	PSK         []byte
 	PSKIdentity []byte
 	// PskCiphersuites selects the DTLS 1.2 PSK cipher suites, most
@@ -32,6 +39,11 @@ type Dialer struct {
 	ServerName      string
 	Insecure        bool
 	Timeout         time.Duration
+
+	// Sticky failover state: index into RemoteAddrs of the last
+	// known-good endpoint. Guarded by failMu.
+	failMu  sync.Mutex
+	failIdx int
 }
 
 // tlsConfig builds a mutual-TLS *tls.Config for the "tls" mode.
@@ -105,7 +117,47 @@ func (d *Dialer) dtlsConfig() (*dtls.Config, error) {
 // Dial connects to the tunnel endpoint. For "dtls" mode the network is
 // udp; for "tls" mode, tcp. It blocks until the (D)TLS handshake
 // completes or ctx/timeout expires.
+//
+// When RemoteAddrs is set, raddr is ignored and Dial walks the endpoint
+// list starting at the last-known-good index (sticky HA failover): each
+// endpoint gets the full timeout, and the first success pins the index.
 func (d *Dialer) Dial(ctx context.Context, raddr string) (net.Conn, error) {
+	if len(d.RemoteAddrs) > 0 {
+		return d.dialFailover(ctx)
+	}
+	return d.dialOne(ctx, raddr)
+}
+
+// dialFailover walks RemoteAddrs starting at the sticky index.
+func (d *Dialer) dialFailover(ctx context.Context) (net.Conn, error) {
+	d.failMu.Lock()
+	start := d.failIdx
+	d.failMu.Unlock()
+	n := len(d.RemoteAddrs)
+	var lastErr error
+	for i := 0; i < n; i++ {
+		idx := (start + i) % n
+		addr := d.RemoteAddrs[idx]
+		conn, err := d.dialOne(ctx, addr)
+		if err == nil {
+			d.failMu.Lock()
+			d.failIdx = idx
+			d.failMu.Unlock()
+			return conn, nil
+		}
+		lastErr = err
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
+	if lastErr == nil {
+		lastErr = errors.New("dial: no tunnel endpoints configured")
+	}
+	return nil, lastErr
+}
+
+// dialOne dials a single endpoint (the pre-existing single-endpoint path).
+func (d *Dialer) dialOne(ctx context.Context, raddr string) (net.Conn, error) {
 	timeout := d.Timeout
 	if timeout <= 0 {
 		timeout = 10 * time.Second
@@ -120,16 +172,31 @@ func (d *Dialer) Dial(ctx context.Context, raddr string) (net.Conn, error) {
 		if err != nil {
 			return nil, fmt.Errorf("resolve tunnel addr: %w", err)
 		}
-		// dtls.Dial is blocking with its own handshake timeout handling;
-		// wrap with the ctx via a goroutine for cancellation support.
+		// dtls.Dial does NOT run the handshake: it returns instantly and
+		// the handshake completes lazily on first Read/Write. Run it
+		// eagerly here (bounded by ctx/timeout) so dial errors surface
+		// to the caller — the HA failover walk needs per-endpoint
+		// failures to move on to the next endpoint.
 		type result struct {
 			conn net.Conn
 			err  error
 		}
 		ch := make(chan result, 1)
 		go func() {
-			conn, derr := dtls.Dial("udp", addr, dcfg)
-			ch <- result{conn, derr}
+			dconn, derr := dtls.Dial("udp", addr, dcfg)
+			if derr == nil {
+				hctx, hcancel := context.WithTimeout(ctx, timeout)
+				defer hcancel()
+				derr = dconn.HandshakeContext(hctx)
+			}
+			if derr != nil {
+				if dconn != nil {
+					_ = dconn.Close()
+				}
+				ch <- result{nil, derr}
+				return
+			}
+			ch <- result{dconn, nil}
 		}()
 		select {
 		case r := <-ch:
@@ -137,7 +204,7 @@ func (d *Dialer) Dial(ctx context.Context, raddr string) (net.Conn, error) {
 				return nil, fmt.Errorf("dtls dial: %w", r.err)
 			}
 			// DTLS preserves record boundaries; wrap into a byte stream.
-			return newStreamConn(r.conn, true), nil
+			return newStreamConn(r.conn.(*dtls.Conn), true), nil
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		case <-time.After(timeout):

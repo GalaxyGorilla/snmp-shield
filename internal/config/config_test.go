@@ -181,6 +181,57 @@ func TestKeepaliveAndBackoff(t *testing.T) {
 	}
 }
 
+func TestDialAddrs(t *testing.T) {
+	path := writeTemp(t, `
+tunnel:
+  mode: dtls
+  dial_addrs:
+    - "10.0.0.1:10162"
+    - "10.0.0.2:10162"
+  psk: "text:shared-secret"
+manager:
+  listen_addr: ":161"
+`)
+	cfg, err := Load(path, RoleManager)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	addrs := cfg.DialEndpoints()
+	if len(addrs) != 2 || addrs[0] != "10.0.0.1:10162" || addrs[1] != "10.0.0.2:10162" {
+		t.Errorf("dial_addrs = %v", addrs)
+	}
+
+	// dial_addrs wins over dial_addr.
+	path = writeTemp(t, `
+tunnel:
+  mode: dtls
+  dial_addr: "10.0.0.9:10162"
+  dial_addrs: ["10.0.0.1:10162"]
+  psk: "text:shared-secret"
+manager:
+  listen_addr: ":161"
+`)
+	cfg, err = Load(path, RoleManager)
+	if err != nil {
+		t.Fatalf("load dial_addrs+dial_addr: %v", err)
+	}
+	if addrs := cfg.DialEndpoints(); len(addrs) != 1 || addrs[0] != "10.0.0.1:10162" {
+		t.Errorf("dial_addrs must win over dial_addr: %v", addrs)
+	}
+
+	// Legacy single dial_addr still resolves.
+	legacy := &Config{Tunnel: Tunnel{DialAddr: "x:1"}}
+	if addrs := legacy.DialEndpoints(); len(addrs) != 1 || addrs[0] != "x:1" {
+		t.Errorf("legacy dial_addr = %v", addrs)
+	}
+
+	// Manager without either is rejected.
+	none := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", PSK: "text:s"}, Manager: ManagerRole{ListenAddr: ":161"}}
+	if err := none.Validate(); err == nil {
+		t.Error("manager without dial_addr/dial_addrs accepted")
+	}
+}
+
 func TestLoadMissingFile(t *testing.T) {
 	if _, err := Load("/nonexistent/config.yaml", RoleManager); err == nil {
 		t.Error("missing file accepted")

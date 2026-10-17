@@ -64,9 +64,11 @@ func runManager(ctx context.Context, opts Options, met *observ.Metrics) error {
 	if err != nil {
 		return err
 	}
+	addrs := opts.Config.DialEndpoints()
 	dial := &tunnel.Dialer{
 		Mode:            opts.Config.Tunnel.Mode,
-		RemoteAddr:      opts.Config.Tunnel.DialAddr,
+		RemoteAddr:      addrs[0],
+		RemoteAddrs:     addrs,
 		PSK:             psk,
 		PSKIdentity:     []byte(opts.Config.Tunnel.PSKIdentity),
 		PskCiphersuites: opts.Config.Tunnel.PskCiphersuites,
@@ -79,6 +81,8 @@ func runManager(ctx context.Context, opts Options, met *observ.Metrics) error {
 	}
 	sess := tunnel.NewClientSession(dial, opts.Config.Tunnel.MaxFrameSize, 1200, opts.Log)
 	defer sess.Close()
+	sess.SetMetrics(met)
+	sess.SetTuning(opts.Config.Keepalive(), opts.Config.Backoff())
 
 	// Connect eagerly: the first Send on a lazy session races the DTLS
 	// handshake and the first app record can be lost (pion's server-side
@@ -205,18 +209,32 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics) error {
 			defer wg.Done()
 			sess := tunnel.NewServerSession(conn, opts.Config.Tunnel.MaxFrameSize, 1200, opts.Log)
 			defer sess.Close()
+			// Cancel per-session work when the tunnel conn dies (the
+			// server readLoop fires Done); otherwise the translator
+			// leaks per reconnect.
+			sctx, scancel := context.WithCancel(ctx)
+			defer scancel()
+			go func() {
+				select {
+				case <-sess.Done():
+					scancel()
+				case <-ctx.Done():
+				}
+				scancel()
+			}()
+			sess.SetTuning(opts.Config.Keepalive(), 0)
 			var rerr error
 			if usmMode {
 				var tr *usm.AgentTranslator
 				tr, rerr = usm.NewAgentTranslator(opts.Config.Agent, usm.ProfilesFromSecurity(opts.Config.Security), clock, sess, opts.Log, met)
 				if rerr == nil {
-					rerr = tr.Run(ctx.Done())
+					rerr = tr.Run(sctx.Done())
 				}
 			} else if tsmMode {
 				var tr *tsm.AgentTranslator
 				tr, rerr = tsm.NewAgentTranslator(opts.Config.Agent, opts.Config.Security, sess, opts.Log, met)
 				if rerr == nil {
-					rerr = tr.Run(ctx.Done())
+					rerr = tr.Run(sctx.Done())
 				}
 			} else {
 				filt, ferr := opts.Config.TrapFilter()
@@ -225,7 +243,7 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics) error {
 					return
 				}
 				agt := passthrough.NewAgent(opts.Config.Agent, sess, opts.Log, met, filt)
-				rerr = agt.Run(ctx)
+				rerr = agt.Run(sctx)
 			}
 			if rerr != nil {
 				opts.Log.Error("agent session ended", zap.Error(rerr))

@@ -7,6 +7,7 @@
 package usm
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -313,7 +314,12 @@ func (m *ManagerTranslator) handleReport(m2 *msg.V3Message) {
 		return
 	}
 	m.engineMu.Lock()
+	// A Report from a DIFFERENT engine is always adopted: after a
+	// failover to a second agent-side proxy replica (own engineID, lower
+	// boots), requests to the stale engineID are answered by the new
+	// replica's unknownEngineID Report, which must switch discovery.
 	newer := m.remote == nil ||
+		!bytes.Equal(m2.USM.EngineID, m.remote.id) ||
 		m2.USM.Boots > m.remote.boots ||
 		(m2.USM.Boots == m.remote.boots && m2.USM.Time >= m.remote.time)
 	if newer {

@@ -84,7 +84,7 @@ func runRole(role string, args []string) int {
 
 	// direct-flags mode (no --config): tunnel
 	tunnelMode := fs.String("tunnel-mode", "dtls", "secured-segment transport: dtls (UDP) or tls (TCP)")
-	tunnelAddr := fs.String("tunnel-addr", "", "tunnel endpoint: dial (manager role) or listen (agent role) address ip:port")
+	tunnelAddr := fs.String("tunnel-addr", "", "tunnel endpoint(s): manager role dials comma-separated addresses (HA failover, most preferred first); agent role listens on ip:port")
 	psk := fs.String("psk", "", "pre-shared key for the tunnel (hex; generate with `snmp-proxy genpsk`)")
 	pskIdentity := fs.String("psk-identity", "snmp-proxy", "PSK identity string")
 	pskSuites := fs.String("psk-ciphersuites", "", "DTLS PSK ciphersuites, comma-separated, most preferred first (aes128-ccm-8, aes256-ccm-8, aes128-ccm, aes128-gcm, aes128-cbc; default aes128-ccm-8)")
@@ -328,7 +328,13 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 		if o.listen == "" {
 			return nil, fmt.Errorf("--listen is required for the manager role (clear SNMP listener ip:port)")
 		}
-		cfg.Tunnel.DialAddr = o.tunnelAddr
+		// --tunnel-addr accepts a comma-separated list (HA failover,
+		// most preferred first).
+		for _, a := range strings.Split(o.tunnelAddr, ",") {
+			if a = strings.TrimSpace(a); a != "" {
+				cfg.Tunnel.DialAddrs = append(cfg.Tunnel.DialAddrs, a)
+			}
+		}
 		cfg.Manager = config.ManagerRole{
 			ListenAddr:     o.listen,
 			TrapSinkAddr:   o.trapSink,

@@ -37,8 +37,14 @@ type Tunnel struct {
 	// Mode selects the tunnel transport: "dtls" (UDP) or "tls" (TCP).
 	Mode string `yaml:"mode"`
 
-	// DialAddr is the tunnel endpoint the manager role dials.
+	// DialAddr is the tunnel endpoint the manager role dials. Superseded
+	// by DialAddrs when that list is set.
 	DialAddr string `yaml:"dial_addr"`
+	// DialAddrs lists the tunnel endpoints the manager role dials, most
+	// preferred first (HA failover): the dialer walks the list starting
+	// at the last-known-good endpoint. Either DialAddr or DialAddrs must
+	// be set; DialAddrs wins when both are present.
+	DialAddrs []string `yaml:"dial_addrs"`
 	// ListenAddr is the tunnel endpoint the agent role binds.
 	ListenAddr string `yaml:"listen_addr"`
 
@@ -201,6 +207,18 @@ func (c *Config) TrapFilter() (*notifyfilter.Filter, error) {
 	return notifyfilter.New(f.Action, f.Oids)
 }
 
+// DialEndpoints returns the tunnel endpoints the manager role dials, most
+// preferred first: DialAddrs when set, else [DialAddr] when set, else nil.
+func (c *Config) DialEndpoints() []string {
+	if len(c.Tunnel.DialAddrs) > 0 {
+		return c.Tunnel.DialAddrs
+	}
+	if c.Tunnel.DialAddr != "" {
+		return []string{c.Tunnel.DialAddr}
+	}
+	return nil
+}
+
 // Defaults fills unset fields with sane values.
 func (c *Config) Defaults() {
 	if c.Tunnel.Mode == "" {
@@ -292,8 +310,8 @@ func (c *Config) Validate() error {
 		if c.Manager.ListenAddr == "" {
 			return fmt.Errorf("manager.listen_addr is required")
 		}
-		if c.Tunnel.DialAddr == "" {
-			return fmt.Errorf("tunnel.dial_addr is required for manager role")
+		if len(c.DialEndpoints()) == 0 {
+			return fmt.Errorf("tunnel.dial_addr (or tunnel.dial_addrs) is required for manager role")
 		}
 	} else {
 		if c.Agent.AgentAddr == "" {

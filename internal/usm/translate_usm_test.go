@@ -3,11 +3,18 @@
 package usm
 
 import (
+	"bytes"
+	"context"
 	"encoding/hex"
 	"testing"
+	"time"
 
+	"github.com/GalaxyGorilla/snmp-proxy/internal/cache"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
 	"github.com/gosnmp/gosnmp"
+	"go.uber.org/zap"
 )
 
 // TestParseAndDecryptGosnmpAuthPriv feeds a real gosnmp-marshaled authPriv
@@ -111,6 +118,85 @@ func TestParseAndDecryptGosnmpAuthPriv(t *testing.T) {
 	}
 	if f, ok := pduCommon(m2.PDU); !ok || f.ReqID != 42 {
 		t.Fatalf("request-id not preserved: %+v", f)
+	}
+}
+
+// testShim implements usm.FrameSink: minimal tunnel stand-in for the
+// manager translator (no frames flow; handleReport is driven directly).
+type testShim struct{}
+
+func (s *testShim) Subscribe(uint8) (<-chan *tunnel.Frame, func()) {
+	ch := make(chan *tunnel.Frame, 1)
+	return ch, func() {}
+}
+
+func (s *testShim) Send(context.Context, uint8, uint8, uint16, []byte) error { return nil }
+
+// TestReportAdoptsDifferentEngine pins the HA cross-engine adoption rule:
+// a Report from a DIFFERENT engineID is always adopted (failover to a
+// second agent-side proxy replica with its own engine), while same-engine
+// anti-rollback still rejects decreasing boots/time.
+func TestReportAdoptsDifferentEngine(t *testing.T) {
+	store, err := cache.Open("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock, err := cache.NewEngineClock(store, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := NewManagerTranslator(config.ManagerRole{}, config.Security{}, clock, &testShim{}, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.remote = &remoteEngine{id: []byte{0x01}, boots: 9, time: 999, discoveredAt: time.Now()}
+
+	buildReport := func(engineID []byte, boots, tm uint32) *msg.V3Message {
+		pdu := msg.BuildPDU(msg.PDUReport, 1, 0, 0, []byte{0})
+		scoped := msg.BuildScoped(nil, []byte{}, pdu)
+		out, err := msg.BuildV3(msg.V3Header{
+			MsgID:      1,
+			MsgMaxSize: msg.DefaultMsgMaxSize,
+			MsgFlags:   msg.MsgFlagReportable,
+			SecModel:   msg.SecurityModelUSM,
+		}, msg.USMParams{EngineID: engineID, Boots: boots, Time: tm}, scoped, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		m2, err := msg.ParseV3(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return m2
+	}
+
+	// A Report from a different engine (lower boots) must be adopted.
+	m.handleReport(buildReport([]byte{0x02}, 1, 1))
+	m.engineMu.Lock()
+	got := append([]byte{}, m.remote.id...)
+	m.engineMu.Unlock()
+	if !bytes.Equal(got, []byte{0x02}) {
+		t.Fatalf("expected remote engine id 02, got % x", got)
+	}
+
+	// A second Report from yet another engine is also adopted.
+	m.handleReport(buildReport([]byte{0x03}, 1, 1))
+	m.engineMu.Lock()
+	got = append([]byte{}, m.remote.id...)
+	m.engineMu.Unlock()
+	if !bytes.Equal(got, []byte{0x03}) {
+		t.Fatalf("expected remote engine id 03 after second adoption, got % x", got)
+	}
+
+	// Same-engine anti-rollback: lower boots from the SAME engine is
+	// rejected.
+	m.handleReport(buildReport([]byte{0x03}, 0, 1))
+	m.engineMu.Lock()
+	got = append([]byte{}, m.remote.id...)
+	boots := m.remote.boots
+	m.engineMu.Unlock()
+	if !bytes.Equal(got, []byte{0x03}) || boots != 1 {
+		t.Fatalf("same-engine rollback must be rejected: id % x boots %d", got, boots)
 	}
 }
 

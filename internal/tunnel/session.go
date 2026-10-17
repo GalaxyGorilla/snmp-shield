@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
 	"go.uber.org/zap"
 )
 
@@ -40,7 +41,31 @@ type Session struct {
 
 	readLoopOnce sync.Once
 	readStop     chan struct{}
+
+	// keepalive interval; read deadline = 3×keepalive. 0 = legacy 90s.
+	keepalive time.Duration
+	// maxBackoff caps the reconnect backoff. 0 = legacy 5s.
+	maxBackoff time.Duration
+	// met is the optional metrics set (Reconnects counter, TunnelUp gauge).
+	met *observ.Metrics
+
+	// doneCh is closed when the session is closed or its connection is
+	// irrecoverably lost (server side). Guarded by doneOnce.
+	doneOnce sync.Once
+	doneCh   chan struct{}
+
+	// idleMisses counts consecutive idle read timeouts for dead-peer
+	// detection. Guarded by mu.
+	idleMisses int
 }
+
+// Session tuning: the legacy hardcoded values.
+const (
+	legacyReadDeadline   = 90 * time.Second
+	legacyMaxBackoff     = 5 * time.Second
+	deadlinePerKeepalive = 3
+	maxIdleMisses        = 3
+)
 
 // NewClientSession creates a client (dialing) session. It connects lazily
 // on first use and reconnects with backoff on errors.
@@ -53,6 +78,7 @@ func NewClientSession(dial *Dialer, maxPayload, chunk int, log *zap.Logger) *Ses
 		chunker:    NewChunker(maxPayload),
 		subs:       make(map[uint8]map[chan *Frame]struct{}),
 		readStop:   make(chan struct{}),
+		doneCh:     make(chan struct{}),
 	}
 }
 
@@ -66,9 +92,56 @@ func NewServerSession(conn net.Conn, maxPayload, chunk int, log *zap.Logger) *Se
 		chunker:    NewChunker(maxPayload),
 		subs:       make(map[uint8]map[chan *Frame]struct{}),
 		readStop:   make(chan struct{}),
+		doneCh:     make(chan struct{}),
 	}
 	s.startReadLoop()
 	return s
+}
+
+// SetTuning configures keepalive-based dead-peer detection: the read
+// deadline becomes 3×keepalive and after maxIdleMisses consecutive idle
+// timeouts the connection is dropped (server side) or probed then dropped
+// (client side). maxBackoff caps the reconnect backoff. Zero values keep
+// the legacy behavior (90s deadline, 5s backoff, never declare dead).
+func (s *Session) SetTuning(keepalive, maxBackoff time.Duration) {
+	s.mu.Lock()
+	s.keepalive = keepalive
+	s.maxBackoff = maxBackoff
+	s.mu.Unlock()
+}
+
+// SetMetrics attaches the metrics set used for Reconnects/TunnelUp.
+func (s *Session) SetMetrics(met *observ.Metrics) {
+	s.met = met
+}
+
+// Done returns a channel closed when the session is closed or its
+// connection is irrecoverably lost (server side). Callers use it to
+// cancel per-session work (translators).
+func (s *Session) Done() <-chan struct{} {
+	return s.doneCh
+}
+
+// closeDone fires the Done channel once.
+func (s *Session) closeDone() {
+	s.doneOnce.Do(func() { close(s.doneCh) })
+}
+
+// readDeadline returns the per-read timeout: 3×keepalive when tuning is
+// set, else the legacy 90s.
+func (s *Session) readDeadline() time.Duration {
+	if s.keepalive > 0 {
+		return s.keepalive * deadlinePerKeepalive
+	}
+	return legacyReadDeadline
+}
+
+// backoffCap returns the reconnect backoff cap.
+func (s *Session) backoffCap() time.Duration {
+	if s.maxBackoff > 0 {
+		return s.maxBackoff
+	}
+	return legacyMaxBackoff
 }
 
 // PeerCerts reports the peer certificate chain of the tunnel connection,
@@ -203,6 +276,9 @@ func (s *Session) dropConn(err error) {
 		s.conn = nil
 	}
 	s.mu.Unlock()
+	if s.met != nil {
+		s.met.TunnelUp.Set(0)
+	}
 }
 
 // reconnect dials a new transport connection (client sessions).
@@ -219,7 +295,7 @@ func (s *Session) reconnect(ctx context.Context) error {
 	s.mu.Unlock()
 
 	backoff := 100 * time.Millisecond
-	max := 5 * time.Second
+	max := s.backoffCap()
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -235,10 +311,14 @@ func (s *Session) reconnect(ctx context.Context) error {
 			s.conn = conn
 			s.mu.Unlock()
 			s.startReadLoop()
+			if s.met != nil {
+				s.met.Reconnects.Inc()
+				s.met.TunnelUp.Set(1)
+			}
 			return nil
 		}
 		if s.log != nil {
-			s.log.Warn("tunnel reconnect failed; backing off", zap.Duration("backoff", backoff), zap.Error(err))
+			s.log.Warn("tunnel reconnect failover", zap.Duration("backoff", backoff), zap.Error(err))
 		}
 		select {
 		case <-ctx.Done():
@@ -273,10 +353,26 @@ func (s *Session) readLoop() {
 			}
 			continue
 		}
-		_ = conn.SetReadDeadline(time.Now().Add(90 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(s.readDeadline()))
 		if _, err := readFull(conn, hdr); err != nil {
 			if isTimeout(err) {
-				// Idle link: probe with PING (client) or just re-check.
+				// Idle link: count the miss. The client probes with PING;
+				// after maxIdleMisses consecutive misses the link is dead.
+				s.mu.Lock()
+				s.idleMisses++
+				dead := s.idleMisses >= maxIdleMisses
+				s.mu.Unlock()
+				if dead {
+					if s.log != nil {
+						s.log.Warn("tunnel peer idle past detection window; dropping",
+							zap.Int("misses", s.idleMisses))
+					}
+					s.dropConn(errors.New("peer idle: dead peer detected"))
+					if s.dial == nil {
+						s.closeDone()
+						return
+					}
+				}
 				if s.dial != nil {
 					_ = s.Send(context.Background(), TypePING, 0, 0, nil)
 				}
@@ -287,6 +383,7 @@ func (s *Session) readLoop() {
 			}
 			s.dropConn(err)
 			if s.dial == nil {
+				s.closeDone()
 				return
 			}
 			continue
@@ -298,6 +395,7 @@ func (s *Session) readLoop() {
 			}
 			s.dropConn(err)
 			if s.dial == nil {
+				s.closeDone()
 				return
 			}
 			continue
@@ -308,11 +406,15 @@ func (s *Session) readLoop() {
 			if _, err := readFull(conn, payload); err != nil {
 				s.dropConn(err)
 				if s.dial == nil {
+					s.closeDone()
 					return
 				}
 				continue
 			}
 		}
+		s.mu.Lock()
+		s.idleMisses = 0
+		s.mu.Unlock()
 		switch f.Type {
 		case TypePING:
 			_ = s.Send(context.Background(), TypePONG, 0, f.CorrID, nil)
@@ -322,6 +424,7 @@ func (s *Session) readLoop() {
 		case TypeGOAWAY:
 			s.dropConn(errors.New("peer sent GOAWAY"))
 			if s.dial == nil {
+				s.closeDone()
 				return
 			}
 			continue
@@ -373,6 +476,7 @@ func (s *Session) Close() error {
 	conn := s.conn
 	s.conn = nil
 	s.mu.Unlock()
+	s.closeDone()
 	if conn != nil {
 		return conn.Close()
 	}

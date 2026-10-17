@@ -33,6 +33,7 @@ long-haul segment between them.
 | First capability | **Passthrough tunnel**, then USM/TSM message security |
 | SNMP versions | v2c and v3 are priority; v1 tolerated on clear leg |
 | Config | YAML file per instance, role via subcommand |
+| HA | Manager dials a list (`tunnel.dial_addrs`, sticky last-known-good); dead peers detected via keepalive (3 misses × 3×keepalive) and per-session work is cancelled through `Session.Done()`; USM manager adopts Reports from ANY engineID (failover), same-engine anti-rollback preserved |
 
 ## 3. Status / Roadmap
 
@@ -62,7 +63,7 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | TSM gateway mode (RFC 6353 SNMP-over-DTLS front leg) | done (tested, Go harness + net-snmp `scripts/interop-gateway-tsm.sh`, incl. trap direction) |
 | PSK ciphersuite variety (`tunnel.psk_ciphersuites`: aes128-ccm-8 default, aes256-ccm-8, aes128-ccm, aes128-gcm, aes128-cbc; YAML + `--psk-ciphersuites` flag) | done (tested, unit + per-suite loopback handshakes + mismatch rejection) |
 | Notification filtering (`notifications.filter`: allow/deny OID prefixes; YAML + `--filter-oid`/`--filter-action` flags) | done (tested, unit + e2e: passthrough relay, USM gateway w/ gosnmp TrapListener; config validation) |
-| HA | backlog |
+| HA (manager tunnel failover `tunnel.dial_addrs` sticky walk; keepalive dead-peer detection 3 misses × 3×keepalive; session Done()/per-session cancel; USM cross-engine Report adoption; live `keepalive_secs`/`max_reconnect_backoff_secs` + Reconnects/TunnelUp metrics) | done (tested, failover e2e + dead-peer net.Pipe + config/flags tests; smoke + all 3 interop suites re-run green) |
 
 ### Gateway modes (single proxy, no second proxy required)
 
@@ -219,11 +220,11 @@ internal/observ/          zap logging + Prometheus metrics
 ```
 
 (Directories with code: config, observ, tunnel, msg, passthrough, proxy,
-usm, tsm, cache, cmd/snmp-proxy. Still empty, reserved: discovery
-(discovery logic lives in internal/usm translate_manager.go), securitylevel.
-Also: configs/ example YAML (manager/agent × psk/usm/tsm + gateway-usm
-+ gateway-tsm), scripts/gen-certs.sh throwaway test PKI into gitignored
-certs/, scripts/tsm-sink raw-DTLS test receiver for interop.)
+usm, tsm, cache, notifyfilter, cmd/snmp-proxy. Still empty, reserved:
+discovery (discovery logic lives in internal/usm translate_manager.go),
+securitylevel. Also: configs/ example YAML (manager/agent × psk/usm/tsm +
+gateway-usm + gateway-tsm), scripts/gen-certs.sh throwaway test PKI into
+gitignored certs/, scripts/tsm-sink raw-DTLS test receiver for interop.)
 
 ## 5. Build / Test
 
@@ -253,7 +254,10 @@ snmp-proxy manager --tunnel-addr <manager-proxy-ip>:19611 --psk $KEY \
   --auth-pass <auth> --priv-pass <priv> --listen :161 --community public
 ```
 
-Flags: `--tunnel-mode` (dtls|tls), `--psk-identity`, `--psk-ciphersuites`
+Flags: `--tunnel-mode` (dtls|tls), `--tunnel-addr` (manager role:
+comma-separated endpoint list ip:port,ip:port — HA failover, most
+preferred first; agent role: single listen address), `--psk-identity`,
+`--psk-ciphersuites`
 (comma-separated DTLS PSK suites, most preferred first: aes128-ccm-8 |
 aes256-ccm-8 | aes128-ccm | aes128-gcm | aes128-cbc; default
 aes128-ccm-8), `--insecure`, `--security` (usm-translate|passthrough),
@@ -364,6 +368,35 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   increments boots per start (persisted JSON in `security.engine_store` —
   REQUIRED, boots must never decrease), engineTime = seconds since start.
   Inbound timeliness per RFC 3414 §3.2 (±150 s window, anti-rollback).
+- **HA (tunnel failover + dead-peer detection)**:
+  - Manager dials a list: `tunnel.dial_addrs` (YAML, most preferred
+    first; supersedes `tunnel.dial_addr`, which still works as the
+    single-entry form). The Dialer walks endpoints starting at the
+    sticky last-known-good index; each endpoint gets the full dial
+    timeout; the first success pins the index. `--tunnel-addr` accepts a
+    comma-separated list in flags mode.
+  - **pion `dtls.Dial` does NOT handshake** — it returns instantly and
+    the handshake completes lazily on first Read/Write, so a dead
+    endpoint "dials" successfully. `Dialer.Dial` now runs
+    `HandshakeContext` eagerly inside the dial goroutine (bounded by the
+    dial timeout) so per-endpoint failures surface to the failover walk.
+  - Dead-peer detection: `Session.SetTuning(keepalive, maxBackoff)`
+    sets the read deadline to 3×keepalive; after 3 consecutive idle
+    timeouts the connection is dropped (client probes with PING first;
+    server just drops and its readLoop returns, firing `Session.Done()`).
+    0 values = legacy behavior (90s deadline, never declare dead, 5s
+    backoff cap). `keepalive_secs`/`max_reconnect_backoff_secs` are now
+    live config (were dead code before). `Session.Close()` fires Done.
+  - Agent-side proxy cancels per-session translators via
+    `Session.Done()` → per-session context (previously the translator
+    leaked per reconnect until process exit).
+  - USM manager adopts a Report from ANY engineID (`handleReport`
+    cross-engine rule): after failover, requests to the stale engineID
+    are answered by the new replica's unknownEngineID Report and
+    discovery switches automatically. Same-engine boots/time
+    anti-rollback is unchanged.
+  - Metrics now wired: `Reconnects` counter + `TunnelUp` gauge set by
+    the session on reconnect/drop.
 - **Notification filtering** (`internal/notifyfilter`, `notifications.filter`):
   one filter (action allow|deny + dotted OID prefixes) applies at the
   **clear-notification ingress points only** (the 6 `handleClearTrap`/

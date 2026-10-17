@@ -218,7 +218,11 @@ usm-gateway — **IMPLEMENTED (see below)**:
   net-snmp-compatible BEFORE implementation — discovery + authPriv GET
   accepted by real snmpd. The bug it found was test-side varbind
   double-wrap (BuildPDU wraps the varbinds arg in the 0x30 SEQUENCE
-  itself — never pre-wrap).
+  itself — never pre-wrap). **Gotcha: a build constraint must be the
+  literal `//go:build snmpd_spike` line before `package`** — a comment
+  SAYING the tag gate exists is not a gate; the spike initially ran in
+  every normal suite and failed wherever no snmpd listens on
+  127.0.0.1:1161 (caught on macOS).
 
 **2. TSM gateway (`tsm-gateway`)** — RFC 6353 front leg — **IMPLEMENTED
 (see below)**:

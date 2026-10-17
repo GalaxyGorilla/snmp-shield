@@ -86,6 +86,16 @@ All two-proxy modes carry the full operation set in both directions:
 the same way: the manager's acknowledgment flows back through the
 gateway to the device in every gateway mode.
 
+**About the "v3" labels**: SNMPv3 alone is not a security guarantee —
+RFC 3414 defines three security levels, and only **authPriv** (digest
+authentication + encryption) secures the wire. Rows labeled `v3
+authPriv` enforce that level. Rows labeled plain `v3` (usm-gateway and
+its notification-only shape) inherit the level from the configured
+users in `security.users` — every shipped default is SHA + AES
+(authPriv), but a user configured with `auth_protocol: none` would
+speak noAuthNoPriv v3 (framed, not secured). Configure real passphrases
+and the leg is authPriv.
+
 ## Tunnel transport
 
 - **DTLS over UDP** (primary) — preserves SNMP's connectionless model.

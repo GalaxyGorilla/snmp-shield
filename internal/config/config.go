@@ -19,6 +19,11 @@ type Role string
 const (
 	RoleManager Role = "manager" // clear leg faces SNMP managers
 	RoleAgent   Role = "agent"   // clear leg faces real SNMP agents/devices
+	// RoleGateway is the single-box USM gateway: a plain-UDP front leg
+	// terminates SNMPv3 USM directly from standard managers (the proxy is
+	// the authoritative engine) and authenticated requests are relayed as
+	// clear v1/v2c to the legacy agent. No tunnel, no second proxy.
+	RoleGateway Role = "gateway"
 )
 
 // Tunnel holds the secured-segment settings shared by both roles.
@@ -88,6 +93,28 @@ type AgentRole struct {
 	AgentCommunity string `yaml:"agent_community"`
 }
 
+// GatewayRole is the configuration for the single-box USM gateway: the
+// front leg is a plain-UDP SNMPv3 listener (the proxy is the authoritative
+// engine toward standard managers); authenticated requests are relayed as
+// clear v1/v2c to the legacy agent. No tunnel.
+type GatewayRole struct {
+	// ListenAddr is the SNMPv3 USM listener (managers connect here).
+	ListenAddr string `yaml:"listen_addr"`
+	// AgentAddr is the legacy SNMP agent (authenticated requests are
+	// relayed here as clear v1/v2c).
+	AgentAddr string `yaml:"agent_addr"`
+	// TrapListenAddr, when set, accepts clear v1/v2c notifications from
+	// the legacy agent/network and forwards them as authenticated v3 USM
+	// notifications toward the manager subscribers.
+	TrapListenAddr string `yaml:"trap_listen_addr"`
+	// TrapSinkAddr, when set, is the manager's v3 USM trap receiver:
+	// clear notifications accepted on TrapListenAddr are wrapped into
+	// authenticated v3 USM notifications and delivered here.
+	TrapSinkAddr string `yaml:"trap_sink_addr"`
+	// AgentCommunity is the v1/v2c community used toward the legacy agent.
+	AgentCommunity string `yaml:"agent_community"`
+}
+
 // Security configures the SNMP message-level security mode (USM
 // translate). When Mode is "usm-translate", the proxies speak SNMPv3
 // authPriv to each other over the tunnel and translate to/from v1/v2c on
@@ -134,6 +161,7 @@ type Config struct {
 	Tunnel   Tunnel      `yaml:"tunnel"`
 	Manager  ManagerRole `yaml:"manager"`
 	Agent    AgentRole   `yaml:"agent"`
+	Gateway  GatewayRole `yaml:"gateway"`
 	Security Security    `yaml:"security"`
 }
 
@@ -161,6 +189,31 @@ func (c *Config) Defaults() {
 
 // Validate checks the configuration for the configured role.
 func (c *Config) Validate() error {
+	// Gateway role: single-box USM gateway — no tunnel, plain-UDP front
+	// leg terminating SNMPv3 USM, clear v1/v2c relay to the legacy agent.
+	if c.Role == RoleGateway {
+		if c.Gateway.ListenAddr == "" {
+			return fmt.Errorf("gateway.listen_addr is required")
+		}
+		if c.Gateway.AgentAddr == "" {
+			return fmt.Errorf("gateway.agent_addr is required")
+		}
+		if c.Security.Mode != "usm-gateway" {
+			return fmt.Errorf("gateway role requires security.mode usm-gateway, got %q", c.Security.Mode)
+		}
+		if len(c.Security.Users) == 0 {
+			return fmt.Errorf("security.users: usm-gateway needs at least one user")
+		}
+		for _, u := range c.Security.Users {
+			if u.Name == "" {
+				return fmt.Errorf("security.users: user name is required")
+			}
+			if u.AuthProtocol == "" || u.PrivProtocol == "" {
+				return fmt.Errorf("security.users: user %s needs auth_protocol and priv_protocol", u.Name)
+			}
+		}
+		return nil
+	}
 	switch c.Role {
 	case RoleManager, RoleAgent:
 	default:
@@ -190,9 +243,12 @@ func (c *Config) Validate() error {
 		}
 	}
 	switch c.Security.Mode {
-	case "passthrough", "usm-translate", "tsm":
+	case "passthrough", "usm-translate", "tsm", "usm-gateway":
 	default:
-		return fmt.Errorf("security.mode must be passthrough, usm-translate or tsm, got %q", c.Security.Mode)
+		return fmt.Errorf("security.mode must be passthrough, usm-translate, tsm or usm-gateway, got %q", c.Security.Mode)
+	}
+	if c.Security.Mode == "usm-gateway" {
+		return fmt.Errorf("security.mode usm-gateway is only valid with the gateway role")
 	}
 	if c.Security.Mode == "usm-translate" {
 		if len(c.Security.Users) == 0 {

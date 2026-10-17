@@ -32,7 +32,7 @@ func run() int {
 	case "version", "--version", "-v":
 		fmt.Printf("snmp-proxy %s\n", version)
 		return 0
-	case "manager", "agent":
+	case "manager", "agent", "gateway":
 		return runRole(os.Args[1], os.Args[2:])
 	case "genpsk":
 		return genPSK()
@@ -72,9 +72,9 @@ func runRole(role string, args []string) int {
 	insecure := fs.Bool("insecure", false, "skip tunnel certificate verification (tls mode only; never in production)")
 
 	// direct-flags mode: usm-translate security
-	secMode := fs.String("security", "usm-translate", "security mode when using flags: usm-translate or passthrough")
-	authPass := fs.String("auth-pass", "", "v3 authentication passphrase (usm-translate mode; user 'proxy', SHA, AES)")
-	privPass := fs.String("priv-pass", "", "v3 privacy passphrase (usm-translate mode)")
+	secMode := fs.String("security", "usm-translate", "security mode when using flags: usm-translate or passthrough (gateway role always uses usm-gateway)")
+	authPass := fs.String("auth-pass", "", "v3 authentication passphrase (usm-translate/gateway mode; user 'proxy', SHA, AES)")
+	privPass := fs.String("priv-pass", "", "v3 privacy passphrase (usm-translate/gateway mode)")
 
 	// direct-flags mode: role specifics
 	listen := fs.String("listen", "", "clear SNMP listener (manager role: requests; also used for traps with --trap-listen)")
@@ -100,6 +100,8 @@ func runRole(role string, args []string) int {
 		r = config.RoleManager
 	case "agent":
 		r = config.RoleAgent
+	case "gateway":
+		r = config.RoleGateway
 	}
 
 	var cfg *config.Config
@@ -131,10 +133,14 @@ func runRole(role string, args []string) int {
 		}
 	}
 
-	log.Info("starting snmp-proxy",
+	startFields := []zap.Field{
 		zap.String("role", role),
-		zap.String("tunnel_mode", cfg.Tunnel.Mode),
-		zap.String("security_mode", cfg.Security.Mode))
+		zap.String("security_mode", cfg.Security.Mode),
+	}
+	if role != "gateway" {
+		startFields = append(startFields, zap.String("tunnel_mode", cfg.Tunnel.Mode))
+	}
+	log.Info("starting snmp-proxy", startFields...)
 
 	err = proxy.Run(proxy.Options{
 		Config:      cfg,
@@ -169,6 +175,44 @@ type flagsOpts struct {
 // flagsConfig assembles a validated Config from direct flags (plug-and-play
 // deployment without a YAML file).
 func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
+	// Gateway role: single-box USM gateway — no tunnel, no PSK. The front
+	// leg terminates SNMPv3 USM (user 'proxy', SHA, AES); authenticated
+	// requests are relayed as clear v2c to the legacy agent.
+	if r == config.RoleGateway {
+		if o.listen == "" {
+			return nil, fmt.Errorf("--listen is required for the gateway role (SNMPv3 front listener ip:port)")
+		}
+		if o.agent == "" {
+			return nil, fmt.Errorf("--agent is required for the gateway role (legacy agent ip:port)")
+		}
+		if o.authPass == "" || o.privPass == "" {
+			return nil, fmt.Errorf("--auth-pass and --priv-pass are required in gateway mode (v3 user 'proxy', SHA, AES)")
+		}
+		cfg := &config.Config{Role: r}
+		cfg.Security = config.Security{
+			Mode: "usm-gateway",
+			Users: []config.UserCfg{{
+				Name:           "proxy",
+				AuthProtocol:   "sha",
+				AuthPassphrase: o.authPass,
+				PrivProtocol:   "aes",
+				PrivPassphrase: o.privPass,
+			}},
+		}
+		cfg.Gateway = config.GatewayRole{
+			ListenAddr:     o.listen,
+			AgentAddr:      o.agent,
+			AgentCommunity: o.community,
+			TrapListenAddr: o.trapListen,
+			TrapSinkAddr:   o.trapSink,
+		}
+		cfg.Defaults()
+		if err := cfg.Validate(); err != nil {
+			return nil, err
+		}
+		return cfg, nil
+	}
+
 	if o.tunnelAddr == "" {
 		return nil, fmt.Errorf("--tunnel-addr is required (tunnel endpoint ip:port)")
 	}
@@ -244,6 +288,7 @@ func usage(w *os.File) {
 Usage (config file):
   snmp-proxy manager --config <file> [--metrics-addr <addr>]
   snmp-proxy agent   --config <file> [--metrics-addr <addr>]
+  snmp-proxy gateway --config <file> [--metrics-addr <addr>]
 
 Usage (flags, no config file — plug and play):
   snmp-proxy manager --tunnel-addr <agent-proxy:port> --psk <hex> \
@@ -253,6 +298,11 @@ Usage (flags, no config file — plug and play):
       --auth-pass <pw> --priv-pass <pw> --agent <real-agent:port> \
       [--community <comm>] [--trap-listen <ip:port>] [--trap-sink <ip:port>]
 
+Usage (gateway, single box — standard v3 managers, no second proxy):
+  snmp-proxy gateway --listen <ip:port> --agent <real-agent:port> \
+      --auth-pass <pw> --priv-pass <pw> [--community <comm>] \
+      [--trap-listen <ip:port>] [--trap-sink <ip:port>]
+
 Other commands:
   snmp-proxy genpsk     print a fresh random pre-shared key (hex)
   snmp-proxy version
@@ -261,5 +311,9 @@ The manager instance listens for clear SNMP from managers and dials the
 secured tunnel; the agent instance listens on the tunnel and forwards to
 the real SNMP agent. Run one instance on each side of the secured line.
 Both sides must share the same --psk, --auth-pass and --priv-pass.
+The gateway instance is a single box: standard SNMPv3 managers (USM
+authPriv, user 'proxy') talk to it directly; authenticated requests are
+relayed as clear v2c to the legacy agent. 100%% standard SNMP on every
+wire — no tunnel, no PSK.
 `)
 }

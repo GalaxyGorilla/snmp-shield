@@ -119,37 +119,52 @@ func testCert(t *testing.T, cn string) *x509.Certificate {
 
 // --- fake v2c agent -------------------------------------------------------------
 
+// fakeAgentOnFreePort starts a fake v2c agent on an ephemeral local port
+// and returns the conn plus its address. Fixed ports flake when the whole
+// suite runs in parallel (test packages share the loopback namespace).
+func fakeAgentOnFreePort(t *testing.T) (net.PacketConn, string) {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go agentLoop(conn)
+	return conn, conn.LocalAddr().String()
+}
+
 func fakeAgent(t *testing.T, addr string) net.PacketConn {
 	t.Helper()
 	conn, err := net.ListenPacket("udp", addr)
 	if err != nil {
 		t.Fatal(err)
 	}
-	go func() {
-		buf := make([]byte, 65536)
-		for {
-			n, from, err := conn.ReadFrom(buf)
-			if err != nil {
-				return
-			}
-			dg := append([]byte(nil), buf[:n]...)
-			ver, community, pdu, err := msg.SplitV1V2c(dg)
-			if err != nil {
-				continue
-			}
-			_, fields, err := msg.ParsePDU(pdu)
-			if err != nil {
-				continue
-			}
-			resp := msg.BuildPDU(msg.PDUGetResponse, fields.ReqID, 0, 0, fields.Varbinds)
-			out, err := msg.BuildV1V2c(ver, community, resp)
-			if err != nil {
-				continue
-			}
-			_, _ = conn.WriteTo(out, from)
-		}
-	}()
+	go agentLoop(conn)
 	return conn
+}
+
+func agentLoop(conn net.PacketConn) {
+	buf := make([]byte, 65536)
+	for {
+		n, from, err := conn.ReadFrom(buf)
+		if err != nil {
+			return
+		}
+		dg := append([]byte(nil), buf[:n]...)
+		ver, community, pdu, err := msg.SplitV1V2c(dg)
+		if err != nil {
+			continue
+		}
+		_, fields, err := msg.ParsePDU(pdu)
+		if err != nil {
+			continue
+		}
+		resp := msg.BuildPDU(msg.PDUGetResponse, fields.ReqID, 0, 0, fields.Varbinds)
+		out, err := msg.BuildV1V2c(ver, community, resp)
+		if err != nil {
+			continue
+		}
+		_, _ = conn.WriteTo(out, from)
+	}
 }
 
 // --- translator pair over the pipe ------------------------------------------------
@@ -162,7 +177,7 @@ type tsmPair struct {
 func newTSMPair(t *testing.T, agentCertCN string, identities []string) (*tsmPair, string) {
 	t.Helper()
 
-	fake := fakeAgent(t, "127.0.0.1:11811")
+	fake, fakeAddr := fakeAgentOnFreePort(t)
 
 	var agentCert *x509.Certificate
 	if agentCertCN != "" {
@@ -172,7 +187,7 @@ func newTSMPair(t *testing.T, agentCertCN string, identities []string) (*tsmPair
 
 	agentSec := config.Security{Mode: "tsm", TSMIdentities: identities}
 	agentRole := config.AgentRole{
-		AgentAddr:      "127.0.0.1:11811",
+		AgentAddr:      fakeAddr,
 		AgentCommunity: "realcomm",
 	}
 	atr, err := tsm.NewAgentTranslator(agentRole, agentSec, agtPipe, zap.NewNop(), nil)
@@ -360,7 +375,7 @@ func TestTSMEndToEndTrapPath(t *testing.T) {
 		}
 	}()
 
-	fake := fakeAgent(t, "127.0.0.1:11811")
+	fake, fakeAddr := fakeAgentOnFreePort(t)
 	defer fake.Close()
 
 	agentCert := testCert(t, "snmp-proxy-manager")
@@ -368,7 +383,7 @@ func TestTSMEndToEndTrapPath(t *testing.T) {
 
 	agentSec := config.Security{Mode: "tsm", TSMIdentities: []string{"snmp-proxy-manager"}}
 	agentRole := config.AgentRole{
-		AgentAddr:         "127.0.0.1:11811",
+		AgentAddr:         fakeAddr,
 		TrapSinkAddr:      sinkAddr,
 		TrapSinkCommunity: "sinkcomm",
 	}

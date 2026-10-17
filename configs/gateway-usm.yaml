@@ -1,0 +1,34 @@
+# USM gateway mode: single-box deployment — no tunnel, no second proxy.
+#
+#   [standard manager] --SNMPv3 USM authPriv (RFC 3414)--> [gateway]
+#       --clear v2c--> [legacy agent]
+#
+# The gateway is the authoritative SNMP engine toward the manager:
+# standard v3 managers (net-snmp, Zabbix, PRTG, ...) authenticate with
+# security.users below (authPriv). Authenticated requests are relayed as
+# clear v1/v2c to the legacy agent; clear v1/v2c arriving on the front
+# leg is rejected — unauthenticated traffic never reaches the legacy
+# device. 100% standard SNMP on every wire.
+role: gateway          # passed via subcommand: snmp-proxy gateway --config ...
+
+gateway:
+  listen_addr: ":16161"        # SNMPv3 USM listener (managers connect here)
+  agent_addr: "127.0.0.1:161"  # legacy SNMP agent (relayed as clear v2c)
+  agent_community: "public"    # community toward the legacy agent
+  # Optional reverse notification direction: the legacy network fires
+  # clear v1/v2c traps at trap_listen_addr; they are wrapped into
+  # authenticated v3 USM notifications and delivered to the manager's
+  # v3 trap receiver at trap_sink_addr.
+  # trap_listen_addr: ":10162"
+  # trap_sink_addr: "127.0.0.1:10162"
+
+security:
+  mode: usm-gateway
+  engine_store: /var/lib/snmp-proxy/gateway-engine.json  # REQUIRED: boots must never decrease
+  # engine_id: "hex:8000b98380736e6d702d70726f7879"       # optional, fixed engine ID
+  users:
+    - name: nms
+      auth_protocol: sha
+      auth_passphrase: "changeme-auth"
+      priv_protocol: aes
+      priv_passphrase: "changeme-priv"

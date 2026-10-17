@@ -50,6 +50,8 @@ func Run(opts Options) error {
 		return runManager(ctx, opts, met)
 	case config.RoleAgent:
 		return runAgent(ctx, opts, met)
+	case config.RoleGateway:
+		return runGateway(ctx, opts, met)
 	default:
 		return fmt.Errorf("unknown role %q", opts.Config.Role)
 	}
@@ -213,6 +215,34 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics) error {
 	}
 	wg.Wait()
 	return nil
+}
+
+// runGateway runs the single-box USM gateway: a plain-UDP front leg
+// terminates SNMPv3 USM directly from standard managers (this instance is
+// the authoritative engine) and authenticated requests are relayed as
+// clear v1/v2c to the legacy agent. No tunnel, no second proxy.
+func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
+	store, err := cache.Open(opts.Config.Security.EngineStore)
+	if err != nil {
+		return err
+	}
+	engineID, err := parseEngineID(opts.Config.Security.EngineID)
+	if err != nil {
+		return err
+	}
+	clock, err := cache.NewEngineClock(store, engineID, zapLogger{opts.Log})
+	if err != nil {
+		return err
+	}
+	users := usm.ProfilesFromSecurity(opts.Config.Security)
+	if len(users) == 0 {
+		return fmt.Errorf("security.users: usm-gateway needs at least one user")
+	}
+	tr, terr := usm.NewGatewayTranslator(opts.Config.Gateway, users, clock, opts.Log, met)
+	if terr != nil {
+		return terr
+	}
+	return tr.Run(ctx.Done())
 }
 
 // parseEngineID parses a config engine ID: "hex:..." or bare hex.

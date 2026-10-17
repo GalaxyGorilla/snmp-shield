@@ -74,6 +74,8 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | HA pair state sync (failover replicas sharing one engineID converge: digest-verified higher-boots claims adopted as logical reboot via `cache.EngineClock.AdoptInbound`; manager discovery cache follows the wire for same-engine Report regressions) | done (tested, `internal/usm/ha_sync_test.go` wire tests + cache unit test; smoke + all 3 interop suites re-run green) |
 | Notify filtering for the usm-manager manager-side notification path | done (already implemented at birth: `ManagerGateway.handleClearTrap` filters clear notifications before the v3 wrap toward `trap_sink_addr`, `TestManagerGatewayFilter` covers it; the v3 notification is generated from that ingress so the hook covers the whole path) |
 | Static analysis (staticcheck + govulncheck toolset, pragmatic: fix only meaningful findings) | done (tested, staticcheck zero findings — dead code removed, pion/dtls v3.1.4 upgrade for GO-2026-6165, options-API migration; govulncheck clean) |
+| `validate` subcommand (`--role` + same flags/`--config`; `--json` for tooling; pre-flights cert keypairs, CA files, engine-store writability) + `selftest` subcommand (validate + probes: tunnel handshake per endpoint (manager), SNMP GET sysDescr.0 to the real agent (agent/gateway), front-cert expiry (tsm-gateway); `--probe=false`) | done (tested, unit tests + manual live-agent/tunnel/dead-addr verification) |
+| Makefile (`make build/test/vet/release`), systemd units (`deploy/*.service`: hardening, CAP_NET_BIND_SERVICE, StateDirectory), examples directory (6 copy-paste walkthroughs), README rewrite | done |
 
 ### Gateway modes (single proxy, no second proxy required)
 
@@ -214,7 +216,7 @@ device.
 ## 4. Repository Layout
 
 ```
-cmd/snmp-proxy/           main package; role via subcommand (manager|agent|gateway)
+cmd/snmp-proxy/           main package; role via subcommand (manager|agent|gateway) + validate/selftest/genpsk
 internal/config/          YAML config + flag overrides
 internal/proxy/           shared proxy wiring
 internal/passthrough/     opaque forwarding of clear SNMP
@@ -233,8 +235,10 @@ internal/observ/          zap logging + Prometheus metrics
 usm, tsm, cache, notifyfilter, cmd/snmp-proxy. Still empty, reserved:
 discovery (discovery logic lives in internal/usm translate_manager.go),
 securitylevel. Also: configs/ example YAML (manager/agent × psk/usm/tsm +
-gateway-usm + gateway-tsm), scripts/gen-certs.sh throwaway test PKI into
-gitignored certs/, scripts/tsm-sink raw-DTLS test receiver for interop.)
+gateway-usm + gateway-tsm + gateway-usm-manager), scripts/gen-certs.sh
+throwaway test PKI into gitignored certs/, scripts/tsm-sink raw-DTLS
+test receiver for interop, deploy/ systemd unit files, examples/
+deployment walkthroughs, Makefile (build/test/vet/release).)
 
 ## 5. Build / Test
 
@@ -246,6 +250,10 @@ go build ./...
 go vet ./...
 go test ./... -race -timeout 180s
 ```
+
+`make build` / `make test` / `make vet` / `make release` wrap the same
+commands (`release` = stripped static binary, `CGO_ENABLED=0
+-trimpath -ldflags "-s -w"`, for appliance deployment).
 
 **Static analysis** (installed in `~/go/bin`, run after every dependency
 change or parser edit — pragmatic: fix only meaningful findings):
@@ -311,6 +319,31 @@ snmp-proxy gateway --security usm-manager \
   --trap-listen :162 --trap-sink <manager>:162 \
   --auth-pass <auth> --priv-pass <priv>
 ```
+
+### validate / selftest subcommands
+
+Appliance/tooling helpers (web-UI pre-apply + "test connection"):
+
+```bash
+snmp-proxy validate --role <manager|agent|gateway> \
+  [--config <file> | same flags as the role] [--json]
+snmp-proxy selftest --role <manager|agent|gateway> \
+  [--config <file> | same flags as the role] [--json] [--probe=false]
+```
+
+- `validate` loads + validates the config and pre-flights local
+  resources (cert keypair loads, CA parses, engine-store writable).
+  Exit 0/1. `--json` prints the report document for tooling.
+- `selftest` = validate + probes: config, local files, tunnel
+  (D)TLS handshake per configured endpoint (manager role), one SNMPv2c
+  GET sysDescr.0 to the real agent with 2 attempts (agent role +
+  gateway modes), front-cert expiry warning at 30 days (tsm-gateway).
+  `--probe=false` for no-network checks. Exit 0 = all checks passed.
+- Both share the full flag set with the role subcommands via one
+  `register()` function (`cmd/snmp-proxy/diagnostics.go`); unknown
+  flags for a given subcommand are simply unused. The selftest probes
+  work while the service is running (no listener binding needed — the
+  tunnel probe is a client dial, the agent probe is a one-shot GET).
 
 ### Smoke test
 
@@ -574,6 +607,17 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   derives the auth/priv MsgFlags from the SecurityParameters' protocols
   (SHA/AES set the bits even when you pass NoAuthNoPriv — a genuine
   NoAuthNoPriv wire message needs empty protocols).
+- **validate/selftest design** (`cmd/snmp-proxy/diagnostics.go`): the
+  probes are deliberately non-binding — the tunnel probe is a plain
+  client dial (works while the service holds the tunnel), the agent
+  probe is a one-shot SNMPv2c GET sysDescr.0 built with `msg.BuildPDU`
+  (raw varbind-list content: a varbind TLV wrapped in the 0x30
+  varbind-list SEQUENCE) so no gosnmp dependency is needed in cmd, and
+  the cert-expiry probe only WARNS at 30 days (ok=true) — expired is a
+  failure. `checkEngineStore` mirrors `cache.Open` semantics
+  (O_RDWR|O_CREATE on the file path; a directory in place fails; parent
+  dirs are NOT created). `--json` reports go to stdout (tooling reads
+  them), human errors go to stderr with exit 1.
 - **Notification filtering** (`internal/notifyfilter`, `notifications.filter`):
   one filter (action allow|deny + dotted OID prefixes) applies at the
   **clear-notification ingress points only** (the 6 `handleClearTrap`/

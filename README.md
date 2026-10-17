@@ -4,188 +4,195 @@
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Tests](https://img.shields.io/badge/tests-go_test_-race-brightgreen.svg)
 
-A **SNMP securing proxy**. One binary, two instances, one per entity: each
-instance secures its local clear SNMP leg and encrypts the long-haul
-segment between them.
+A **SNMP securing proxy** for legacy networks. One static binary; three
+shapes of deployment: two proxies around a secured line, or a single
+gateway box in front of an agent or a manager. End devices keep speaking
+plain SNMP; the proxy does all the security work.
 
 ```
-                 clear SNMP (v2c/v3)              secured segment                clear SNMP (v2c)
+                 clear SNMP (v1/v2c/v3)           secured segment (v3)            clear SNMP (v1/v2c)
   ┌─────────┐   ─────────────────────►   ┌───────────────────────────┐   ────────────────────►   ┌─────────┐
   │ manager │                            │  proxy A ═══════ proxy B  │                           │  agent  │
   └─────────┘   ◄─────────────────────   └───────────────────────────┘   ◄────────────────────   └─────────┘
                  responses                        (D)TLS over IP                 traps → manager
 ```
 
-Plug the proxies in between an SNMP manager and an SNMP agent without
-changing either: end devices keep speaking plain v2c/v3, and the proxies
-secure the line in between.
-
 ## Why
 
 Legacy devices often can't do SNMPv3 — weak CPUs, ancient firmware, no
-budget for an upgrade. snmp-proxy lets you keep those devices untouched
-while still getting authenticated, encrypted transport between networks:
+budget for an upgrade. snmp-proxy keeps those devices untouched while
+still getting authentication and encryption where it matters:
 
-- **Zero-touch on end devices** — they keep speaking v2c; the proxies do
-  all the security work.
-- **End-to-end v3 stays byte-exact** — in passthrough mode, v3 USM
-  parameters are forwarded untouched so manager↔agent engine verification
-  still works; the proxy never needs to decrypt.
-- **Deploy by paste** — same key on both proxies, two commands, done.
+- **Zero-touch on end devices** — they keep speaking v1/v2c; the proxy
+  does all the security work.
+- **One box is enough** — the gateway modes secure a single leg
+  (in front of the agent *or* the manager) with standard SNMPv3 or
+  SNMP-over-DTLS on the front.
+- **100% standard SNMP on every wire** — important for firewalls, ALGs,
+  DPI and auditors.
+- **Deploy by paste** — `genpsk`, two commands, done (see
+  [examples/](examples/)).
+
+## Deployment shapes
+
+| Shape | Topology | Use when |
+|---|---|---|
+| [Two-proxy](examples/two-proxy-usm.md) | `[manager] ⇄ proxy ⇄ secured line ⇄ proxy ⇄ [agent]` | You control both ends of the line |
+| [Gateway (agent leg)](examples/gateway-usm.md) | `[v3 managers] ⇄ gateway ⇄ clear ⇄ [legacy agent]` | One box; the **agent** is the asset to protect |
+| [Gateway (manager leg)](examples/usm-manager.md) | `[legacy devices] ⇄ clear ⇄ gateway ⇄ v3 ⇄ [manager]` | One box; the **manager** must only accept authenticated notifications |
+| [HA two-proxy](examples/ha-two-proxy.md) | Two-proxy + redundant agent side | Failover matters |
 
 ## Security modes
 
 | Mode | How it works | Use when |
 |---|---|---|
 | `passthrough` | Opaque forwarding of clear SNMP (v1/v2c/v3). v3 USM params forwarded byte-exact, never decrypted. | Managers/agents already speak SNMPv3; you only need to protect the long-haul link. |
-| `usm-translate` | Proxies upgrade the long-haul to **SNMPv3 authPriv** (SHA auth + AES privacy by default). The agent-side proxy is the authoritative engine: RFC 3414 engine discovery, engineBoots/engineTime tracking with persistence and anti-rollback, replay window. End devices stay on v1/v2c. | End devices **can't** do SNMPv3 (hardware constraints, legacy firmware). |
-| `tsm` | RFC 5591: the tunnel (D)TLS handshake *is* the SNMP authentication. Peer certificate (leaf CN) becomes the securityName; allow-list identities on the agent side. | You prefer certificate-based auth over PSKs/passphrases. |
+| `usm-translate` | The proxies upgrade the secured segment to **SNMPv3 authPriv** (SHA auth + AES privacy). The agent-side proxy is the authoritative engine: RFC 3414 discovery, engineBoots/engineTime tracking with persistence and anti-rollback, replay window. End devices stay on v1/v2c. | End devices **can't** do SNMPv3. |
+| `tsm` | RFC 5591: the tunnel (D)TLS handshake *is* the SNMP authentication. Peer certificate CN becomes the securityName. | You prefer certificates over PSKs/passphrases. |
+| `usm-gateway` | Single box; plain-UDP front leg terminates **standard SNMPv3 USM** from any manager (net-snmp, Zabbix, PRTG…). The gateway is the authoritative engine; authenticated requests are relayed as clear v2c to the legacy agent. Clear traffic on the front leg is rejected — that is the protection. | The agent is the asset; managers speak standard v3. |
+| `tsm-gateway` | Single box; front leg is **SNMP-over-DTLS (RFC 6353)** — the client certificate is the authentication. | Your clients are net-snmp-based with certs. |
+| `usm-manager` | Single box on the **manager leg**: clear device traps/informs are wrapped into authenticated v3 USM notifications toward the manager's trap receiver; informs work end-to-end. | Devices are v1/v2c-only; the manager must only accept authenticated notifications. |
 
-All modes carry the full operation set in both directions:
-`GET`, `GETNEXT`, `SET`, `GETBULK` (downgraded to `GETNEXT` on v1), plus
-**traps and informs** both ways.
+All two-proxy modes carry the full operation set in both directions:
+`GET`, `GETNEXT`, `SET`, `GETBULK`, plus **traps and informs** both ways
+(inform confirmations relayed end-to-end).
 
 ## Tunnel transport
 
 - **DTLS over UDP** (primary) — preserves SNMP's connectionless model.
 - **TLS over TCP** (alternative) — `--tunnel-mode tls`.
+- **HA failover** — the manager side dials a list of endpoints
+  (`tunnel.dial_addrs`), detects dead peers via keepalive (3 missed
+  probes at 3× the keepalive interval), and reconnects automatically.
+  Redundant replicas share one engine identity and converge their engine
+  state — managers never re-discover.
 
-The secured segment is plain application-layer crypto over any IP network
-— the proxies don't care what's underneath. Configuration is just
-`ip:port` dial/listen endpoints.
+The secured segment is application-layer crypto over any IP network; the
+proxies don't care what's underneath. Configuration is just `ip:port`
+endpoints.
 
 ## Quick start
 
-Install Go 1.21+, then:
+Build (plain Go, no dependencies to install beyond the toolchain):
 
 ```bash
-git clone https://github.com/GalaxyGorilla/snmp-proxy
-cd snmp-proxy
-go build ./cmd/snmp-proxy
+make            # or: go build -o bin/snmp-proxy ./cmd/snmp-proxy
 ```
 
 ### Plug and play (no config files)
 
 ```bash
-KEY=$(./snmp-proxy genpsk)   # random 32-byte hex key
+KEY=$(./bin/snmp-proxy genpsk)   # random 32-byte hex key
 
-# agent-side proxy device (faces the real device)
-./snmp-proxy agent --tunnel-addr <manager-proxy-ip>:19611 --psk $KEY \
+# agent-side box (faces the real agent)
+./bin/snmp-proxy agent --tunnel-addr <agent-box-ip>:19611 --psk $KEY \
   --auth-pass myauth --priv-pass mypriv \
   --agent 127.0.0.1:161 --community public
 
-# manager-side proxy device (faces the monitoring station)
-./snmp-proxy manager --tunnel-addr <manager-proxy-ip>:19611 --psk $KEY \
+# manager-side box (faces the monitoring station)
+./bin/snmp-proxy manager --tunnel-addr <agent-box-ip>:19611 --psk $KEY \
   --auth-pass myauth --priv-pass mypriv \
   --listen :161 --community public
 ```
 
 Point the manager at the manager-side proxy instead of the agent, and
-point device traps at the agent-side proxy instead of the manager. Both
-sides must share `--psk`, `--auth-pass` and `--priv-pass`.
+point device traps at the proxy's `--trap-listen` instead of the
+manager. Both sides share `--psk`, `--auth-pass` and `--priv-pass`.
+
+Full walkthroughs for every deployment shape: [examples/](examples/).
+
+### Single-box gateway
+
+```bash
+./bin/snmp-proxy gateway --security usm-gateway \
+  --listen :161 --agent 127.0.0.1:161 \
+  --auth-pass myauth --priv-pass mypriv
+```
+
+Any standard v3 manager now polls the gateway with user `proxy`
+(SHA/AES) and the legacy agent never sees unauthenticated traffic.
 
 ### Config files
 
-Each instance is described by one YAML file; the role is chosen by the
-subcommand. Templates for every combination live in [`configs/`](configs/):
+Each instance is one YAML file; the role is chosen by the subcommand.
+Templates for every combination live in [`configs/`](configs/):
 
 ```bash
-./snmp-proxy manager --config configs/manager-usm.yaml
-./snmp-proxy agent   --config configs/agent-usm.yaml
+./bin/snmp-proxy manager --config configs/manager-usm.yaml
+./bin/snmp-proxy agent   --config configs/agent-usm.yaml
+./bin/snmp-proxy gateway --config configs/gateway-usm.yaml
 ```
 
-For `tsm` mode, generate a test PKI with
-[`scripts/gen-certs.sh`](scripts/gen-certs.sh) (writes into `certs/`,
-gitignored).
-
-### Smoke test
-
-End-to-end verification on a single host (no DTLS quirks, no external
-tools):
+## Tools
 
 ```bash
-./scripts/smoke-cli.sh   # exit 0 = green
+# validate a config without running (pre-apply hook for tooling/web UIs;
+# --json for machine-readable output):
+snmp-proxy validate --role gateway --config /etc/snmp-proxy/gateway.yaml
+
+# validate + probe the environment (cert expiry, engine store, tunnel
+# handshake, SNMP GET to the real agent; --probe=false skips network):
+snmp-proxy selftest --role gateway --config /etc/snmp-proxy/gateway.yaml
+
+# other commands:
+snmp-proxy genpsk     # fresh random pre-shared key
+snmp-proxy version
 ```
 
-It builds the binary, starts both proxies via flags plus a fake Python
-v2c agent, and polls through the whole secured chain with a gosnmp
-client.
+Both `validate` and `selftest` accept the same flags as the role
+subcommands (or `--config`), so a web UI can build the form, validate
+with `validate --json`, and offer a "test connection" button backed by
+`selftest --json`.
+
+## Appliance deployment
+
+- **Static binary** — `make release` produces a stripped, cgo-free
+  static binary suitable for any Linux appliance (musl/glibc-free).
+- **systemd units** — [`deploy/`](deploy/) ships hardened unit files
+  (Restart=on-failure, `ProtectSystem=strict`, `CAP_NET_BIND_SERVICE`
+  for privileged ports, persistent `StateDirectory` for the engine
+  boots store).
+- **Engine state** — `security.engine_store` must be on persistent
+  storage: engineBoots must never decrease (anti-rollback). systemd's
+  `StateDirectory=snmp-proxy` covers this.
+- **Metrics** — Prometheus endpoint via `--metrics-addr`: tunnel
+  frames/bytes, forwarded requests, errors, notifications relayed/
+  filtered/dropped, reconnects, tunnel-up gauge, forwarding latency.
 
 ## Operations
 
-- **Metrics** — Prometheus endpoint via `--metrics-addr 127.0.0.1:9672`:
-  tunnel frames/bytes, forwarded requests, errors, notifications relayed,
-  drops, reconnects, tunnel-up gauge, forwarding latency histogram.
 - **Reconnect with backoff** — the manager side dials and reconnects
-  automatically (exponential backoff, configurable ceiling).
+  automatically (configurable ceiling).
 - **Keepalive** — PING/PONG frames keep NAT mappings alive and detect
   dead peers.
-- **Graceful shutdown** — SIGINT/SIGTERM closes sockets and loops cleanly.
-- **Engine state persistence** — engineBoots is persisted to disk
-  (`security.engine_store`); boots must never decrease (anti-rollback),
-  and inbound timeliness is enforced per RFC 3414 §3.2 (±150 s window).
-
-## Repository layout
-
-```
-cmd/snmp-proxy/     main package; subcommands manager|agent|genpsk|version
-internal/config/    YAML config + flag overrides, validation
-internal/proxy/     role wiring, shutdown, metrics serving
-internal/passthrough/ opaque forwarding of clear SNMP
-internal/usm/       USM translate mode + profiles + crypto
-internal/tsm/       TSM mode (RFC 5591)
-internal/tunnel/    DTLS/TLS transport, framing, sessions
-internal/msg/       SNMP BER build/parse helpers
-internal/cache/     engine boots/time store (persistence)
-internal/observ/    zap logging + Prometheus metrics
-```
+- **Graceful shutdown** — SIGINT/SIGTERM closes sockets and loops
+  cleanly.
+- **Notification filtering** — `notifications.filter` (allow/deny OID
+  prefixes, arc-boundary match) drops unwanted notifications at the
+  relay ingress; `--filter-oid`/`--filter-action` in flags mode.
+- **Engine state persistence** — engineBoots persisted to disk;
+  timeliness enforced per RFC 3414 §3.2 (±150 s window).
 
 ## Building and testing
 
 ```bash
-go build ./...
-go vet ./...
-go test ./... -race -timeout 180s
+make build     # bin/snmp-proxy
+make test      # go test ./... -race -timeout 180s
+make vet       # go vet ./...
+make release   # stripped static binary for deployment
 ```
 
-Every commit is expected to pass all three (run them manually before pushing).
+Every commit is expected to pass build + vet + the race suite (run
+manually; the project is CI-free).
 
-## Status & roadmap
+## Documentation
 
-Implemented and tested:
-
-- Config package (YAML + flags, both roles)
-- Logging/metrics baseline (zap + Prometheus)
-- Tunnel: DTLS/UDP + TLS/TCP dialer/listener, framing, sessions
-- Passthrough forwarding (v1/v2c/v3, traps/informs)
-- USM translate mode (engineID discovery, boots/time cache, interop-tested
-  byte-exact against gosnmp v3 authPriv clients)
-- TSM mode (RFC 5591)
-- No-YAML CLI mode + smoke-test harness
-
-Backlog: additional PSK ciphersuites, notification filtering, high
-availability, net-snmp CLI interop tests.
-
-## Design notes
-
-- **Passthrough mode never decrypts.** v3 messages are forwarded with USM
-  parameters byte-exact so end-to-end engineID/boot/time verification
-  between the real manager and agent keeps working.
-- **USM translate owns the v3 machinery.** The agent-side proxy answers
-  discovery (empty Reportable NoAuthNoPriv GET → Report PDU with its
-  engineID/boots/time), enforces timeliness windows, and converts v1/v2c ↔
-  v3 in both directions. Translation is PDU splicing — the proxy never
-  parses varbinds it doesn't need to touch.
-- **TSM makes the handshake the authentication.** The tunnel's (D)TLS
-  peer certificate maps to a securityName; no SNMP-level credentials ride
-  the clear legs.
-- **Traps flow both directions**: devices → agent-side proxy → tunnel →
-  manager-side proxy → real manager (and the reverse for manager-originated
-  notifications).
-
-For agent-facing contributors, [`AGENTS.md`](AGENTS.md) documents the
-architecture, hard-won quirks (pion/dtls handshake behavior, gosnmp
-encoding details, BER pitfalls) and the maintenance rules.
+- [`examples/`](examples/) — copy-paste walkthroughs for every
+  deployment shape.
+- [`configs/`](configs/) — YAML templates for every mode.
+- [`deploy/`](deploy/) — systemd unit files.
+- [`AGENTS.md`](AGENTS.md) — architecture, wire-level quirks
+  (pion/dtls, gosnmp, net-snmp, BER) and the maintenance rules.
 
 ## License
 

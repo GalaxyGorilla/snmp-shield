@@ -1,0 +1,69 @@
+# TSM gateway (one box, DTLS front leg)
+
+A single proxy in front of a legacy v2c-only agent, fronted by
+SNMP-over-DTLS per RFC 6353: the (D)TLS handshake with a client
+certificate **is** the authentication. One SNMP datagram per DTLS
+record, no frame layer — 100% standard SNMP on the wire.
+
+```
+[standard TSM client] --SNMP-over-DTLS (RFC 6353)--> [gateway] --clear v2c--> [legacy agent]
+```
+
+Caveat: few mainstream managers speak TSM (net-snmp does; Zabbix/PRTG do
+not). Prefer [gateway-usm](gateway-usm.md) unless your clients are
+net-snmp-based.
+
+## 1. PKI
+
+The gateway presents a server certificate and verifies client
+certificates against the CA. For testing:
+
+```bash
+scripts/gen-certs.sh   # throwaway PKI into certs/
+```
+
+## 2. Run it
+
+```bash
+snmp-proxy gateway \
+  --security tsm-gateway \
+  --listen :10161 \
+  --agent 127.0.0.1:161 \
+  --ca-file /etc/snmp-proxy/ca.crt \
+  --cert-file /etc/snmp-proxy/gateway.crt \
+  --key-file /etc/snmp-proxy/gateway.key \
+  --community public \
+  --trap-listen :10162 \
+  --trap-sink <manager-ip>:10162
+```
+
+- `--listen` — the raw DTLS front leg.
+- `--ca-file` — client certificates must chain to this CA.
+- `--trap-listen`/`--trap-sink` — clear device traps in, TSM
+  notifications out toward the manager's DTLS trap receiver.
+
+Restrict client identities via the config file
+(`security.tsm_identities`; the peer certificate CN must be on the list;
+empty = accept any valid cert from the trusted CA).
+
+## 3. Point the client at the gateway
+
+net-snmp with a client certificate (see `scripts/interop-gateway-tsm.sh`
+for the full snmp.conf incantation):
+
+```bash
+snmpget -v3 -l authPriv -m ALL -M <mibdirs> \
+  dtls:<gateway-host>:10161 sysDescr.0
+```
+
+## 4. Verify
+
+```bash
+snmp-proxy selftest --role gateway --security tsm-gateway \
+  --listen :10161 --agent 127.0.0.1:161 \
+  --ca-file /etc/snmp-proxy/ca.crt --cert-file /etc/snmp-proxy/gateway.crt \
+  --key-file /etc/snmp-proxy/gateway.key
+```
+
+The selftest also warns when the front certificate expires within 30
+days.

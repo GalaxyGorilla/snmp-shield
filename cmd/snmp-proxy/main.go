@@ -35,6 +35,10 @@ func run() int {
 		return 0
 	case "manager", "agent", "gateway":
 		return runRole(os.Args[1], os.Args[2:])
+	case "validate":
+		return runValidate(os.Args[2:])
+	case "selftest":
+		return runSelftest(os.Args[2:])
 	case "genpsk":
 		return genPSK()
 	case "help", "--help", "-h":
@@ -75,47 +79,116 @@ func genPSK() int {
 	return 0
 }
 
-func runRole(role string, args []string) int {
-	fs := pflag.NewFlagSet(role, pflag.ContinueOnError)
-	cfgPath := fs.String("config", "", "path to YAML config file (either --config or direct flags)")
-	metricsAddr := fs.String("metrics-addr", "", "Prometheus metrics listen address (e.g. 127.0.0.1:9672)")
-	logLevel := fs.String("log-level", "info", "log level: debug, info, error")
-	dev := fs.Bool("dev", false, "development logging (console output)")
+// cliFlags bundles every flag the role/validate/selftest subcommands
+// accept. register returns the parsed values after FlagSet.Parse.
+type cliFlags struct {
+	fs *pflag.FlagSet
+
+	configPath    *string
+	metricsAddr   *string
+	logLevel      *string
+	dev           *bool
+	tunnelMode    *string
+	tunnelAddr    *string
+	psk           *string
+	pskIdentity   *string
+	pskSuites     *string
+	insecure      *bool
+	secMode       *string
+	authPass      *string
+	privPass      *string
+	caFile        *string
+	certFile      *string
+	keyFile       *string
+	listen        *string
+	agent         *string
+	community     *string
+	trapListen    *string
+	trapSink      *string
+	filterAction  *string
+	filterOID     *[]string
+	jsonOut       *bool
+	selftestProbe *bool
+}
+
+// register defines the full flag set shared by manager/agent/gateway,
+// validate and selftest (unknown flags are simply ignored by the
+// non-role subcommands).
+func register(fs *pflag.FlagSet) cliFlags {
+	var c cliFlags
+	c.fs = fs
+	c.configPath = fs.String("config", "", "path to YAML config file (either --config or direct flags)")
+	c.metricsAddr = fs.String("metrics-addr", "", "Prometheus metrics listen address (e.g. 127.0.0.1:9672)")
+	c.logLevel = fs.String("log-level", "info", "log level: debug, info, error")
+	c.dev = fs.Bool("dev", false, "development logging (console output)")
 
 	// direct-flags mode (no --config): tunnel
-	tunnelMode := fs.String("tunnel-mode", "dtls", "secured-segment transport: dtls (UDP) or tls (TCP)")
-	tunnelAddr := fs.String("tunnel-addr", "", "tunnel endpoint(s): manager role dials comma-separated addresses (HA failover, most preferred first); agent role listens on ip:port")
-	psk := fs.String("psk", "", "pre-shared key for the tunnel (hex; generate with `snmp-proxy genpsk`)")
-	pskIdentity := fs.String("psk-identity", "snmp-proxy", "PSK identity string")
-	pskSuites := fs.String("psk-ciphersuites", "", "DTLS PSK ciphersuites, comma-separated, most preferred first (aes128-ccm-8, aes256-ccm-8, aes128-ccm, aes128-gcm, aes128-cbc; default aes128-ccm-8)")
-	insecure := fs.Bool("insecure", false, "skip tunnel certificate verification (tls mode only; never in production)")
+	c.tunnelMode = fs.String("tunnel-mode", "dtls", "secured-segment transport: dtls (UDP) or tls (TCP)")
+	c.tunnelAddr = fs.String("tunnel-addr", "", "tunnel endpoint(s): manager role dials comma-separated addresses (HA failover, most preferred first); agent role listens on ip:port")
+	c.psk = fs.String("psk", "", "pre-shared key for the tunnel (hex; generate with `snmp-proxy genpsk`)")
+	c.pskIdentity = fs.String("psk-identity", "snmp-proxy", "PSK identity string")
+	c.pskSuites = fs.String("psk-ciphersuites", "", "DTLS PSK ciphersuites, comma-separated, most preferred first (aes128-ccm-8, aes256-ccm-8, aes128-ccm, aes128-gcm, aes128-cbc; default aes128-ccm-8)")
+	c.insecure = fs.Bool("insecure", false, "skip tunnel certificate verification (tls mode only; never in production)")
 
 	// direct-flags mode: usm-translate security
-	secMode := fs.String("security", "usm-translate", "security mode when using flags: usm-translate or passthrough (gateway: usm-gateway, tsm-gateway or usm-manager)")
-	authPass := fs.String("auth-pass", "", "v3 authentication passphrase (usm-translate/gateway mode; user 'proxy', SHA, AES)")
-	privPass := fs.String("priv-pass", "", "v3 privacy passphrase (usm-translate/gateway mode)")
+	c.secMode = fs.String("security", "usm-translate", "security mode when using flags: usm-translate or passthrough (gateway: usm-gateway, tsm-gateway or usm-manager)")
+	c.authPass = fs.String("auth-pass", "", "v3 authentication passphrase (usm-translate/gateway mode; user 'proxy', SHA, AES)")
+	c.privPass = fs.String("priv-pass", "", "v3 privacy passphrase (usm-translate/gateway mode)")
 
 	// direct-flags mode: certificate material (tsm tunnel / tsm-gateway)
-	caFile := fs.String("ca-file", "", "CA certificate PEM file to verify peers (tsm-gateway)")
-	certFile := fs.String("cert-file", "", "certificate PEM file to present (tsm-gateway)")
-	keyFile := fs.String("key-file", "", "private key PEM file (tsm-gateway)")
+	c.caFile = fs.String("ca-file", "", "CA certificate PEM file to verify peers (tsm-gateway)")
+	c.certFile = fs.String("cert-file", "", "certificate PEM file to present (tsm-gateway)")
+	c.keyFile = fs.String("key-file", "", "private key PEM file (tsm-gateway)")
 
 	// direct-flags mode: role specifics
-	listen := fs.String("listen", "", "clear SNMP listener (manager role: requests; also used for traps with --trap-listen)")
-	agent := fs.String("agent", "", "real SNMP agent address ip:port (agent role)")
-	community := fs.String("community", "public", "SNMP community (manager role: trap sink/source; agent role: toward the real agent)")
-	trapListen := fs.String("trap-listen", "", "clear trap listener ip:port (optional, both roles)")
-	trapSink := fs.String("trap-sink", "", "trap sink ip:port (manager role: where tunnel notifications are delivered; agent role: local sink for tunnel traps)")
+	c.listen = fs.String("listen", "", "clear SNMP listener (manager role: requests; also used for traps with --trap-listen)")
+	c.agent = fs.String("agent", "", "real SNMP agent address ip:port (agent role)")
+	c.community = fs.String("community", "public", "SNMP community (manager role: trap sink/source; agent role: toward the real agent)")
+	c.trapListen = fs.String("trap-listen", "", "clear trap listener ip:port (optional, both roles)")
+	c.trapSink = fs.String("trap-sink", "", "trap sink ip:port (manager role: where tunnel notifications are delivered; agent role: local sink for tunnel traps)")
 
 	// direct-flags mode: notification filtering
-	filterAction := fs.String("filter-action", "allow", "notification filter action: allow or deny")
-	filterOID := fs.StringArray("filter-oid", nil, "notification filter OID prefix (repeatable, e.g. --filter-oid 1.3.6.1.4.1.8072)")
+	c.filterAction = fs.String("filter-action", "allow", "notification filter action: allow or deny")
+	c.filterOID = fs.StringArray("filter-oid", nil, "notification filter OID prefix (repeatable, e.g. --filter-oid 1.3.6.1.4.1.8072)")
 
+	// validate/selftest only
+	c.jsonOut = fs.Bool("json", false, "validate: machine-readable JSON output (for tooling / web UIs)")
+	c.selftestProbe = fs.Bool("probe", true, "selftest: run network probes (tunnel dial / SNMP GET); --probe=false checks config and local files only")
+	return c
+}
+
+// opts converts the parsed flags to the flagsOpts used by flagsConfig.
+func (c cliFlags) opts() flagsOpts {
+	return flagsOpts{
+		tunnelMode:   *c.tunnelMode,
+		tunnelAddr:   *c.tunnelAddr,
+		psk:          *c.psk,
+		pskIdentity:  *c.pskIdentity,
+		pskSuites:    *c.pskSuites,
+		insecure:     *c.insecure,
+		secMode:      *c.secMode,
+		authPass:     *c.authPass,
+		privPass:     *c.privPass,
+		caFile:       *c.caFile,
+		certFile:     *c.certFile,
+		keyFile:      *c.keyFile,
+		listen:       *c.listen,
+		agent:        *c.agent,
+		community:    *c.community,
+		trapListen:   *c.trapListen,
+		trapSink:     *c.trapSink,
+		filterAction: *c.filterAction,
+		filterOids:   *c.filterOID,
+	}
+}
+
+func runRole(role string, args []string) int {
+	fs := pflag.NewFlagSet(role, pflag.ContinueOnError)
+	c := register(fs)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-
-	log, err := observ.Log(*logLevel, *dev)
+	log, err := observ.Log(*c.logLevel, *c.dev)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "logger: %v\n", err)
 		return 1
@@ -133,34 +206,14 @@ func runRole(role string, args []string) int {
 	}
 
 	var cfg *config.Config
-	if *cfgPath != "" {
-		cfg, err = config.Load(*cfgPath, r)
+	if *c.configPath != "" {
+		cfg, err = config.Load(*c.configPath, r)
 		if err != nil {
 			log.Error("load config", zap.Error(err))
 			return 1
 		}
 	} else {
-		cfg, err = flagsConfig(r, flagsOpts{
-			tunnelMode:   *tunnelMode,
-			tunnelAddr:   *tunnelAddr,
-			psk:          *psk,
-			pskIdentity:  *pskIdentity,
-			pskSuites:    *pskSuites,
-			insecure:     *insecure,
-			secMode:      *secMode,
-			authPass:     *authPass,
-			privPass:     *privPass,
-			caFile:       *caFile,
-			certFile:     *certFile,
-			keyFile:      *keyFile,
-			listen:       *listen,
-			agent:        *agent,
-			community:    *community,
-			trapListen:   *trapListen,
-			trapSink:     *trapSink,
-			filterAction: *filterAction,
-			filterOids:   *filterOID,
-		})
+		cfg, err = flagsConfig(r, c.opts())
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			return 2
@@ -178,7 +231,7 @@ func runRole(role string, args []string) int {
 
 	err = proxy.Run(proxy.Options{
 		Config:      cfg,
-		MetricsAddr: *metricsAddr,
+		MetricsAddr: *c.metricsAddr,
 		Log:         log,
 	})
 	if err != nil {
@@ -416,6 +469,15 @@ Usage (gateway, single box — no second proxy, standard clients):
       --auth-pass <pw> --priv-pass <pw>
 
 Other commands:
+  snmp-proxy validate --role <manager|agent|gateway> (same flags as the role)
+      [--config <file>] [--json]
+      check a configuration without running (pre-apply for tooling /
+      web UIs); pre-flights certs, keys and the engine store
+  snmp-proxy selftest --role <manager|agent|gateway> (same flags as the role)
+      [--config <file>] [--json] [--probe=false]
+      validate + probe the environment: cert expiry, engine store,
+      tunnel handshake (manager), SNMP GET to the real agent
+      (agent/gateway)
   snmp-proxy genpsk     print a fresh random pre-shared key (hex)
   snmp-proxy version
 

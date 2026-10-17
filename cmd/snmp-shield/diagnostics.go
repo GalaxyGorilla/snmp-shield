@@ -104,6 +104,12 @@ func finishValidate(rep report, jsonOut bool) int {
 	if jsonOut {
 		out, _ := json.Marshal(rep)
 		fmt.Println(string(out))
+		// exit code mirrors ok in both modes (matches selftest and the
+		// "Exit 0/1" contract); the JSON report on stdout carries the
+		// details for tooling either way.
+		if !rep.OK {
+			return 1
+		}
 		return 0
 	}
 	if !rep.OK {

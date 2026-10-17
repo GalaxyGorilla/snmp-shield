@@ -39,9 +39,10 @@ func TestRunValidateFlags(t *testing.T) {
 	if rc := swapArgs(t, []string{"snmp-shield", "validate", "--role", "bogus"}, run); rc != 1 {
 		t.Fatalf("validate bogus role = %d, want 1", rc)
 	}
-	// invalid role with --json: report printed, rc 0 (tooling reads ok=false)
-	if rc := swapArgs(t, []string{"snmp-shield", "validate", "--role", "bogus", "--json"}, run); rc != 0 {
-		t.Fatalf("validate bogus role --json = %d, want 0", rc)
+	// invalid role with --json: report printed, rc 1 (exit code mirrors
+	// ok in both output modes; the JSON report still carries the details)
+	if rc := swapArgs(t, []string{"snmp-shield", "validate", "--role", "bogus", "--json"}, run); rc != 1 {
+		t.Fatalf("validate bogus role --json = %d, want 1", rc)
 	}
 }
 

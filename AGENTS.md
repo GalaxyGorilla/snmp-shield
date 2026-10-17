@@ -75,6 +75,7 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | Notify filtering for the usm-manager manager-side notification path | done (already implemented at birth: `ManagerGateway.handleClearTrap` filters clear notifications before the v3 wrap toward `trap_sink_addr`, `TestManagerGatewayFilter` covers it; the v3 notification is generated from that ingress so the hook covers the whole path) |
 | Static analysis (staticcheck + govulncheck toolset, pragmatic: fix only meaningful findings) | done (tested, staticcheck zero findings — dead code removed, pion/dtls v3.1.4 upgrade for GO-2026-6165, options-API migration; govulncheck clean) |
 | `validate` subcommand (`--role` + same flags/`--config`; `--json` for tooling; pre-flights cert keypairs, CA files, engine-store writability) + `selftest` subcommand (validate + probes: tunnel handshake per endpoint (manager), SNMP GET sysDescr.0 to the real agent (agent/gateway), front-cert expiry (tsm-gateway); `--probe=false`) | done (tested, unit tests + manual live-agent/tunnel/dead-addr verification) |
+| `validate --json` exit-code fix (rc mirrors `ok` in both output modes; previously `validate --json` returned 0 on invalid configs while `selftest --json` always honored rc 1 — README/AGENTS "Exit 0/1" only held for text mode) | done (tested, unit + live rc verification; full race suite re-run green) |
 | Makefile (`make build/test/vet/release`), systemd units (`deploy/*.service`: hardening, CAP_NET_BIND_SERVICE, StateDirectory), examples directory (6 copy-paste walkthroughs), README rewrite | done |
 | README decision guidance (native SNMPv3, WireGuard/IPsec, and `snmpfwd` alternatives; snmp-shield's DTLS/TSM and appliance-operations fit) | done |
 | Goroutine-leak regression test (`internal/tunnel/leak_test.go`: 30 connect/exchange/close cycles over real PSK-DTLS loopback, goroutine count must return to baseline; server side keyed on `Session.Done()` + production `SetTuning` so there is no test-end accounting noise) | done (tested, -race -count 8 stable: before=after=5) |
@@ -642,7 +643,13 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   failure. `checkEngineStore` mirrors `cache.Open` semantics
   (O_RDWR|O_CREATE on the file path; a directory in place fails; parent
   dirs are NOT created). `--json` reports go to stdout (tooling reads
-  them), human errors go to stderr with exit 1.
+  them), human errors go to stderr with exit 1. **Exit-code contract
+  (fixed)**: rc mirrors `ok` in BOTH output modes — `validate --json`
+  previously returned 0 on invalid configs (its JSON branch
+  short-circuited) while `selftest --json` always honored rc 1 via the
+  shared tail check; tooling can now trust `validate … --json || abort`
+  and still parses the `ok` field for details. JSON mode prints only
+  the JSON document (no trailing human summary).
 - **Goroutine-leak testing** (`internal/tunnel/leak_test.go`,
   `TestSessionGoroutineLeak`): the session layer is pinned against
   goroutine leaks with 30 connect/exchange/close cycles over a real

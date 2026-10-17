@@ -703,6 +703,17 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   pion handshake goroutine + read loop are still parked at measurement
   time — flaky across runs. With both fixes the count is exactly
   stable (before=after=5 over 30 cycles, -count 8 green).
+  **macOS flake (fixed with a watchdog)**: even with both fixes, on
+  macOS pion's server-side Read can park past the app-level read
+  deadline while the handshake FSM is not fully settled — the server's
+  `readLoop` sits in `readFull` for minutes, `Done()` never fires, and
+  a bare `<-sess.Done()` wedges the whole suite (timeout at the suite
+  level, test passes in isolation). Fix: the server-side wait is
+  bounded by a 2s watchdog that force-`Close`s the session — Close
+  fires Done through the SAME exit path, so a genuinely leaked session
+  still fails the goroutine-count check (the watchdog only neutralizes
+  the harness-level wedge). -count 4 green on Linux, -count 4 + -count 3
+  ×2 + full suite green on macOS/arm64 (homebrew Go).
 - **SBOM + vuln scan** (`make sbom` / `make vulnscan`, syft + grype):
   syft catalogs the stripped release ELF — Go buildinfo survives
   `-s -w` (the binary pseudo-version is crafted from build settings),

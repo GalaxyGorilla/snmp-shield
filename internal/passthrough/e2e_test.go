@@ -19,6 +19,7 @@ import (
 
 	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/notifyfilter"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/passthrough"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
@@ -341,6 +342,153 @@ func TestEndToEndTrapPath(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("trap did not reach sink in time")
+	}
+}
+
+// mustBuildV2cTrap builds a v2c trap datagram whose first varbind is
+// snmpTrapOID.0 (unlike buildV2cResponse, which is a GetResponse).
+func mustBuildV2cTrap(t *testing.T, trapOID string) []byte {
+	t.Helper()
+	oidBer, err := msg.EncodeOID(trapOID)
+	if err != nil {
+		t.Fatalf("EncodeOID(%q): %v", trapOID, err)
+	}
+	oidTLV := msg.AppendTLV(nil, 0x06, oidBer)
+	snmpTrapOIDTLV := msg.AppendTLV(nil, 0x06, msg.OIDSnmpTrapOID)
+	vb1 := msg.AppendTLV(nil, 0x30, append(append([]byte{}, snmpTrapOIDTLV...), oidTLV...))
+	pdu := msg.BuildPDU(msg.PDUSNMPv2Trap, 0, 0, 0, vb1)
+	dg, err := msg.BuildV1V2c(msg.Version2c, []byte("public"), pdu)
+	if err != nil {
+		t.Fatalf("BuildV1V2c: %v", err)
+	}
+	return dg
+}
+
+// TestEndToEndTrapFilter exercises the notification filter on the
+// agent-side relay: an allowed trap reaches the sink, a denied trap does
+// not, and the listener stays alive for a subsequent allowed trap.
+func TestEndToEndTrapFilter(t *testing.T) {
+	log := zap.NewNop()
+	met := observ.NewMetrics()
+
+	filt, err := notifyfilter.New("deny", []string{"1.3.6.1.4.1.99"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Trap sink on the manager side.
+	sink, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("sink listen: %v", err)
+	}
+	defer sink.Close()
+	sinkCh := make(chan []byte, 8)
+	go func() {
+		buf := make([]byte, 65536)
+		for {
+			n, _, err := sink.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			b := make([]byte, n)
+			copy(b, buf[:n])
+			sinkCh <- b
+		}
+	}()
+
+	psk := []byte("e2e-trap-filter-psk")
+	l, err := tunnel.Listen("127.0.0.1:0", tunnel.ListenerConfig{
+		Mode: "dtls", PSK: psk, PSKIdentity: []byte("e2e"),
+	})
+	if err != nil {
+		t.Fatalf("tunnel listen: %v", err)
+	}
+	defer l.Close()
+
+	trapPort := freeUDPPort(t)
+	go func() {
+		conn, err := l.Accept()
+		if err != nil {
+			return
+		}
+		sess := tunnel.NewServerSession(conn, 65536, 1200, log)
+		agt := passthrough.NewAgent(config.AgentRole{AgentAddr: "127.0.0.1:1", TrapListenAddr: trapPort}, sess, log, met, filt)
+		_ = agt.Run(context.Background())
+	}()
+
+	dial := &tunnel.Dialer{
+		Mode: "dtls", RemoteAddr: l.Addr().String(),
+		PSK: psk, PSKIdentity: []byte("e2e"), Timeout: 5 * time.Second,
+	}
+	sess := tunnel.NewClientSession(dial, 65536, 1200, log)
+	defer sess.Close()
+	if err := sess.Connect(context.Background()); err != nil {
+		t.Fatalf("tunnel connect: %v", err)
+	}
+
+	mgr := passthrough.NewManager(config.ManagerRole{
+		ListenAddr:   freeUDPPort(t),
+		TrapSinkAddr: sink.LocalAddr().String(),
+	}, sess, log, met)
+	mgrErr := make(chan error, 1)
+	go func() { mgrErr <- mgr.Run(context.Background()) }()
+	defer mgr.Close()
+	select {
+	case err := <-mgrErr:
+		t.Fatalf("manager exited: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	device, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatalf("device socket: %v", err)
+	}
+	defer device.Close()
+	taddr, _ := net.ResolveUDPAddr("udp", trapPort)
+
+	// 1. Allowed trap arrives at the sink.
+	allowed := mustBuildV2cTrap(t, "1.3.6.1.4.1.999")
+	if _, err := device.WriteToUDP(allowed, taddr); err != nil {
+		t.Fatalf("device send (allowed): %v", err)
+	}
+	select {
+	case got := <-sinkCh:
+		if !bytes.Equal(got, allowed) {
+			t.Fatalf("sink got %d bytes, want %d identical bytes", len(got), len(allowed))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("allowed trap did not reach sink in time")
+	}
+
+	// 2. Denied trap never arrives.
+	denied := mustBuildV2cTrap(t, "1.3.6.1.4.1.99.5")
+	if _, err := device.WriteToUDP(denied, taddr); err != nil {
+		t.Fatalf("device send (denied): %v", err)
+	}
+	// 3. A second allowed trap arrives (proves the listener survived).
+	allowed2 := mustBuildV2cTrap(t, "1.3.6.1.4.1.999.1")
+	if _, err := device.WriteToUDP(allowed2, taddr); err != nil {
+		t.Fatalf("device send (allowed2): %v", err)
+	}
+
+	drain := time.After(700 * time.Millisecond)
+	gotDenied := false
+	gotAllowed2 := false
+	for !gotAllowed2 {
+		select {
+		case got := <-sinkCh:
+			if bytes.Equal(got, denied) {
+				gotDenied = true
+				t.Error("denied trap reached the sink")
+			} else if bytes.Equal(got, allowed2) {
+				gotAllowed2 = true
+			}
+		case <-drain:
+			t.Fatal("second allowed trap did not reach sink (listener broken?)")
+		}
+	}
+	if gotDenied {
+		t.Fatal("denied trap was forwarded")
 	}
 }
 

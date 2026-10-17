@@ -19,6 +19,7 @@ import (
 	"github.com/GalaxyGorilla/snmp-proxy/internal/cache"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/notifyfilter"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
 	"go.uber.org/zap"
@@ -54,6 +55,7 @@ type ManagerTranslator struct {
 	sess  FrameSink
 	log   *zap.Logger
 	met   *observ.Metrics
+	filtr *notifyfilter.Filter // notification filter (nil = allow all)
 
 	engineMu sync.Mutex
 	remote   *remoteEngine
@@ -73,7 +75,7 @@ type ManagerTranslator struct {
 }
 
 // NewManagerTranslator builds the manager-side translator.
-func NewManagerTranslator(cfg config.ManagerRole, sec config.Security, clock *cache.EngineClock, sess FrameSink, log *zap.Logger, met *observ.Metrics) (*ManagerTranslator, error) {
+func NewManagerTranslator(cfg config.ManagerRole, sec config.Security, clock *cache.EngineClock, sess FrameSink, log *zap.Logger, met *observ.Metrics, filt ...*notifyfilter.Filter) (*ManagerTranslator, error) {
 	// primary profile set is compiled lazily per remote engine (keys are
 	// localized per engine); keep a base compiled set for salt selection.
 	return &ManagerTranslator{
@@ -87,6 +89,7 @@ func NewManagerTranslator(cfg config.ManagerRole, sec config.Security, clock *ca
 		sess:  sess,
 		log:   log,
 		met:   met,
+		filtr: notifyfilter.From(filt...),
 		pend:  make(map[uint16]*mgrPending),
 		stop:  make(chan struct{}),
 	}, nil
@@ -485,6 +488,16 @@ func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 	info, err := msg.Peek(dg)
 	if err != nil {
 		return
+	}
+	if m.filtr != nil && (msg.IsTrap(info.PDUType) || msg.IsInform(info.PDUType)) {
+		oid, ok := msg.TrapOID(dg)
+		if !ok || !m.filtr.Allowed(oid) {
+			if m.met != nil {
+				m.met.NotifsFiltered.Inc()
+			}
+			m.log.Debug("usm manager: notification filtered", zap.String("trap_oid", oid))
+			return
+		}
 	}
 	_, community, pduTLV, err := msg.SplitV1V2c(dg)
 	if err != nil {

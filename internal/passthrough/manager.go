@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/notifyfilter"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
 	"go.uber.org/zap"
@@ -20,10 +22,11 @@ import (
 // configured trap sink. Local devices may also send notifications to
 // TrapListenAddr; those ship across the tunnel.
 type Manager struct {
-	cfg  config.ManagerRole
-	sess *tunnel.Session
-	log  *zap.Logger
-	met  *observ.Metrics
+	cfg   config.ManagerRole
+	sess  *tunnel.Session
+	log   *zap.Logger
+	met   *observ.Metrics
+	filtr *notifyfilter.Filter // notification filter (nil = allow all)
 
 	conn     *net.UDPConn // clear request listener
 	trapConn *net.UDPConn // optional clear trap listener
@@ -48,14 +51,15 @@ type pending struct {
 }
 
 // NewManager creates the manager-side forwarder.
-func NewManager(cfg config.ManagerRole, sess *tunnel.Session, log *zap.Logger, met *observ.Metrics) *Manager {
+func NewManager(cfg config.ManagerRole, sess *tunnel.Session, log *zap.Logger, met *observ.Metrics, filt ...*notifyfilter.Filter) *Manager {
 	return &Manager{
-		cfg:  cfg,
-		sess: sess,
-		log:  log,
-		met:  met,
-		pend: make(map[uint16]*pending),
-		stop: make(chan struct{}),
+		cfg:   cfg,
+		sess:  sess,
+		log:   log,
+		met:   met,
+		filtr: notifyfilter.From(filt...),
+		pend:  make(map[uint16]*pending),
+		stop:  make(chan struct{}),
 	}
 }
 
@@ -259,7 +263,7 @@ func (m *Manager) sinkLoop(ch <-chan *tunnel.Frame) {
 func (m *Manager) serveClearTraps() error {
 	buf := make([]byte, 65536)
 	for {
-		n, _, err := m.trapConn.ReadFromUDP(buf)
+		n, raddr, err := m.trapConn.ReadFromUDP(buf)
 		if err != nil {
 			select {
 			case <-m.stop:
@@ -270,6 +274,21 @@ func (m *Manager) serveClearTraps() error {
 		}
 		payload := make([]byte, n)
 		copy(payload, buf[:n])
+
+		if m.filtr != nil {
+			if info, perr := msg.Peek(payload); perr == nil && (msg.IsTrap(info.PDUType) || msg.IsInform(info.PDUType)) {
+				oid, ok := msg.TrapOID(payload)
+				if !ok || !m.filtr.Allowed(oid) {
+					if m.met != nil {
+						m.met.NotifsFiltered.Inc()
+					}
+					m.log.Debug("notification filtered",
+						zap.String("trap_oid", oid), zap.String("addr", raddr.String()))
+					continue
+				}
+			}
+		}
+
 		corrID := uint16(m.nextID.Add(1))
 		if m.met != nil {
 			m.met.NotifsRelayed.Inc()

@@ -11,12 +11,14 @@ import (
 	"log"
 	"net"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/GalaxyGorilla/snmp-proxy/internal/cache"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/notifyfilter"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/usm"
 	"github.com/gosnmp/gosnmp"
 	"go.uber.org/zap"
@@ -24,7 +26,8 @@ import (
 
 // buildGateway starts a GatewayTranslator on 127.0.0.1:front relaying to
 // 127.0.0.1:agent; trapListen/trapSink enable the trap listener when set.
-func buildGateway(t *testing.T, front, agent int, trapListen, trapSink string) (stop func()) {
+// Optional trailing filters are passed to the translator.
+func buildGateway(t *testing.T, front, agent int, trapListen, trapSink string, filt ...*notifyfilter.Filter) (stop func()) {
 	t.Helper()
 
 	store, err := cache.Open("")
@@ -52,7 +55,7 @@ func buildGateway(t *testing.T, front, agent int, trapListen, trapSink string) (
 		Community:      "realcomm",
 	}}
 
-	tr, err := usm.NewGatewayTranslator(cfg, users, clock, zap.NewNop(), nil)
+	tr, err := usm.NewGatewayTranslator(cfg, users, clock, zap.NewNop(), nil, filt...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,5 +361,115 @@ func TestGatewayTrapDirection(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("wrapped v3 trap never reached the sink")
+	}
+}
+
+// TestGatewayTrapFiltered: with a deny filter for an enterprise prefix,
+// a device trap inside the prefix never reaches the sink while traps
+// outside it do; the listener stays alive for subsequent traps.
+func TestGatewayTrapFiltered(t *testing.T) {
+	const front, agent = 12615, 11715
+	sinkAddr := freeUDPPort(t)
+	trapListen := freeUDPPort(t)
+
+	filt, err := notifyfilter.New("deny", []string{"1.3.6.1.4.1.99"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tl := gosnmp.NewTrapListener()
+	tl.Params = &gosnmp.GoSNMP{
+		Version:       gosnmp.Version3,
+		SecurityModel: gosnmp.UserSecurityModel,
+		MsgFlags:      gosnmp.AuthPriv,
+		SecurityParameters: &gosnmp.UsmSecurityParameters{
+			UserName:                 "proxy",
+			AuthenticationProtocol:   gosnmp.SHA,
+			AuthenticationPassphrase: "authpass",
+			PrivacyProtocol:          gosnmp.AES,
+			PrivacyPassphrase:        "privpass",
+		},
+	}
+	trapGot := make(chan string, 8)
+	tl.OnNewTrap = func(s *gosnmp.SnmpPacket, u *net.UDPAddr) {
+		// Record the snmpTrapOID.0 value (the enterprise-specific trap
+		// OID); gosnmp decodes OID varbinds as dotted strings with a
+		// leading dot.
+		for _, v := range s.Variables {
+			if v.Type == gosnmp.ObjectIdentifier {
+				if oid, ok := v.Value.(string); ok {
+					trapGot <- strings.TrimPrefix(oid, ".")
+					return
+				}
+			}
+		}
+		trapGot <- ""
+	}
+	go func() { _ = tl.Listen(sinkAddr) }()
+	defer tl.Close()
+	select {
+	case <-tl.Listening():
+	case <-time.After(2 * time.Second):
+		t.Fatal("trap listener never came up")
+	}
+
+	stop := buildGateway(t, front, agent, trapListen, sinkAddr, filt)
+	defer stop()
+	waitBound(t, trapListen)
+
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	laddr, _ := net.ResolveUDPAddr("udp", trapListen)
+
+	// device fires a clear v1 enterpriseSpecific(6) trap
+	sendTrap := func(ent string, spec int32) {
+		t.Helper()
+		trapPDU := msg.BuildV1Trap(msg.V1Trap{
+			Enterprise: mustOID(t, ent),
+			AgentAddr:  []byte{10, 0, 0, 1},
+			Generic:    6,
+			Specific:   spec,
+			Timestamp:  12345,
+			Varbinds:   []byte{},
+		})
+		trap, err := msg.BuildV1V2c(msg.Version1, []byte("devicecomm"), trapPDU)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.WriteTo(trap, laddr); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// 1. Allowed trap arrives (enterprise outside the deny prefix).
+	sendTrap("1.3.6.1.4.1.999", 1)
+	select {
+	case got := <-trapGot:
+		if want := "1.3.6.1.4.1.999.0.1"; got != want {
+			t.Fatalf("first trap OID = %q, want %q", got, want)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("allowed trap never reached the sink")
+	}
+
+	// 2. Denied trap never arrives; 3. a second allowed trap arrives.
+	sendTrap("1.3.6.1.4.1.99", 7)
+	sendTrap("1.3.6.1.4.1.999", 2)
+	drain := time.After(700 * time.Millisecond)
+	for {
+		select {
+		case got := <-trapGot:
+			if got == "1.3.6.1.4.1.99.0.7" {
+				t.Fatal("denied trap reached the sink")
+			}
+			if got == "1.3.6.1.4.1.999.0.2" {
+				return // listener alive, denied trap absent
+			}
+		case <-drain:
+			t.Fatal("second allowed trap never reached the sink (listener broken?)")
+		}
 	}
 }

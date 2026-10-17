@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/GalaxyGorilla/snmp-proxy/internal/notifyfilter"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
 	"gopkg.in/yaml.v3"
 )
@@ -151,6 +152,22 @@ type Security struct {
 	TSMIdentities []string `yaml:"tsm_identities"`
 }
 
+// NotifyFilter configures OID-based notification filtering at the relay
+// ingress points: notifications whose trap OID does not pass the filter
+// are dropped before they are relayed.
+type NotifyFilter struct {
+	// Action is "allow" (forward only matching OIDs, default) or "deny"
+	// (drop matching OIDs).
+	Action string `yaml:"action"`
+	// Oids is the list of dotted OID prefixes (arc-boundary match).
+	Oids []string `yaml:"oids"`
+}
+
+// Notifications groups notification handling settings.
+type Notifications struct {
+	Filter *NotifyFilter `yaml:"filter"`
+}
+
 // UserCfg is one USM user: protocols + passphrases. On the agent side,
 // Community maps authenticated requests to the v1/v2c community used
 // toward the real agent.
@@ -165,12 +182,23 @@ type UserCfg struct {
 
 // Config is the full per-instance configuration.
 type Config struct {
-	Role     Role        `yaml:"-"`
-	Tunnel   Tunnel      `yaml:"tunnel"`
-	Manager  ManagerRole `yaml:"manager"`
-	Agent    AgentRole   `yaml:"agent"`
-	Gateway  GatewayRole `yaml:"gateway"`
-	Security Security    `yaml:"security"`
+	Role          Role          `yaml:"-"`
+	Tunnel        Tunnel        `yaml:"tunnel"`
+	Manager       ManagerRole   `yaml:"manager"`
+	Agent         AgentRole     `yaml:"agent"`
+	Gateway       GatewayRole   `yaml:"gateway"`
+	Security      Security      `yaml:"security"`
+	Notifications Notifications `yaml:"notifications"`
+}
+
+// TrapFilter builds the notification filter from the configuration. It
+// returns nil (allow everything) when no filter is configured.
+func (c *Config) TrapFilter() (*notifyfilter.Filter, error) {
+	if c.Notifications.Filter == nil {
+		return nil, nil
+	}
+	f := c.Notifications.Filter
+	return notifyfilter.New(f.Action, f.Oids)
 }
 
 // Defaults fills unset fields with sane values.
@@ -197,6 +225,9 @@ func (c *Config) Defaults() {
 
 // Validate checks the configuration for the configured role.
 func (c *Config) Validate() error {
+	if _, err := c.TrapFilter(); err != nil {
+		return fmt.Errorf("notifications.filter: %w", err)
+	}
 	// Gateway role: single-box gateway — no tunnel. The front leg
 	// terminates SNMP security directly from third-party clients:
 	// usm-gateway (plain-UDP SNMPv3 USM) or tsm-gateway (raw SNMP-over-

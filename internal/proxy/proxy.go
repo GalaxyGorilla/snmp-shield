@@ -91,13 +91,21 @@ func runManager(ctx context.Context, opts Options, met *observ.Metrics) error {
 	case "usm-translate":
 		return runManagerUSM(ctx, opts, met, sess)
 	case "tsm":
-		tr, err := tsm.NewManagerTranslator(opts.Config.Manager, opts.Config.Security, sess, opts.Log, met)
+		filt, ferr := opts.Config.TrapFilter()
+		if ferr != nil {
+			return ferr
+		}
+		tr, err := tsm.NewManagerTranslator(opts.Config.Manager, opts.Config.Security, sess, opts.Log, met, filt)
 		if err != nil {
 			return err
 		}
 		return tr.Run(ctx.Done())
 	default:
-		mgr := passthrough.NewManager(opts.Config.Manager, sess, opts.Log, met)
+		filt, ferr := opts.Config.TrapFilter()
+		if ferr != nil {
+			return ferr
+		}
+		mgr := passthrough.NewManager(opts.Config.Manager, sess, opts.Log, met, filt)
 		return mgr.Run(ctx)
 	}
 }
@@ -116,7 +124,11 @@ func runManagerUSM(ctx context.Context, opts Options, met *observ.Metrics, sess 
 	if err != nil {
 		return err
 	}
-	tr, terr := usm.NewManagerTranslator(opts.Config.Manager, opts.Config.Security, clock, sess, opts.Log, met)
+	filt, ferr := opts.Config.TrapFilter()
+	if ferr != nil {
+		return ferr
+	}
+	tr, terr := usm.NewManagerTranslator(opts.Config.Manager, opts.Config.Security, clock, sess, opts.Log, met, filt)
 	if terr != nil {
 		return terr
 	}
@@ -207,7 +219,12 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics) error {
 					rerr = tr.Run(ctx.Done())
 				}
 			} else {
-				agt := passthrough.NewAgent(opts.Config.Agent, sess, opts.Log, met)
+				filt, ferr := opts.Config.TrapFilter()
+				if ferr != nil {
+					opts.Log.Error("notification filter", zap.Error(ferr))
+					return
+				}
+				agt := passthrough.NewAgent(opts.Config.Agent, sess, opts.Log, met, filt)
 				rerr = agt.Run(ctx)
 			}
 			if rerr != nil {
@@ -229,6 +246,10 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics) error {
 //   - tsm-gateway: raw DTLS front leg (RFC 6353, one SNMP datagram per
 //     DTLS record, no frame layer); the handshake is the authentication.
 func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
+	filt, ferr := opts.Config.TrapFilter()
+	if ferr != nil {
+		return ferr
+	}
 	switch opts.Config.Security.Mode {
 	case "tsm-gateway":
 		lcfg := tunnel.ListenerConfig{
@@ -238,7 +259,7 @@ func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
 			KeyFile:  opts.Config.Tunnel.KeyFile,
 			Insecure: opts.Config.Tunnel.InsecureSkipVerify,
 		}
-		gw, err := tsm.NewTSMGateway(opts.Config.Gateway, opts.Config.Security, lcfg, opts.Log, met)
+		gw, err := tsm.NewTSMGateway(opts.Config.Gateway, opts.Config.Security, lcfg, opts.Log, met, filt)
 		if err != nil {
 			return err
 		}
@@ -260,7 +281,7 @@ func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
 		if len(users) == 0 {
 			return fmt.Errorf("security.users: usm-gateway needs at least one user")
 		}
-		tr, terr := usm.NewGatewayTranslator(opts.Config.Gateway, users, clock, opts.Log, met)
+		tr, terr := usm.NewGatewayTranslator(opts.Config.Gateway, users, clock, opts.Log, met, filt)
 		if terr != nil {
 			return terr
 		}

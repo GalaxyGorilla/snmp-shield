@@ -107,6 +107,10 @@ func runRole(role string, args []string) int {
 	trapListen := fs.String("trap-listen", "", "clear trap listener ip:port (optional, both roles)")
 	trapSink := fs.String("trap-sink", "", "trap sink ip:port (manager role: where tunnel notifications are delivered; agent role: local sink for tunnel traps)")
 
+	// direct-flags mode: notification filtering
+	filterAction := fs.String("filter-action", "allow", "notification filter action: allow or deny")
+	filterOID := fs.StringArray("filter-oid", nil, "notification filter OID prefix (repeatable, e.g. --filter-oid 1.3.6.1.4.1.8072)")
+
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -137,23 +141,25 @@ func runRole(role string, args []string) int {
 		}
 	} else {
 		cfg, err = flagsConfig(r, flagsOpts{
-			tunnelMode:  *tunnelMode,
-			tunnelAddr:  *tunnelAddr,
-			psk:         *psk,
-			pskIdentity: *pskIdentity,
-			pskSuites:   *pskSuites,
-			insecure:    *insecure,
-			secMode:     *secMode,
-			authPass:    *authPass,
-			privPass:    *privPass,
-			caFile:      *caFile,
-			certFile:    *certFile,
-			keyFile:     *keyFile,
-			listen:      *listen,
-			agent:       *agent,
-			community:   *community,
-			trapListen:  *trapListen,
-			trapSink:    *trapSink,
+			tunnelMode:   *tunnelMode,
+			tunnelAddr:   *tunnelAddr,
+			psk:          *psk,
+			pskIdentity:  *pskIdentity,
+			pskSuites:    *pskSuites,
+			insecure:     *insecure,
+			secMode:      *secMode,
+			authPass:     *authPass,
+			privPass:     *privPass,
+			caFile:       *caFile,
+			certFile:     *certFile,
+			keyFile:      *keyFile,
+			listen:       *listen,
+			agent:        *agent,
+			community:    *community,
+			trapListen:   *trapListen,
+			trapSink:     *trapSink,
+			filterAction: *filterAction,
+			filterOids:   *filterOID,
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
@@ -185,23 +191,34 @@ func runRole(role string, args []string) int {
 // flagsOpts carries the direct-flag values for building a Config without
 // a YAML file.
 type flagsOpts struct {
-	tunnelMode  string
-	tunnelAddr  string
-	psk         string
-	pskIdentity string
-	pskSuites   string
-	insecure    bool
-	secMode     string
-	authPass    string
-	privPass    string
-	caFile      string
-	certFile    string
-	keyFile     string
-	listen      string
-	agent       string
-	community   string
-	trapListen  string
-	trapSink    string
+	tunnelMode   string
+	tunnelAddr   string
+	psk          string
+	pskIdentity  string
+	pskSuites    string
+	insecure     bool
+	secMode      string
+	authPass     string
+	privPass     string
+	caFile       string
+	certFile     string
+	keyFile      string
+	listen       string
+	agent        string
+	community    string
+	trapListen   string
+	trapSink     string
+	filterAction string
+	filterOids   []string
+}
+
+// trapFilter builds the config Notifications filter from flags (nil when
+// no --filter-oid is given).
+func trapFilter(o flagsOpts) (*config.NotifyFilter, error) {
+	if len(o.filterOids) == 0 {
+		return nil, nil
+	}
+	return &config.NotifyFilter{Action: o.filterAction, Oids: o.filterOids}, nil
 }
 
 // flagsConfig assembles a validated Config from direct flags (plug-and-play
@@ -257,6 +274,12 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 				CertFile: o.certFile,
 				KeyFile:  o.keyFile,
 			}
+		}
+		// Notification filtering (gateway role, flags mode).
+		if filt, ferr := trapFilter(o); ferr != nil {
+			return nil, ferr
+		} else if filt != nil {
+			cfg.Notifications = config.Notifications{Filter: filt}
 		}
 		cfg.Defaults()
 		if err := cfg.Validate(); err != nil {
@@ -328,6 +351,12 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 		}
 	}
 
+	// Notification filtering (both roles, flags mode).
+	if filt, ferr := trapFilter(o); ferr != nil {
+		return nil, ferr
+	} else if filt != nil {
+		cfg.Notifications = config.Notifications{Filter: filt}
+	}
 	cfg.Defaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -363,6 +392,10 @@ Usage (gateway, single box — no second proxy, standard clients):
 Other commands:
   snmp-proxy genpsk     print a fresh random pre-shared key (hex)
   snmp-proxy version
+
+Notification filtering (flags mode): --filter-oid <prefix> (repeatable)
+with --filter-action allow|deny drops notifications whose trap OID does
+not pass the filter before they are relayed.
 
 The manager instance listens for clear SNMP from managers and dials the
 secured tunnel; the agent instance listens on the tunnel and forwards to

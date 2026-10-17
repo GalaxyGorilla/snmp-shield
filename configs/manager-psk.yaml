@@ -26,3 +26,14 @@ manager:
   trap_sink_addr: "127.0.0.1:10162"
   # Optional: also accept traps from local devices and relay them.
   trap_listen_addr: ":10163"
+
+# Optional notification filtering at the relay ingress: notifications
+# whose trap OID does not pass the filter are dropped before they are
+# relayed. action: "allow" (forward only matching OIDs) or "deny" (drop
+# matching OIDs); matching is prefix-based on arc boundaries.
+# notifications:
+#   filter:
+#     action: deny
+#     oids:
+#       - "1.3.6.1.4.1.99"      # drop this enterprise's traps
+#       - "1.3.6.1.6.3.1.1.5.2" # drop coldStart-ish standard traps

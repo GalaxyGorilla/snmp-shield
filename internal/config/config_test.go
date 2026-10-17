@@ -193,3 +193,155 @@ func TestLoadBadYAML(t *testing.T) {
 		t.Error("bad yaml accepted")
 	}
 }
+
+func TestTrapFilterFromConfig(t *testing.T) {
+	path := writeTemp(t, `
+tunnel:
+  mode: dtls
+  dial_addr: "10.0.0.1:10162"
+  psk: "hex:00112233445566778899aabbccddeeff"
+manager:
+  listen_addr: ":161"
+notifications:
+  filter:
+    action: deny
+    oids:
+      - "1.3.6.1.6.3.1.1.5.2"
+      - "1.3.6.1.4.1.8072"
+`)
+	cfg, err := Load(path, RoleManager)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	filt, err := cfg.TrapFilter()
+	if err != nil {
+		t.Fatalf("TrapFilter: %v", err)
+	}
+	if filt == nil {
+		t.Fatal("TrapFilter returned nil for configured filter")
+	}
+	if filt.Allowed("1.3.6.1.6.3.1.1.5.2") {
+		t.Error("deny filter must not allow configured OID")
+	}
+	if filt.Allowed("1.3.6.1.4.1.8072.999") {
+		t.Error("deny filter must not allow child of configured OID")
+	}
+	if !filt.Allowed("1.3.6.1.6.3.1.1.5.1") {
+		t.Error("deny filter must allow non-matching OID")
+	}
+}
+
+func TestTrapFilterNilWhenUnset(t *testing.T) {
+	path := writeTemp(t, `
+tunnel:
+  mode: dtls
+  dial_addr: "10.0.0.1:10162"
+  psk: "hex:00112233445566778899aabbccddeeff"
+manager:
+  listen_addr: ":161"
+`)
+	cfg, err := Load(path, RoleManager)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	filt, err := cfg.TrapFilter()
+	if err != nil {
+		t.Fatalf("TrapFilter: %v", err)
+	}
+	if filt != nil {
+		t.Error("TrapFilter must be nil when no filter is configured")
+	}
+}
+
+func TestTrapFilterInvalidConfig(t *testing.T) {
+	cases := []struct {
+		name    string
+		yaml    string
+		wantErr bool
+	}{
+		{
+			"bad action",
+			`
+tunnel:
+  mode: dtls
+  dial_addr: "10.0.0.1:10162"
+  psk: "hex:00112233445566778899aabbccddeeff"
+manager:
+  listen_addr: ":161"
+notifications:
+  filter:
+    action: drop
+    oids: ["1.3.6.1"]
+`,
+			true,
+		},
+		{
+			"empty oids",
+			`
+tunnel:
+  mode: dtls
+  dial_addr: "10.0.0.1:10162"
+  psk: "hex:00112233445566778899aabbccddeeff"
+manager:
+  listen_addr: ":161"
+notifications:
+  filter:
+    action: allow
+    oids: []
+`,
+			true,
+		},
+		{
+			"invalid oid",
+			`
+tunnel:
+  mode: dtls
+  dial_addr: "10.0.0.1:10162"
+  psk: "hex:00112233445566778899aabbccddeeff"
+manager:
+  listen_addr: ":161"
+notifications:
+  filter:
+    action: allow
+    oids: ["not-an-oid"]
+`,
+			true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeTemp(t, tc.yaml)
+			_, err := Load(path, RoleManager)
+			if tc.wantErr && err == nil {
+				t.Errorf("%s: expected error, got nil", tc.name)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("%s: unexpected error: %v", tc.name, err)
+			}
+		})
+	}
+}
+
+func TestTrapFilterValidatesForGatewayRole(t *testing.T) {
+	// The filter validation runs before the gateway branch returns early.
+	path := writeTemp(t, `
+gateway:
+  listen_addr: ":161"
+  agent_addr: "127.0.0.1:161"
+security:
+  mode: usm-gateway
+  users:
+    - name: proxy
+      auth_protocol: sha
+      auth_passphrase: authpass
+      priv_protocol: aes
+      priv_passphrase: privpass
+notifications:
+  filter:
+    action: bogus
+    oids: ["1.3.6.1"]
+`)
+	if _, err := Load(path, RoleGateway); err == nil {
+		t.Error("invalid filter action must be rejected for gateway role")
+	}
+}

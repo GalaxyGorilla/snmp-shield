@@ -41,6 +41,7 @@ type Metrics struct {
 	ReqForwarded   prometheus.Counter // SNMP requests forwarded
 	ReqErrors      prometheus.Counter // forwarding errors (timeout, dial, parse)
 	NotifsRelayed  prometheus.Counter // traps/informs relayed
+	NotifsFiltered prometheus.Counter // notifications dropped by the configured filter
 	DropTotal      prometheus.Counter // dropped datagrams/frames (all causes)
 	Reconnects     prometheus.Counter // tunnel reconnects
 	TunnelUp       prometheus.Gauge   // 1 when the tunnel session is up
@@ -57,6 +58,7 @@ func NewMetrics() *Metrics {
 	m.ReqForwarded = mustCounter(m.reg, "snmp_proxy_requests_forwarded_total", "SNMP requests forwarded end to end.")
 	m.ReqErrors = mustCounter(m.reg, "snmp_proxy_request_errors_total", "SNMP request forwarding errors.")
 	m.NotifsRelayed = mustCounter(m.reg, "snmp_proxy_notifications_relayed_total", "Traps/informs relayed.")
+	m.NotifsFiltered = mustCounter(m.reg, "snmp_proxy_notifications_filtered_total", "Notifications dropped by the configured filter.")
 	m.DropTotal = mustCounter(m.reg, "snmp_proxy_drops_total", "Datagrams or frames dropped.")
 	m.Reconnects = mustCounter(m.reg, "snmp_proxy_tunnel_reconnects_total", "Tunnel reconnections.")
 	m.TunnelUp = prometheus.NewGauge(prometheus.GaugeOpts{

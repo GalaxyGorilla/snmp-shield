@@ -28,3 +28,13 @@ tunnel:
   ca_file: "certs/ca.crt"
   cert_file: "certs/server.crt"
   key_file: "certs/server.key"
+
+# Optional notification filtering: notifications whose trap OID does not
+# pass the filter are dropped before they are wrapped and delivered.
+# action: "allow" (forward only matching OIDs) or "deny" (drop matching
+# OIDs); matching is prefix-based on arc boundaries.
+# notifications:
+#   filter:
+#     action: allow
+#     oids:
+#       - "1.3.6.1.4.1.8072"  # forward only this enterprise's traps

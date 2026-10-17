@@ -13,6 +13,7 @@ import (
 
 	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/notifyfilter"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
 	"go.uber.org/zap"
@@ -22,10 +23,11 @@ import (
 // agent responses -> tunnel RESP frames; device notifications ->
 // tunnel NOTIF frames; informs wait for their response.
 type Agent struct {
-	cfg  config.AgentRole
-	sess *tunnel.Session
-	log  *zap.Logger
-	met  *observ.Metrics
+	cfg   config.AgentRole
+	sess  *tunnel.Session
+	log   *zap.Logger
+	met   *observ.Metrics
+	filtr *notifyfilter.Filter // notification filter (nil = allow all)
 
 	agentConn *net.UDPConn // socket toward the real agent
 	trapConn  *net.UDPConn // clear notification listener for devices
@@ -57,7 +59,7 @@ type notifPend struct {
 }
 
 // NewAgent creates the agent-side forwarder.
-func NewAgent(cfg config.AgentRole, sess *tunnel.Session, log *zap.Logger, met *observ.Metrics) *Agent {
+func NewAgent(cfg config.AgentRole, sess *tunnel.Session, log *zap.Logger, met *observ.Metrics, filt ...*notifyfilter.Filter) *Agent {
 	aaddr, err := net.ResolveUDPAddr("udp", cfg.AgentAddr)
 	if err != nil {
 		// Deferred to Run(); the config validation already required it.
@@ -68,6 +70,7 @@ func NewAgent(cfg config.AgentRole, sess *tunnel.Session, log *zap.Logger, met *
 		sess:         sess,
 		log:          log,
 		met:          met,
+		filtr:        notifyfilter.From(filt...),
 		reqPend:      make(map[uint16]*reqPend),
 		reqIDs:       make(map[int32][]uint16),
 		notifPend:    make(map[uint16]*notifPend),
@@ -260,7 +263,7 @@ func (a *Agent) sendRESP(corrID uint16, payload []byte) {
 func (a *Agent) serveClearTraps() error {
 	buf := make([]byte, 65536)
 	for {
-		n, _, err := a.trapConn.ReadFromUDP(buf)
+		n, raddr, err := a.trapConn.ReadFromUDP(buf)
 		if err != nil {
 			select {
 			case <-a.stop:
@@ -274,6 +277,17 @@ func (a *Agent) serveClearTraps() error {
 
 		info, perr := msg.Peek(payload)
 		isInform := perr == nil && msg.IsInform(info.PDUType)
+		if a.filtr != nil && (isInform || (perr == nil && msg.IsTrap(info.PDUType))) {
+			oid, ok := msg.TrapOID(payload)
+			if !ok || !a.filtr.Allowed(oid) {
+				if a.met != nil {
+					a.met.NotifsFiltered.Inc()
+				}
+				a.log.Debug("notification filtered",
+					zap.String("trap_oid", oid), zap.String("addr", raddr.String()))
+				continue
+			}
+		}
 		flags := uint8(0)
 		corrID := uint16(a.nextID.Add(1))
 		if isInform {

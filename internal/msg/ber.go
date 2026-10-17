@@ -2,7 +2,11 @@
 // These build TLV elements for the v1/v2c <-> v3 translation codec.
 package msg
 
-import "encoding/binary"
+import (
+	"encoding/binary"
+	"strconv"
+	"strings"
+)
 
 // AppendLength appends a BER length octet string for l, using long form
 // when l >= 128 (short form otherwise).
@@ -161,4 +165,47 @@ func parseUint(s string) (uint64, error) {
 		v = v*10 + uint64(s[i]-'0')
 	}
 	return v, nil
+}
+
+// DecodeOID converts raw BER sub-identifier bytes (as produced by
+// EncodeOID, or extracted from a varbind) to a dotted OID string. The
+// combined first arc (40*x+y) is split back into x.y.
+func DecodeOID(ber []byte) (string, error) {
+	if len(ber) == 0 {
+		return "", errShortOID
+	}
+	arcs := make([]uint64, 0, len(ber)+1)
+	var v uint64
+	for i, b := range ber {
+		v = v<<7 | uint64(b&0x7f)
+		if b&0x80 == 0 {
+			arcs = append(arcs, v)
+			v = 0
+		} else if i == len(ber)-1 {
+			// truncated sub-identifier: continuation with no terminator
+			return "", errBadOID
+		}
+	}
+	if len(arcs) < 1 {
+		return "", errShortOID
+	}
+	// split the combined first arc back into x.y
+	var head []uint64
+	switch first := arcs[0]; {
+	case first < 40:
+		head = []uint64{0, first}
+	case first < 80:
+		head = []uint64{1, first - 40}
+	default:
+		head = []uint64{2, first - 80}
+	}
+	arcs = append(head, arcs[1:]...)
+	var sb strings.Builder
+	for i, a := range arcs {
+		if i > 0 {
+			sb.WriteByte('.')
+		}
+		sb.WriteString(strconv.FormatUint(a, 10))
+	}
+	return sb.String(), nil
 }

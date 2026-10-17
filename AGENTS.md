@@ -61,7 +61,8 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | USM gateway mode (standard v3 manager → single proxy → legacy agent) | done (tested, gosnmp + net-snmp `scripts/interop-gateway.sh`, incl. trap direction) |
 | TSM gateway mode (RFC 6353 SNMP-over-DTLS front leg) | done (tested, Go harness + net-snmp `scripts/interop-gateway-tsm.sh`, incl. trap direction) |
 | PSK ciphersuite variety (`tunnel.psk_ciphersuites`: aes128-ccm-8 default, aes256-ccm-8, aes128-ccm, aes128-gcm, aes128-cbc; YAML + `--psk-ciphersuites` flag) | done (tested, unit + per-suite loopback handshakes + mismatch rejection) |
-| Notify filtering, HA | backlog |
+| Notification filtering (`notifications.filter`: allow/deny OID prefixes; YAML + `--filter-oid`/`--filter-action` flags) | done (tested, unit + e2e: passthrough relay, USM gateway w/ gosnmp TrapListener; config validation) |
+| HA | backlog |
 
 ### Gateway modes (single proxy, no second proxy required)
 
@@ -206,6 +207,7 @@ cmd/snmp-proxy/           main package; role via subcommand (manager|agent|gatew
 internal/config/          YAML config + flag overrides
 internal/proxy/           shared proxy wiring
 internal/passthrough/     opaque forwarding of clear SNMP
+internal/notifyfilter/    notification allow/deny OID filtering
 internal/usm/             USM translate mode + gateway mode + profiles
 internal/tsm/             TSM mode + TSM gateway mode
 internal/tunnel/          DTLS/TLS tunnel dialer/listener (+ PSK ciphersuite mapping)
@@ -255,7 +257,8 @@ Flags: `--tunnel-mode` (dtls|tls), `--psk-identity`, `--psk-ciphersuites`
 (comma-separated DTLS PSK suites, most preferred first: aes128-ccm-8 |
 aes256-ccm-8 | aes128-ccm | aes128-gcm | aes128-cbc; default
 aes128-ccm-8), `--insecure`, `--security` (usm-translate|passthrough),
-`--trap-listen`, `--trap-sink`.
+`--trap-listen`, `--trap-sink`, `--filter-oid` (repeatable OID prefix) +
+`--filter-action` (allow|deny; notification filtering, see §7).
 Both sides must share `--psk`/`--auth-pass`/`--priv-pass` and at least
 one `--psk-ciphersuites` entry. Default security
 in flags mode is usm-translate (user 'proxy', SHA, AES).
@@ -361,6 +364,25 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   increments boots per start (persisted JSON in `security.engine_store` —
   REQUIRED, boots must never decrease), engineTime = seconds since start.
   Inbound timeliness per RFC 3414 §3.2 (±150 s window, anti-rollback).
+- **Notification filtering** (`internal/notifyfilter`, `notifications.filter`):
+  one filter (action allow|deny + dotted OID prefixes) applies at the
+  **clear-notification ingress points only** (the 6 `handleClearTrap`/
+  `serveClearTraps` sites: passthrough agent+manager, usm
+  translate_manager+gateway, tsm manager+gateway); tunnel NOTIF→sink
+  delivery paths are NOT re-filtered (already filtered at the far-side
+  ingress; agent-side usm/tsm translators have no clear trap listeners).
+  Matching is prefix-based on arc boundaries ("1.3.6.1.4.1.99" does NOT
+  match "1.3.6.1.4.1.9999"); the trap OID comes from `msg.TrapOID`:
+  v2c reads the snmpTrapOID.0 varbind, v1 traps derive the RFC 2576
+  translated form (enterprise.0.specific for generic 6, else
+  snmpTraps.(generic+1)) — the same OID shape the relay itself produces,
+  so filters written for v3 traps also match v1 traps after translation.
+  Extraction failure (no snmpTrapOID.0, malformed) matches nothing:
+  allow→drop, deny→forward. Non-notification datagrams on trap ports
+  pass unchanged. Constructors take a variadic filter (`From(filt...)`),
+  keeping existing call sites compiling. Dropped notifications increment
+  `snmp_proxy_notifications_filtered_total`. Validation runs in
+  `Config.Validate` before the gateway branch (which returns early).
 - gosnmp quirks (interop oracle; learned the hard way):
   - gosnmp encrypts the **full scopedPDU TLV** (outer SEQUENCE header
     included) and expects the same from us — `msg.BuildV3` mirrors this.
@@ -384,6 +406,9 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
     MsgFlags, and decrypts with wire boots/time/salt. Attach
     `Params.Logger = gosnmp.NewLogger(...)` when debugging — silent
     rejects otherwise.
+  - In `TrapListener.OnNewTrap` callbacks, OID varbinds decode
+    `v.Value` as a **dotted string with a leading dot** (".1.3.6.1..."),
+    NOT `[]string` — type-asserting `[]string` panics the callback.
 - net-snmp quirks (stricter than gosnmp; learned via
   `scripts/interop-gateway.sh`):
   - **INTEGER encoding must be minimal two's-complement**: a positive

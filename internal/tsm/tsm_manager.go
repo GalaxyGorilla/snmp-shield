@@ -19,6 +19,7 @@ import (
 
 	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/notifyfilter"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
 	"go.uber.org/zap"
@@ -184,11 +185,12 @@ type informPending struct {
 // managers is wrapped in v3 TSM frames over the tunnel; device
 // notifications arriving from the tunnel are delivered to the sink.
 type ManagerTranslator struct {
-	cfg  config.ManagerRole
-	sec  config.Security
-	sess FrameSink
-	log  *zap.Logger
-	met  *observ.Metrics
+	cfg   config.ManagerRole
+	sec   config.Security
+	sess  FrameSink
+	log   *zap.Logger
+	met   *observ.Metrics
+	filtr *notifyfilter.Filter // notification filter (nil = allow all)
 
 	msgID atomic.Int32
 	reqID atomic.Int32
@@ -205,13 +207,14 @@ type ManagerTranslator struct {
 }
 
 // NewManagerTranslator builds the manager-side TSM engine.
-func NewManagerTranslator(cfg config.ManagerRole, sec config.Security, sess FrameSink, log *zap.Logger, met *observ.Metrics) (*ManagerTranslator, error) {
+func NewManagerTranslator(cfg config.ManagerRole, sec config.Security, sess FrameSink, log *zap.Logger, met *observ.Metrics, filt ...*notifyfilter.Filter) (*ManagerTranslator, error) {
 	return &ManagerTranslator{
 		cfg:    cfg,
 		sec:    sec,
 		sess:   sess,
 		log:    log,
 		met:    met,
+		filtr:  notifyfilter.From(filt...),
 		pend:   make(map[uint16]*managerPending),
 		inform: make(map[uint16]*informPending),
 		stop:   make(chan struct{}),
@@ -418,6 +421,16 @@ func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 	info, err := msg.Peek(dg)
 	if err != nil || !msg.IsTrap(info.PDUType) && !msg.IsInform(info.PDUType) {
 		return
+	}
+	if m.filtr != nil {
+		oid, ok := msg.TrapOID(dg)
+		if !ok || !m.filtr.Allowed(oid) {
+			if m.met != nil {
+				m.met.NotifsFiltered.Inc()
+			}
+			m.log.Debug("tsm manager: notification filtered", zap.String("trap_oid", oid))
+			return
+		}
 	}
 	_, _, pduTLV, err := msg.SplitV1V2c(dg)
 	if err != nil {

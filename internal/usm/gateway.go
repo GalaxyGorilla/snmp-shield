@@ -22,6 +22,7 @@ import (
 	"github.com/GalaxyGorilla/snmp-proxy/internal/cache"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/notifyfilter"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
 	"go.uber.org/zap"
 )
@@ -40,6 +41,7 @@ type GatewayTranslator struct {
 	clock *cache.EngineClock
 	log   *zap.Logger
 	met   *observ.Metrics
+	filtr *notifyfilter.Filter // notification filter (nil = allow all)
 
 	msgID atomic.Uint32
 
@@ -65,7 +67,7 @@ type gwPending struct {
 }
 
 // NewGatewayTranslator builds the single-box gateway translator.
-func NewGatewayTranslator(cfg config.GatewayRole, users []Profile, clock *cache.EngineClock, log *zap.Logger, met *observ.Metrics) (*GatewayTranslator, error) {
+func NewGatewayTranslator(cfg config.GatewayRole, users []Profile, clock *cache.EngineClock, log *zap.Logger, met *observ.Metrics, filt ...*notifyfilter.Filter) (*GatewayTranslator, error) {
 	prof, err := NewProfiles(users, clock.EngineID())
 	if err != nil {
 		return nil, err
@@ -81,6 +83,7 @@ func NewGatewayTranslator(cfg config.GatewayRole, users []Profile, clock *cache.
 		clock: clock,
 		log:   log,
 		met:   met,
+		filtr: notifyfilter.From(filt...),
 		pend:  make(map[int32]*gwPending),
 		stop:  make(chan struct{}),
 	}, nil
@@ -522,6 +525,16 @@ func (g *GatewayTranslator) handleClearTrap(dg []byte) {
 	info, err := msg.Peek(dg)
 	if err != nil {
 		return
+	}
+	if g.filtr != nil && (msg.IsTrap(info.PDUType) || msg.IsInform(info.PDUType)) {
+		oid, ok := msg.TrapOID(dg)
+		if !ok || !g.filtr.Allowed(oid) {
+			if g.met != nil {
+				g.met.NotifsFiltered.Inc()
+			}
+			g.log.Debug("usm gateway: notification filtered", zap.String("trap_oid", oid))
+			return
+		}
 	}
 	_, community, pduTLV, err := msg.SplitV1V2c(dg)
 	if err != nil {

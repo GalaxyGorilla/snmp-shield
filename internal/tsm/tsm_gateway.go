@@ -24,6 +24,7 @@ import (
 
 	"github.com/GalaxyGorilla/snmp-proxy/internal/config"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/msg"
+	"github.com/GalaxyGorilla/snmp-proxy/internal/notifyfilter"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/observ"
 	"github.com/GalaxyGorilla/snmp-proxy/internal/tunnel"
 	"github.com/pion/dtls/v3"
@@ -61,10 +62,11 @@ type gwInformPending struct {
 // directly from TSM-capable managers; authenticated requests are relayed
 // as clear v1/v2c to the legacy agent.
 type TSMGateway struct {
-	cfg config.GatewayRole
-	sec config.Security
-	log *zap.Logger
-	met *observ.Metrics
+	cfg   config.GatewayRole
+	sec   config.Security
+	log   *zap.Logger
+	met   *observ.Metrics
+	filtr *notifyfilter.Filter // notification filter (nil = allow all)
 
 	// identity allow-list (from security.tsm_identities / users)
 	allowed []string
@@ -95,7 +97,7 @@ type TSMGateway struct {
 // NewTSMGateway builds the single-box TSM gateway. The identity
 // allow-list comes from security.tsm_identities, falling back to the
 // configured user names.
-func NewTSMGateway(cfg config.GatewayRole, sec config.Security, lcfg tunnel.ListenerConfig, log *zap.Logger, met *observ.Metrics) (*TSMGateway, error) {
+func NewTSMGateway(cfg config.GatewayRole, sec config.Security, lcfg tunnel.ListenerConfig, log *zap.Logger, met *observ.Metrics, filt ...*notifyfilter.Filter) (*TSMGateway, error) {
 	allowed := sec.TSMIdentities
 	if len(allowed) == 0 {
 		for _, u := range sec.Users {
@@ -108,6 +110,7 @@ func NewTSMGateway(cfg config.GatewayRole, sec config.Security, lcfg tunnel.List
 		lcfg:    lcfg,
 		log:     log,
 		met:     met,
+		filtr:   notifyfilter.From(filt...),
 		allowed: allowed,
 		pend:    make(map[int32]*tsmGwPending),
 		inform:  make(map[int32]*gwInformPending),
@@ -408,6 +411,16 @@ func (g *TSMGateway) handleClearTrap(dg []byte, src net.Addr) {
 	info, err := msg.Peek(dg)
 	if err != nil || !msg.IsTrap(info.PDUType) && !msg.IsInform(info.PDUType) {
 		return
+	}
+	if g.filtr != nil {
+		oid, ok := msg.TrapOID(dg)
+		if !ok || !g.filtr.Allowed(oid) {
+			if g.met != nil {
+				g.met.NotifsFiltered.Inc()
+			}
+			g.log.Debug("tsm gateway: notification filtered", zap.String("trap_oid", oid))
+			return
+		}
 	}
 	_, _, pduTLV, err := msg.SplitV1V2c(dg)
 	if err != nil {

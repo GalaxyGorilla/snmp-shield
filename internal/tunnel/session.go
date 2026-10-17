@@ -188,16 +188,22 @@ func (s *Session) closeDone() {
 // readDeadline returns the per-read timeout: 3×keepalive when tuning is
 // set, else the legacy 90s.
 func (s *Session) readDeadline() time.Duration {
-	if s.keepalive > 0 {
-		return s.keepalive * deadlinePerKeepalive
+	s.mu.Lock()
+	keepalive := s.keepalive
+	s.mu.Unlock()
+	if keepalive > 0 {
+		return keepalive * deadlinePerKeepalive
 	}
 	return legacyReadDeadline
 }
 
 // backoffCap returns the reconnect backoff cap.
 func (s *Session) backoffCap() time.Duration {
-	if s.maxBackoff > 0 {
-		return s.maxBackoff
+	s.mu.Lock()
+	maxBackoff := s.maxBackoff
+	s.mu.Unlock()
+	if maxBackoff > 0 {
+		return maxBackoff
 	}
 	return legacyMaxBackoff
 }

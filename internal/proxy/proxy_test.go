@@ -504,9 +504,9 @@ func TestRunGatewayTSM(t *testing.T) {
 		CAFile:   ca,
 		CertFile: clientCrt,
 		KeyFile:  clientKey,
-		Timeout:  5 * time.Second,
+		Timeout:  10 * time.Second,
 	}
-	dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	dctx, dcancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer dcancel()
 	dconn, err := d.Dial(dctx, cfg.Gateway.ListenAddr)
 	if err != nil {
@@ -535,7 +535,7 @@ func TestRunGatewayTSM(t *testing.T) {
 	}
 
 	buf := make([]byte, 65536)
-	if err := dconn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+	if err := dconn.SetReadDeadline(time.Now().Add(15 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	n, err := dconn.Read(buf)

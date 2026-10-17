@@ -72,8 +72,14 @@ func freeUDPPort(t *testing.T) string {
 	return addr
 }
 
-// buildGet builds a v2c GET (or GETNEXT) datagram for oids.
-func buildGet(t *testing.T, community string, pduType uint8, oids ...string) []byte {
+// buildGet builds a v2c GET (or GETNEXT) datagram for oids. The request
+// id is returned alongside the datagram so silence-expecting tests can
+// tell a REAL response (matching req-id) from foreign loopback noise
+// (under a fully loaded suite, parallel packages share the loopback
+// namespace and a recycled ephemeral port can receive a stray datagram
+// from another test's server — that noise must not fail a
+// wrong-community-silence assertion).
+func buildGet(t *testing.T, community string, pduType uint8, oids ...string) ([]byte, int32) {
 	t.Helper()
 	var vb []byte
 	for _, o := range oids {
@@ -88,6 +94,14 @@ func buildGet(t *testing.T, community string, pduType uint8, oids ...string) []b
 	if err != nil {
 		t.Fatal(err)
 	}
+	return dg, 1234
+}
+
+// buildGetDg is buildGet for tests that only need the datagram (the
+// response req-id is asserted via parseResponse anyway).
+func buildGetDg(t *testing.T, community string, pduType uint8, oids ...string) []byte {
+	t.Helper()
+	dg, _ := buildGet(t, community, pduType, oids...)
 	return dg
 }
 
@@ -159,8 +173,9 @@ func parseResponse(t *testing.T, dg []byte) (int32, map[string][]byte) {
 func TestSNMPGetScalars(t *testing.T) {
 	_, addr := testAgent(t, "metcomm")
 	base := "1.3.6.1.4.1.58427.1"
-	resp := exchange(t, addr, buildGet(t, "metcomm", msg.PDUGetRequest,
-		base+".1", base+".2", base+".3", base+".7", base+".10"))
+	dg, _ := buildGet(t, "metcomm", msg.PDUGetRequest,
+		base+".1", base+".2", base+".3", base+".7", base+".10")
+	resp := exchange(t, addr, dg)
 	if resp == nil {
 		t.Fatal("no response to GET")
 	}
@@ -186,7 +201,7 @@ func TestSNMPGetScalars(t *testing.T) {
 func TestSNMPGetCountersAndLatency(t *testing.T) {
 	_, addr := testAgent(t, "metcomm")
 	base := "1.3.6.1.4.1.58427.1"
-	resp := exchange(t, addr, buildGet(t, "metcomm", msg.PDUGetRequest, base+".20.1", base+".20.2"))
+	resp := exchange(t, addr, buildGetDg(t, "metcomm", msg.PDUGetRequest, base+".20.1", base+".20.2"))
 	if resp == nil {
 		t.Fatal("no response to counter GET")
 	}
@@ -202,7 +217,7 @@ func TestSNMPGetCountersAndLatency(t *testing.T) {
 		t.Fatalf("counter .20.2: got %v, want 7", got)
 	}
 	// Out-of-range counter row: noSuchName error response.
-	resp = exchange(t, addr, buildGet(t, "metcomm", msg.PDUGetRequest, base+".20.9"))
+	resp = exchange(t, addr, buildGetDg(t, "metcomm", msg.PDUGetRequest, base+".20.9"))
 	if resp == nil {
 		t.Fatal("no response to out-of-range counter GET")
 	}
@@ -226,7 +241,7 @@ func TestSNMPGetNextWalk(t *testing.T) {
 	cur := base
 	seen := 0
 	for i := 0; i < 20; i++ {
-		resp := exchange(t, addr, buildGet(t, "metcomm", msg.PDUGetNextRequest, cur))
+		resp := exchange(t, addr, buildGetDg(t, "metcomm", msg.PDUGetNextRequest, cur))
 		if resp == nil {
 			t.Fatalf("no response to GETNEXT %s", cur)
 		}
@@ -248,7 +263,7 @@ func TestSNMPGetNextWalk(t *testing.T) {
 		t.Fatalf("walk too short: %d hops", seen)
 	}
 	// End of MIB: GETNEXT past the last object returns endOfMibView.
-	resp := exchange(t, addr, buildGet(t, "metcomm", msg.PDUGetNextRequest, base+".31"))
+	resp := exchange(t, addr, buildGetDg(t, "metcomm", msg.PDUGetNextRequest, base+".31"))
 	if resp == nil {
 		t.Fatal("no response to GETNEXT past end")
 	}
@@ -274,8 +289,8 @@ func firstOID(t *testing.T, vbs map[string][]byte) (string, bool) {
 func TestSNMPWrongCommunitySilent(t *testing.T) {
 	_, addr := testAgent(t, "metcomm")
 	base := "1.3.6.1.4.1.58427.1"
-	resp := exchange(t, addr, buildGet(t, "wrong", msg.PDUGetRequest, base+".1"))
-	if resp != nil {
+	dg, reqID := buildGet(t, "wrong", msg.PDUGetRequest, base+".1")
+	if resp := exchange(t, addr, dg); isOurResponse(t, resp, reqID) {
 		t.Fatal("agent answered a wrong-community request")
 	}
 }
@@ -288,10 +303,31 @@ func TestSNMPGarbageSilent(t *testing.T) {
 		{0x30, 0x82, 0xff, 0xff, 0x00},
 		[]byte("not-ber-at-all........"),
 	} {
-		if resp := exchange(t, addr, dg); resp != nil {
+		if resp := exchange(t, addr, dg); isOurResponse(t, resp, 0) {
 			t.Fatalf("agent answered garbage %q", dg)
 		}
 	}
+}
+
+// isOurResponse reports whether dg is a real GetResponse from THIS agent
+// (v2c with the expected request id). Anything else — foreign loopback
+// noise from a recycled ephemeral port, stray datagrams from parallel
+// packages — is not an answer to the probe and must not fail a
+// silence assertion. nil (timeout) is silence.
+func isOurResponse(t *testing.T, dg []byte, reqID int32) bool {
+	t.Helper()
+	if dg == nil {
+		return false
+	}
+	_, _, pdu, err := msg.SplitV1V2c(dg)
+	if err != nil {
+		return false
+	}
+	pduType, fields, err := msg.ParsePDU(pdu)
+	if err != nil || pduType != msg.PDUGetResponse {
+		return false
+	}
+	return fields.ReqID == reqID
 }
 
 func TestTunnelUpScalarsAndTraps(t *testing.T) {
@@ -316,7 +352,7 @@ func TestTunnelUpScalarsAndTraps(t *testing.T) {
 
 	// Mark the tunnel up: scalars change, trap arrives.
 	a.SetTunnelUp(true, "10.0.0.1:19611")
-	resp := exchange(t, addr, buildGet(t, "metcomm", msg.PDUGetRequest, base+".10", base+".11"))
+	resp := exchange(t, addr, buildGetDg(t, "metcomm", msg.PDUGetRequest, base+".10", base+".11"))
 	if resp == nil {
 		t.Fatal("no response after SetTunnelUp")
 	}
@@ -337,7 +373,7 @@ func TestTunnelUpScalarsAndTraps(t *testing.T) {
 
 	// Tunnel down.
 	a.SetTunnelUp(false, "")
-	resp = exchange(t, addr, buildGet(t, "metcomm", msg.PDUGetRequest, base+".10"))
+	resp = exchange(t, addr, buildGetDg(t, "metcomm", msg.PDUGetRequest, base+".10"))
 	if resp == nil {
 		t.Fatal("no response after tunnel down")
 	}

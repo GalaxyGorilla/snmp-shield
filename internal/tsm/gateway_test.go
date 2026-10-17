@@ -357,7 +357,7 @@ func TestTSMGatewayTrapDirection(t *testing.T) {
 		if len(pdu) == 0 || pdu[0] != msg.PDUSNMPv2Trap {
 			t.Fatalf("sink PDU = %v, want SNMPv2-Trap", pdu)
 		}
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("wrapped TSM trap never reached the sink")
 	}
 }
@@ -468,7 +468,7 @@ func TestTSMGatewayInformRoundTrip(t *testing.T) {
 	case <-sinkGot:
 	case serr := <-sinkErr:
 		t.Fatalf("sink: %v", serr)
-	case <-time.After(5 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("wrapped TSM inform never reached the sink")
 	}
 

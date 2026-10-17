@@ -691,6 +691,14 @@ func (g *GatewayTranslator) handleClearTrap(addr net.Addr, dg []byte) {
 				}
 				g.informMu.Unlock()
 			case <-g.stop:
+				// shutdown: release the pend entry so nothing references
+				// a dead gateway (the pointer-identity check keeps a
+				// matched-and-replaced entry untouched).
+				g.informMu.Lock()
+				if g.informPend[msgID] == pendRef {
+					delete(g.informPend, msgID)
+				}
+				g.informMu.Unlock()
 			}
 		}()
 	}
@@ -759,9 +767,6 @@ func (g *GatewayTranslator) handleSinkResponse(dg []byte) {
 	// the lookup — the pend was already deleted from the map above, so a
 	// msgID-based re-lookup would dead-end and the device would never see
 	// its response.
-	if pend == nil || pend.resp == nil {
-		return
-	}
 	if udp, ok := pend.addr.(*net.UDPAddr); ok {
 		if _, err := g.trapConn.WriteTo(pend.resp, udp); err != nil {
 			g.log.Debug("usm gateway: inform response delivery failed", zap.Error(err))

@@ -66,6 +66,12 @@ type gwInformPending struct {
 	ready     chan struct{}
 }
 
+// sinkDialTimeout bounds the DTLS dial to the manager's trap receiver.
+// The library default (10s) also applies to the front-leg handshake; the
+// sink path gets a dedicated, slightly tighter budget — but not so tight
+// that a loaded host (test suites, slow CI boxes) fails healthy dials.
+const sinkDialTimeout = 10 * time.Second
+
 // TSMGateway is the single-box TSM gateway: a raw DTLS front leg
 // (SNMP-over-DTLS, RFC 6353) terminates certificate-based security
 // directly from TSM-capable managers; authenticated requests are relayed
@@ -611,9 +617,9 @@ func (g *TSMGateway) trapSinkWrite(dg []byte) {
 		CertFile: g.lcfg.CertFile,
 		KeyFile:  g.lcfg.KeyFile,
 		Insecure: g.lcfg.Insecure,
-		Timeout:  5 * time.Second,
+		Timeout:  sinkDialTimeout,
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), sinkDialTimeout)
 	defer cancel()
 	c, err := d.Dial(ctx, g.cfg.TrapSinkAddr)
 	if err != nil {

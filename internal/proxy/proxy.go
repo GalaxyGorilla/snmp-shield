@@ -217,32 +217,53 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics) error {
 	return nil
 }
 
-// runGateway runs the single-box USM gateway: a plain-UDP front leg
-// terminates SNMPv3 USM directly from standard managers (this instance is
-// the authoritative engine) and authenticated requests are relayed as
-// clear v1/v2c to the legacy agent. No tunnel, no second proxy.
+// runGateway runs the single-box gateway: the front leg terminates SNMP
+// security directly from third-party clients and authenticated requests
+// are relayed as clear v1/v2c to the legacy agent. No tunnel, no second
+// proxy.
+//
+//   - usm-gateway: plain-UDP front leg terminating SNMPv3 USM (this
+//     instance is the authoritative engine).
+//   - tsm-gateway: raw DTLS front leg (RFC 6353, one SNMP datagram per
+//     DTLS record, no frame layer); the handshake is the authentication.
 func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
-	store, err := cache.Open(opts.Config.Security.EngineStore)
-	if err != nil {
-		return err
+	switch opts.Config.Security.Mode {
+	case "tsm-gateway":
+		lcfg := tunnel.ListenerConfig{
+			Mode:     "dtls",
+			CAFile:   opts.Config.Tunnel.CAFile,
+			CertFile: opts.Config.Tunnel.CertFile,
+			KeyFile:  opts.Config.Tunnel.KeyFile,
+			Insecure: opts.Config.Tunnel.InsecureSkipVerify,
+		}
+		gw, err := tsm.NewTSMGateway(opts.Config.Gateway, opts.Config.Security, lcfg, opts.Log, met)
+		if err != nil {
+			return err
+		}
+		return gw.Run(ctx.Done())
+	default:
+		store, err := cache.Open(opts.Config.Security.EngineStore)
+		if err != nil {
+			return err
+		}
+		engineID, err := parseEngineID(opts.Config.Security.EngineID)
+		if err != nil {
+			return err
+		}
+		clock, err := cache.NewEngineClock(store, engineID, zapLogger{opts.Log})
+		if err != nil {
+			return err
+		}
+		users := usm.ProfilesFromSecurity(opts.Config.Security)
+		if len(users) == 0 {
+			return fmt.Errorf("security.users: usm-gateway needs at least one user")
+		}
+		tr, terr := usm.NewGatewayTranslator(opts.Config.Gateway, users, clock, opts.Log, met)
+		if terr != nil {
+			return terr
+		}
+		return tr.Run(ctx.Done())
 	}
-	engineID, err := parseEngineID(opts.Config.Security.EngineID)
-	if err != nil {
-		return err
-	}
-	clock, err := cache.NewEngineClock(store, engineID, zapLogger{opts.Log})
-	if err != nil {
-		return err
-	}
-	users := usm.ProfilesFromSecurity(opts.Config.Security)
-	if len(users) == 0 {
-		return fmt.Errorf("security.users: usm-gateway needs at least one user")
-	}
-	tr, terr := usm.NewGatewayTranslator(opts.Config.Gateway, users, clock, opts.Log, met)
-	if terr != nil {
-		return terr
-	}
-	return tr.Run(ctx.Done())
 }
 
 // parseEngineID parses a config engine ID: "hex:..." or bare hex.

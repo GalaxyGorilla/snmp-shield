@@ -189,8 +189,11 @@ func (c *Config) Defaults() {
 
 // Validate checks the configuration for the configured role.
 func (c *Config) Validate() error {
-	// Gateway role: single-box USM gateway — no tunnel, plain-UDP front
-	// leg terminating SNMPv3 USM, clear v1/v2c relay to the legacy agent.
+	// Gateway role: single-box gateway — no tunnel. The front leg
+	// terminates SNMP security directly from third-party clients:
+	// usm-gateway (plain-UDP SNMPv3 USM) or tsm-gateway (raw SNMP-over-
+	// DTLS per RFC 6353); authenticated requests are relayed as clear
+	// v1/v2c to the legacy agent.
 	if c.Role == RoleGateway {
 		if c.Gateway.ListenAddr == "" {
 			return fmt.Errorf("gateway.listen_addr is required")
@@ -198,19 +201,31 @@ func (c *Config) Validate() error {
 		if c.Gateway.AgentAddr == "" {
 			return fmt.Errorf("gateway.agent_addr is required")
 		}
-		if c.Security.Mode != "usm-gateway" {
-			return fmt.Errorf("gateway role requires security.mode usm-gateway, got %q", c.Security.Mode)
-		}
-		if len(c.Security.Users) == 0 {
-			return fmt.Errorf("security.users: usm-gateway needs at least one user")
-		}
-		for _, u := range c.Security.Users {
-			if u.Name == "" {
-				return fmt.Errorf("security.users: user name is required")
+		switch c.Security.Mode {
+		case "usm-gateway":
+			if len(c.Security.Users) == 0 {
+				return fmt.Errorf("security.users: usm-gateway needs at least one user")
 			}
-			if u.AuthProtocol == "" || u.PrivProtocol == "" {
-				return fmt.Errorf("security.users: user %s needs auth_protocol and priv_protocol", u.Name)
+			for _, u := range c.Security.Users {
+				if u.Name == "" {
+					return fmt.Errorf("security.users: user name is required")
+				}
+				if u.AuthProtocol == "" || u.PrivProtocol == "" {
+					return fmt.Errorf("security.users: user %s needs auth_protocol and priv_protocol", u.Name)
+				}
 			}
+		case "tsm-gateway":
+			// The raw DTLS front leg is certificate-based: the gateway
+			// presents a cert and verifies client certificates against
+			// the CA.
+			if c.Tunnel.CertFile == "" || c.Tunnel.KeyFile == "" {
+				return fmt.Errorf("security.mode tsm-gateway requires tunnel.cert_file and tunnel.key_file")
+			}
+			if c.Tunnel.CAFile == "" {
+				return fmt.Errorf("security.mode tsm-gateway requires tunnel.ca_file to verify client certificates")
+			}
+		default:
+			return fmt.Errorf("gateway role requires security.mode usm-gateway or tsm-gateway, got %q", c.Security.Mode)
 		}
 		return nil
 	}
@@ -243,12 +258,12 @@ func (c *Config) Validate() error {
 		}
 	}
 	switch c.Security.Mode {
-	case "passthrough", "usm-translate", "tsm", "usm-gateway":
+	case "passthrough", "usm-translate", "tsm", "usm-gateway", "tsm-gateway":
 	default:
-		return fmt.Errorf("security.mode must be passthrough, usm-translate, tsm or usm-gateway, got %q", c.Security.Mode)
+		return fmt.Errorf("security.mode must be passthrough, usm-translate, tsm, usm-gateway or tsm-gateway, got %q", c.Security.Mode)
 	}
-	if c.Security.Mode == "usm-gateway" {
-		return fmt.Errorf("security.mode usm-gateway is only valid with the gateway role")
+	if c.Security.Mode == "usm-gateway" || c.Security.Mode == "tsm-gateway" {
+		return fmt.Errorf("security.mode %s is only valid with the gateway role", c.Security.Mode)
 	}
 	if c.Security.Mode == "usm-translate" {
 		if len(c.Security.Users) == 0 {

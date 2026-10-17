@@ -128,3 +128,40 @@ func (s *streamListener) Accept() (net.Conn, error) {
 	}
 	return newStreamConn(c, true), nil
 }
+
+// ListenRaw binds a raw-mode DTLS listener at laddr: accepted conns
+// preserve DTLS record boundaries per Read with NO stream buffering and
+// no frame layer. This is the RFC 6353 (SNMP-over-DTLS) front leg: one
+// SNMP datagram equals one DTLS record. Cert material semantics match
+// Listen (PSK is not part of the TSM profile). TLS/TCP is not supported
+// in raw mode: TCP is a byte stream, so the one-record-one-datagram
+// property only holds for DTLS.
+func ListenRaw(laddr string, cfg ListenerConfig) (net.Listener, error) {
+	if cfg.Mode != "dtls" {
+		return nil, fmt.Errorf("raw listen mode must be dtls, got %q (TLS/TCP has no record boundaries)", cfg.Mode)
+	}
+	dcfg, err := dtlsServerConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	addr, err := net.ResolveUDPAddr("udp", laddr)
+	if err != nil {
+		return nil, fmt.Errorf("resolve raw listen addr: %w", err)
+	}
+	l, err := dtls.Listen("udp", addr, dcfg)
+	if err != nil {
+		return nil, fmt.Errorf("dtls listen: %w", err)
+	}
+	return &rawListener{Listener: l}, nil
+}
+
+// rawListener hands out accepted conns as-is: (D)TLS record boundaries
+// per Read (one SNMP datagram per Read), peer certs reachable via
+// PeerCerts for TSM identity mapping.
+type rawListener struct {
+	net.Listener
+}
+
+func (r *rawListener) Accept() (net.Conn, error) {
+	return r.Listener.Accept()
+}

@@ -1,0 +1,30 @@
+# TSM gateway: single box, no second proxy. Standard TSM clients
+# (SNMP-over-DTLS per RFC 6353) connect directly to the gateway; the
+# (D)TLS handshake is the SNMP authentication (peer certificate ->
+# securityName, checked against security.tsm_identities). Authenticated
+# requests are relayed as clear v1/v2c to the legacy agent.
+role: gateway
+
+# The legacy (v1/v2c-only) agent behind the gateway.
+gateway:
+  listen_addr: ":16161"       # raw DTLS front leg (one datagram = one DTLS record)
+  agent_addr: "127.0.0.1:161" # legacy agent
+  agent_community: "public"   # v2c community toward the legacy agent
+  # trap_listen_addr: ":10162" # clear traps from the legacy network (optional)
+  # trap_sink_addr: "10.0.0.5:10162" # manager's TSM trap receiver (required with trap_listen_addr)
+
+security:
+  mode: tsm-gateway
+  # Allow-list of peer certificate identities (leaf CN). Empty = any
+  # certificate signed by the CA is accepted.
+  tsm_identities:
+    - "snmp-proxy-manager"
+
+# Certificate material for the raw DTLS front leg (same keys as the
+# tunnel section; the gateway has no tunnel, but reuses the layout):
+# the gateway presents cert/key and verifies client certificates
+# against the CA. Generate a throwaway PKI with scripts/gen-certs.sh.
+tunnel:
+  ca_file: "certs/ca.crt"
+  cert_file: "certs/server.crt"
+  key_file: "certs/server.key"

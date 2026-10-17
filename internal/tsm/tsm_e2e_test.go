@@ -34,12 +34,13 @@ type pipe struct {
 	other    *pipe
 	mu       sync.Mutex
 	subs     map[uint8][]chan *tunnel.Frame
+	pending  map[uint8][]*tunnel.Frame // frames sent before the peer subscribed
 	peerCert *x509.Certificate
 }
 
 func newPipePair(agentCert *x509.Certificate) (mgr, agt *pipe) {
-	mgr = &pipe{subs: make(map[uint8][]chan *tunnel.Frame)}
-	agt = &pipe{subs: make(map[uint8][]chan *tunnel.Frame), peerCert: agentCert}
+	mgr = &pipe{subs: make(map[uint8][]chan *tunnel.Frame), pending: make(map[uint8][]*tunnel.Frame)}
+	agt = &pipe{subs: make(map[uint8][]chan *tunnel.Frame), pending: make(map[uint8][]*tunnel.Frame), peerCert: agentCert}
 	mgr.other = agt
 	agt.other = mgr
 	return mgr, agt
@@ -48,6 +49,12 @@ func newPipePair(agentCert *x509.Certificate) (mgr, agt *pipe) {
 func (p *pipe) Subscribe(ftype uint8) (<-chan *tunnel.Frame, func()) {
 	ch := make(chan *tunnel.Frame, 64)
 	p.mu.Lock()
+	// deliver frames that arrived before this subscription (the real
+	// tunnel buffers; the shim must too, or the trap path races startup)
+	for _, f := range p.pending[ftype] {
+		ch <- f
+	}
+	delete(p.pending, ftype)
 	p.subs[ftype] = append(p.subs[ftype], ch)
 	p.mu.Unlock()
 	cancel := func() {
@@ -64,20 +71,23 @@ func (p *pipe) Subscribe(ftype uint8) (<-chan *tunnel.Frame, func()) {
 }
 
 // Send delivers to the OTHER end's subscribers: this end acts as the tunnel
-// connection the peer sees.
+// connection the peer sees. Frames sent before the peer subscribed are
+// queued and delivered on Subscribe (mirrors real tunnel buffering;
+// dropping them makes the trap path race translator startup).
 func (p *pipe) Send(_ context.Context, typ, flags uint8, corrID uint16, payload []byte) error {
 	o := p.other
 	if o == nil {
 		return nil
 	}
+	f := &tunnel.Frame{Type: typ, Flags: flags, CorrID: corrID, Payload: append([]byte(nil), payload...)}
 	o.mu.Lock()
-	subs := append([]chan *tunnel.Frame(nil), o.subs[typ]...)
-	o.mu.Unlock()
-	for _, ch := range subs {
-		select {
-		case ch <- &tunnel.Frame{Type: typ, Flags: flags, CorrID: corrID, Payload: append([]byte(nil), payload...)}:
-		default:
-		}
+	defer o.mu.Unlock()
+	if len(o.subs[typ]) == 0 {
+		o.pending[typ] = append(o.pending[typ], f)
+		return nil
+	}
+	for _, ch := range o.subs[typ] {
+		ch <- f
 	}
 	return nil
 }
@@ -476,4 +486,208 @@ func mustOID(t *testing.T, dotted string) []byte {
 		t.Fatal(err)
 	}
 	return oid
+}
+
+// TestTSMEndToEndInform: clear v2c inform from a device at the manager's
+// trap listener -> manager tracks a pending inform (tunnel corrID) and ships
+// a NOTIF frame with FlagInform -> agent translator answers with a RESP
+// FlagInform frame (corrID preserved) -> the manager's inform response path
+// rebuilds the clear GetResponse and delivers it back to the device at the
+// trap listener (req-id echoed). Pins the inform relay fix: before, the
+// response was dropped by handleTunnelResponse ("no pending request").
+func TestTSMEndToEndInform(t *testing.T) {
+	fake, fakeAddr := fakeAgentOnFreePort(t)
+	defer fake.Close()
+
+	agentCert := testCert(t, "snmp-proxy-manager")
+	mgrPipe, agtPipe := newPipePair(agentCert)
+
+	agentSec := config.Security{Mode: "tsm", TSMIdentities: []string{"snmp-proxy-manager"}}
+	agentRole := config.AgentRole{
+		AgentAddr:      fakeAddr,
+		AgentCommunity: "realcomm",
+	}
+	atr, err := tsm.NewAgentTranslator(agentRole, agentSec, agtPipe, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mgrAddr := freeUDPPort(t)
+	trapAddr := freeUDPPort(t)
+	mgrSec := config.Security{Mode: "tsm", TrapCommunity: "trapcomm"}
+	mgrRole := config.ManagerRole{ListenAddr: mgrAddr, TrapListenAddr: trapAddr}
+	mtr, err := tsm.NewManagerTranslator(mgrRole, mgrSec, mgrPipe, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() { _ = atr.Run(done) }()
+	go func() { _ = mtr.Run(done) }()
+
+	// device socket: the inform's sender address (its reply address)
+	device, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer device.Close()
+
+	// wait for the trap socket to be bound (same probe as newTSMPair)
+	trapRaddr, _ := net.ResolveUDPAddr("udp", trapAddr)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if c, err := net.ListenUDP("udp", trapRaddr); err != nil {
+			break
+		} else {
+			c.Close()
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+
+	// clear v2c inform (req-id 777, sysUpTime + snmpTrapOID.0 varbinds)
+	informPDU := msg.BuildPDU(msg.PDUInformRequest, 777, 0, 0, buildInformVarbinds(t))
+	inform, err := msg.BuildV1V2c(msg.Version2c, []byte("devicecomm"), informPDU)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := device.WriteTo(inform, trapRaddr); err != nil {
+		t.Fatal(err)
+	}
+
+	// the manager must rebuild and deliver the clear inform response
+	device.SetReadDeadline(time.Now().Add(10 * time.Second))
+	buf := make([]byte, 65536)
+	n, _, err := device.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("no inform response from manager: %v", err)
+	}
+	ver, community, pduTLV, err := msg.SplitV1V2c(buf[:n])
+	if err != nil {
+		t.Fatalf("bad inform response: %v", err)
+	}
+	if ver != msg.Version2c {
+		t.Fatalf("inform response version = %d, want 2c", ver)
+	}
+	if string(community) != "devicecomm" {
+		t.Fatalf("inform response community = %q, want devicecomm", community)
+	}
+	_, fields, err := msg.ParsePDU(pduTLV)
+	if err != nil {
+		t.Fatalf("bad inform response PDU: %v", err)
+	}
+	if fields.ReqID != 777 {
+		t.Fatalf("inform response reqID = %d, want 777", fields.ReqID)
+	}
+}
+
+// buildInformVarbinds returns a varbind SEQUENCE content for an inform:
+// sysUpTime.0 (TimeTicks) + snmpTrapOID.0 (coldStart OID).
+func buildInformVarbinds(t *testing.T) []byte {
+	t.Helper()
+	uptime, err := msg.EncodeOID("1.3.6.1.2.1.1.3.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	trapOID, err := msg.EncodeOID("1.3.6.1.6.3.1.1.5.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vb1 := msg.AppendTLV(nil, 0x30, msg.AppendTLV(nil, 0x06, uptime))
+	vb1 = msg.AppendTLV(vb1, 0x43, []byte{0, 0, 0, 100}) // TimeTicks value
+	vb2 := msg.AppendTLV(nil, 0x30, msg.AppendTLV(nil, 0x06, trapOID))
+	vb2 = msg.AppendTLV(vb2, 0x06, trapOID)
+	// BuildPDU wraps the varbind-list SEQUENCE itself: pass the RAW
+	// varbind-list content (the two varbind TLVs concatenated).
+	list := append(append([]byte{}, vb1...), vb2...)
+	return msg.AppendTLV(nil, 0x30, list)
+}
+
+// TestTSMEndToEndAgentInform: the agent side originates an inform (v3 TSM
+// NOTIF frame with PDUInformRequest) for its local devices; the manager
+// translator's handleTunnelNotif answers with a RESP FlagInform frame
+// (corrID preserved, req-id + securityName + sec-level flags echoed per the
+// TSM response echo rule). Pins the manager-side inbound-inform answering.
+func TestTSMEndToEndAgentInform(t *testing.T) {
+	agentCert := testCert(t, "snmp-proxy-manager")
+	mgrPipe, agtPipe := newPipePair(agentCert)
+
+	agentSec := config.Security{Mode: "tsm", TSMIdentities: []string{"snmp-proxy-manager"}}
+	agentRole := config.AgentRole{AgentAddr: "127.0.0.1:9", AgentCommunity: "realcomm"}
+	atr, err := tsm.NewAgentTranslator(agentRole, agentSec, agtPipe, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mgrRole := config.ManagerRole{ListenAddr: "127.0.0.1:0"}
+	mgrSec := config.Security{Mode: "tsm", TrapCommunity: "trapcomm"}
+	mtr, err := tsm.NewManagerTranslator(mgrRole, mgrSec, mgrPipe, zap.NewNop(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	defer close(done)
+	go func() { _ = atr.Run(done) }()
+	go func() { _ = mtr.Run(done) }()
+
+	// subscribe on the agent side before triggering (blocking pipe keeps
+	// the frame until a subscriber drains it, but be explicit)
+	respCh, cancel := agtPipe.Subscribe(2) // 2 = RESP (frame type)
+	defer cancel()
+
+	// agent-originated inform: v3 TSM NOTIF (PDUInformRequest req-id 888,
+	// securityName from the peer cert CN)
+	informPDU := msg.BuildPDU(msg.PDUInformRequest, 888, 0, 0, buildInformVarbinds(t))
+	scoped := msg.BuildScoped(nil, []byte{}, informPDU)
+	notif, err := msg.BuildV3(msg.V3Header{
+		MsgID:      7,
+		MsgMaxSize: msg.DefaultMsgMaxSize,
+		MsgFlags:   msg.MsgFlagReportable,
+		SecModel:   msg.SecurityModelTSM,
+	}, msg.USMParams{UserName: "snmp-proxy-manager"}, scoped, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := agtPipe.Send(context.Background(), 3, 0, 42, notif); err != nil { // 3 = NOTIF, agent -> manager
+		t.Fatal(err)
+	}
+
+	// the manager's answer must arrive as a RESP FlagInform frame
+	select {
+	case f := <-respCh:
+		if f.Type != 2 { // RESP
+			t.Fatalf("frame type = %d, want RESP", f.Type)
+		}
+		if f.Flags&0x01 == 0 {
+			t.Fatalf("frame flags = %#x, want FlagInform set", f.Flags)
+		}
+		if f.CorrID != 42 {
+			t.Fatalf("frame corrID = %d, want 42", f.CorrID)
+		}
+		m2, err := msg.ParseV3(f.Payload)
+		if err != nil {
+			t.Fatalf("bad v3 inform response: %v", err)
+		}
+		if m2.Header.SecModel != msg.SecurityModelTSM {
+			t.Fatalf("secModel = %d, want TSM", m2.Header.SecModel)
+		}
+		if m2.USM.UserName != "" {
+			t.Fatalf("securityName = %q, want empty (TSM secParams are empty per RFC 5591)", m2.USM.UserName)
+		}
+		if m2.Header.MsgFlags&msg.MsgFlagReportable == 0 {
+			t.Fatalf("flags = %#x, want Reportable echoed", m2.Header.MsgFlags)
+		}
+		// plaintext TSM: m2.PDU is the raw inner PDU TLV (no decryption)
+		pdu := m2.PDU
+		_, pfields, err := msg.ParsePDU(pdu)
+		if err != nil {
+			t.Fatalf("bad response PDU: %v", err)
+		}
+		if pfields.ReqID != 888 {
+			t.Fatalf("response reqID = %d, want 888", pfields.ReqID)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("no inform response from manager translator")
+	}
 }

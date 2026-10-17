@@ -304,20 +304,15 @@ func (a *AgentTranslator) handleTunnelNotif(f *tunnel.Frame) {
 		}
 	}
 
-	// inform: answer with a GetResponse TSM frame echoing the req-id
+	// inform: answer with a GetResponse TSM frame echoing the req-id,
+	// securityName and security-level flags (TSM response echo rule)
 	if pdu[0] == msg.PDUInformRequest {
 		fields, ok := pduCommon(pdu)
 		if !ok {
 			return
 		}
-		resp := msg.BuildPDU(msg.PDUGetResponse, fields.ReqID, 0, 0, fields.Varbinds)
-		scoped := msg.BuildScoped(nil, []byte{}, resp)
-		out, err := msg.BuildV3(msg.V3Header{
-			MsgID:      a.msgID.Add(1),
-			MsgMaxSize: msg.DefaultMsgMaxSize,
-			MsgFlags:   msg.MsgFlagReportable,
-			SecModel:   msg.SecurityModelTSM,
-		}, msg.USMParams{}, scoped, nil)
+		out, err := wrapTSM(a.msgID.Add(1), fields.ReqID, msg.PDUGetResponse, fields.Varbinds, nil,
+			m.Header.MsgFlags|msg.MsgFlagReportable, m.USM.UserName)
 		if err != nil {
 			return
 		}

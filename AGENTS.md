@@ -66,6 +66,7 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | HA (manager tunnel failover `tunnel.dial_addrs` sticky walk; keepalive dead-peer detection 3 misses × 3×keepalive; session Done()/per-session cancel; USM cross-engine Report adoption; live `keepalive_secs`/`max_reconnect_backoff_secs` + Reconnects/TunnelUp metrics) | done (tested, failover e2e + dead-peer net.Pipe + config/flags tests; smoke + all 3 interop suites re-run green) |
 | USM two-proxy chain in-Go e2e tests (`internal/usm/translate_manager_e2e_test.go`: full manager+agent translator chain over a pipe shim, fake v2c agent; discovery/GET, trap relay+filter, agent-notif→sink, inform round trip) + **inform relay bug fix** (manager-side informs were never answered) | done (tested, -race -count 2) |
 | msg fuzz tests (`internal/msg/fuzz_test.go`: 7 Go-native fuzz targets — Peek/SplitV1V2c/ParsePDU/SplitV1Trap/ParseV3/UnwrapScopedPDU/TrapOID/DecodeOID; regression corpus in `testdata/fuzz/`) + **2 parser panic fixes** (berOctetStringLike empty-buffer, ParseV3 declared-length overflow) | done (tested, all targets fuzzed 30s green; corpus runs in every `go test`) |
+| TSM inform relay fix + e2e tests (`tsm_e2e_test.go`: inform round trip device→sink→device, agent-originated inform answered; pipe pending-queue fix for the startup race) — same dead-end as USM (FlagInform RESP frames never matched against the inform pending map, `ip.addr` never set) | done (tested, -race -count 2) |
 
 ### Gateway modes (single proxy, no second proxy required)
 
@@ -416,6 +417,28 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   inbound notif path (`handleTunnelNotif`) additionally answers
   agent-originated informs with a RESP FlagInform frame echoing the
   inform's USM params (engine/boots/time/user) and req-id.
+- **TSM inform relay (bug fix, pinned by e2e)**: identical dead-end to the
+  USM one — `ManagerTranslator.handleClearTrap` tracked informs in
+  `m.inform` but the Run loop's RESP dispatch never consulted that map
+  (responses were dropped by `handleTunnelResponse`, "no pending request")
+  and the sender address was discarded by `readTraps`. Fixed symmetric to
+  USM: `readTraps` stashes `lastInform`, the informPending carries
+  ver/community/addr, the device's req-id is preserved end-to-end
+  (`handleClearTrap` wraps informs with `info.RequestID`, not the
+  manager's counter), Run's RESP dispatch routes FlagInform frames to
+  `handleTunnelInformResp` (rebuilds the clear GetResponse at the sender),
+  and `handleTunnelNotif` answers agent-originated informs (sink now
+  optional on that path). Agent-side answers now echo the inform's
+  msgFlags (TSM response echo rule). **RFC 5591 nuance learned**: TSM
+  secParams are EMPTY on the wire (`BuildV3` drops USMParams for
+  secModel=4) — the securityName/flags echo rule applies only to what
+  actually rides the wire (msgID, req-id, contextEngineID, auth/priv
+  bits); there is no securityName to echo inside TSM secParams, so
+  asserting a non-empty `m2.USM.UserName` on a TSM message is always
+  wrong. Also fixed the TSM e2e pipe shim's startup race (frames sent
+  before the peer subscribed are now queued per frame-type and delivered
+  on Subscribe — mirrors real tunnel buffering; non-blocking/dropping
+  sends made the trap path flake ~20% of runs).
 - **Pipe-shim test lesson** (`translate_manager_e2e_test.go`): an
   in-memory FrameSink shim must deliver frames via **blocking** channel
   sends — non-blocking sends silently drop frames that arrive before the

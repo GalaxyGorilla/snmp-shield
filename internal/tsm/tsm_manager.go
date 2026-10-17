@@ -174,11 +174,16 @@ type managerPending struct {
 	clientReq int32
 }
 
-// informPending tracks an inform awaiting its response.
+// informPending tracks an inform awaiting its response (by tunnel corrID):
+// the device's original req-id is remembered for the response echo; ver,
+// community and addr rebuild the clear response for the sender (best-effort:
+// answered at the most recent clear inform sender).
 type informPending struct {
 	pendingBase
-	addr net.Addr
-	req  int32
+	addr      net.Addr
+	req       int32
+	ver       int
+	community string
 }
 
 // ManagerTranslator is the manager-side TSM engine: clear SNMP from
@@ -199,6 +204,10 @@ type ManagerTranslator struct {
 	pendMu sync.Mutex
 	pend   map[uint16]*managerPending
 	inform map[uint16]*informPending
+	// lastInform is the most recent clear inform sender (stashed by
+	// readTraps; informs are answered there since UDP gives no per-message
+	// reply address on the response path).
+	lastInform net.Addr
 
 	conn     net.PacketConn
 	trapConn net.PacketConn
@@ -256,7 +265,11 @@ func (m *ManagerTranslator) Run(done <-chan struct{}) error {
 			if !ok {
 				return nil
 			}
-			m.handleTunnelResponse(f)
+			if f.Flags&tunnel.FlagInform != 0 {
+				m.handleTunnelInformResp(f)
+			} else {
+				m.handleTunnelResponse(f)
+			}
 		case f, ok := <-notCh:
 			if !ok {
 				return nil
@@ -395,11 +408,71 @@ func (m *ManagerTranslator) handleTunnelResponse(f *tunnel.Frame) {
 	}
 }
 
+// lastInformAddr returns the address of the most recent clear inform sender
+// (stashed by readTraps; nil when unknown).
+func (m *ManagerTranslator) lastInformAddr() net.Addr {
+	m.pendMu.Lock()
+	defer m.pendMu.Unlock()
+	return m.lastInform
+}
+
+// handleTunnelInformResp translates an agent-side inform GetResponse (which
+// arrives as a RESP frame flagged FlagInform) back into a clear inform
+// response for the originating device.
+func (m *ManagerTranslator) handleTunnelInformResp(f *tunnel.Frame) {
+	m.pendMu.Lock()
+	ip, ok := m.inform[f.CorrID]
+	if ok {
+		delete(m.inform, f.CorrID)
+	}
+	m.pendMu.Unlock()
+	if !ok {
+		m.log.Debug("tsm manager: inform response with no pending inform", zap.Uint16("corrID", f.CorrID))
+		return
+	}
+
+	data, err := msg.ParseV3(f.Payload)
+	if err != nil {
+		m.log.Debug("tsm manager: undecodable v3 inform response", zap.Error(err))
+		return
+	}
+	if data.Header.SecModel != msg.SecurityModelTSM {
+		return
+	}
+	pdu, err := unwrapTSM(data)
+	if err != nil {
+		m.log.Debug("tsm manager: bad inform response PDU", zap.Error(err))
+		return
+	}
+	if len(pdu) == 0 || pdu[0] != msg.PDUGetResponse {
+		return
+	}
+	fields, ok := pduCommon(pdu)
+	if !ok {
+		return
+	}
+
+	req := ip.req
+	if fields.ReqID != 0 {
+		req = fields.ReqID
+	}
+	resp := msg.BuildPDU(msg.PDUGetResponse, req, fields.ErrStatus, fields.ErrIndex, fields.Varbinds)
+	out, err := msg.BuildV1V2c(ip.ver, []byte(ip.community), resp)
+	if err != nil {
+		return
+	}
+	if udp, ok2 := ip.addr.(*net.UDPAddr); ok2 {
+		if _, err := m.conn.WriteTo(out, udp); err != nil {
+			m.log.Debug("tsm manager: inform response delivery failed", zap.Error(err))
+		}
+	}
+}
+
 // readTraps serves clear traps/informs from local devices.
 func (m *ManagerTranslator) readTraps() {
 	buf := make([]byte, 65536)
 	for {
-		n, _, err := m.trapConn.ReadFrom(buf)
+		n, addr, err := m.trapConn.ReadFrom(buf)
 		if err != nil {
 			select {
 			case <-m.stop:
@@ -412,6 +485,13 @@ func (m *ManagerTranslator) readTraps() {
 			continue
 		}
 		dg := append([]byte{}, buf[:n]...)
+		// stash the sender for inform responses (best-effort: informs are
+		// answered at the most recent sender, matching the relay design).
+		if info, perr := msg.Peek(dg); perr == nil && msg.IsInform(info.PDUType) {
+			m.pendMu.Lock()
+			m.lastInform = addr
+			m.pendMu.Unlock()
+		}
 		m.handleClearTrap(dg)
 	}
 }
@@ -432,9 +512,13 @@ func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 			return
 		}
 	}
-	_, _, pduTLV, err := msg.SplitV1V2c(dg)
+	_, community, pduTLV, err := msg.SplitV1V2c(dg)
 	if err != nil {
 		return
+	}
+	ver := msg.Version2c
+	if info.Version == msg.Version1 {
+		ver = msg.Version1
 	}
 
 	var pduType uint8
@@ -462,7 +546,13 @@ func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 	}
 
 	corrID := uint16(m.corr.Add(1))
-	out, err := wrapTSM(m.msgID.Add(1), m.reqID.Add(1), pduType, varbinds, nil, msg.MsgFlagReportable, "")
+	// informs preserve the device's req-id end-to-end (the agent echoes it
+	// and the inform response path relays it back to the device)
+	reqID := m.reqID.Add(1)
+	if isInform {
+		reqID = info.RequestID
+	}
+	out, err := wrapTSM(m.msgID.Add(1), reqID, pduType, varbinds, nil, msg.MsgFlagReportable, "")
 	if err != nil {
 		return
 	}
@@ -471,6 +561,9 @@ func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 		ip := &informPending{
 			pendingBase: pendingBase{ready: make(chan struct{})},
 			req:         info.RequestID,
+			ver:         ver,
+			community:   string(community),
+			addr:        m.lastInformAddr(),
 		}
 		m.pendMu.Lock()
 		m.inform[corrID] = ip
@@ -505,27 +598,39 @@ func (m *ManagerTranslator) handleTunnelNotif(f *tunnel.Frame) {
 	if err != nil {
 		return
 	}
-	if m.cfg.TrapSinkAddr == "" {
-		return
-	}
 	if len(pdu) == 0 {
 		return
 	}
-	dg, err := msg.BuildV1V2c(msg.Version2c, []byte(trapCommunity(m.sec.TrapCommunity)), pdu)
-	if err != nil {
-		return
-	}
-	if err := sinkWrite(m.cfg.TrapSinkAddr, dg); err != nil {
-		m.log.Warn("tsm manager: trap sink delivery failed", zap.Error(err))
-		return
-	}
-	if m.met != nil {
-		m.met.NotifsRelayed.Inc()
+
+	// deliver to the sink as v2c (when configured)
+	if m.cfg.TrapSinkAddr != "" {
+		dg, err := msg.BuildV1V2c(msg.Version2c, []byte(trapCommunity(m.sec.TrapCommunity)), pdu)
+		if err != nil {
+			return
+		}
+		if err := sinkWrite(m.cfg.TrapSinkAddr, dg); err != nil {
+			m.log.Warn("tsm manager: trap sink delivery failed", zap.Error(err))
+			return
+		}
+		if m.met != nil {
+			m.met.NotifsRelayed.Inc()
+		}
 	}
 
-	// inform response path: an inform received from the tunnel is
-	// answered by the agent side; nothing to do here.
-	_ = f.Flags
+	// inform: answer with a GetResponse TSM frame echoing the req-id,
+	// securityName and security-level flags (TSM response echo rule)
+	if pdu[0] == msg.PDUInformRequest {
+		fields, ok := pduCommon(pdu)
+		if !ok {
+			return
+		}
+		out, err := wrapTSM(data.Header.MsgID, fields.ReqID, msg.PDUGetResponse, fields.Varbinds,
+			data.ContextEngineID, data.Header.MsgFlags|msg.MsgFlagReportable, data.USM.UserName)
+		if err != nil {
+			return
+		}
+		_ = m.sess.Send(context.Background(), msgTypeRESP, tunnel.FlagInform, f.CorrID, out)
+	}
 }
 
 // trapCommunity resolves the sink community.

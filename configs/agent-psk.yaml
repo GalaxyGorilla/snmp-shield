@@ -30,3 +30,14 @@ agent:
 #     action: deny
 #     oids:
 #       - "1.3.6.1.4.1.99"  # drop this enterprise's traps
+
+# Optional SNMP metrics interface: a small read-only SNMPv2c health agent
+# (GET/GETNEXT: identity, tunnel state, counters) and v2c event traps for
+# tunnel lifecycle changes (up/down, HA failover). Lets an SNMP-native
+# monitoring system watch the proxy without the Prometheus endpoint
+# (--metrics-addr stays available alongside).
+# metrics:
+#   listen_addr: "127.0.0.1:10161"    # health MIB (GET/GETNEXT)
+#   trap_sink_addr: "127.0.0.1:10164" # v2c event traps
+#   community: "public"
+#   # base_oid: ".1.3.6.1.4.1.58427.1" # enterprise OID (default)

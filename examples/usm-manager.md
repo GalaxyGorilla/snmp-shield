@@ -64,6 +64,14 @@ selftest validates config + engine store.)
   `--filter-action` is `allow` or `deny`. In YAML:
   `notifications.filter` (see `configs/gateway-usm-manager.yaml`).
 
+- **SNMP metrics interface** — expose the proxy's own health over SNMP
+  (optional, all roles): `--metrics-snmp-listen <ip:port>` serves a
+  read-only SNMPv2c health MIB (GET/GETNEXT: identity, tunnel state,
+  counters) and `--metrics-snmp-trap-sink <ip:port>` emits v2c traps on
+  tunnel lifecycle changes (up/down, HA failover). `--metrics-snmp-base-oid`
+  (default `.1.3.6.1.4.1.58427.1`) and `--metrics-snmp-community`
+  (default "public") apply to both. Prometheus (`--metrics-addr`) stays
+  available alongside. In YAML: `metrics:`.
 ## Config file
 
 `configs/gateway-usm-manager.yaml` — engine store placement and user

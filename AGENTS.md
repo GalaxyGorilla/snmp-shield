@@ -70,7 +70,7 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | internal/proxy wiring e2e tests (`internal/proxy/proxy_test.go`: white-box runAgent/runManager/runGateway over real PSK-DTLS loopback; passthrough + usm-translate two-proxy chains, USM + TSM gateways driven by gosnmp/DTLS clients, parseEngineID) + **2 prod fixes pinned**: TSM gateway accept loop returned "listener closed" error on clean shutdown (pion returns its own sentinel, not net.ErrClosed) and passthrough Manager `m.conn` read races its deferred nil-write (serveClearRequests/awaitResponse now read under socksMu) | done (tested, -race -count 2; proxy 0% → ~72% coverage) |
 | crypto primitive unit tests (`internal/usm/crypto_test.go`: protocol parsers, key lengths, RFC 3414 A.3 password-to-key vectors, Blumenthal/Reeder priv-key extensions, digest/sign/verify round trips + aliasing, DES salt counter) + cmd flags/os.Args coverage (`main_test.go`: gateway branches, psk-ciphersuites + filter flags, parsePskCiphersuites, run() version/help/genpsk/unknown) | done (tested, -race -count 2; crypto.go ~100%, cmd 24% → 57%) |
 | Manager-securing single proxy: **usm-manager mode** (`security.mode: usm-manager`, gateway role; `internal/usm/manager_gateway.go`: clear v1/v2c traps/informs at `trap_listen_addr` → v3 USM authPriv notifications toward `trap_sink_addr`, own authoritative engine + first user; inform responses relayed back to the device) | done (tested, gosnmp TrapListener sink incl. auto-inform-response, trap/inform/v1/filter tests, -race -count 2) |
-| Meaningful challenge tests (adversarial/edge-case tests beyond happy paths, added where they find real issues) + pragmatic polish | backlog |
+| Meaningful challenge tests (adversarial/edge-case tests beyond happy paths, added where they find real issues) + pragmatic polish | done (tested, `internal/usm/gateway_challenge_test.go` + `internal/tunnel/challenge_test.go`: stale boots rejected w/ usmStatsNotInTimeWindows report, tampered digest rejected w/ usmStatsWrongDigests, non-reportable silent drop, GetBulk relay, garbage-datagram robustness, wrong-PSK handshake rejection; polish: removed unreachable GetBulk-on-v1 downgrade in gateway.go — `downstreamFor` always returns v2c) |
 
 ### Gateway modes (single proxy, no second proxy required)
 
@@ -523,6 +523,19 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   there would dead-end and the device would never see its response.
   Traps are fire-and-forget. Notification filtering applies at the clear
   ingress.
+- **Challenge-test semantics** (`internal/usm/gateway_challenge_test.go`,
+  `internal/tunnel/challenge_test.go`): the security gate is pinned
+  adversarially on the wire — stale boots/time claims are rejected with a
+  Report whose varbind carries usmStatsNotInTimeWindows (counter suffix
+  2), tampered PDUs (one flipped byte) with usmStatsWrongDigests (suffix
+  5); WITHOUT the Reportable flag the same attacks are dropped in
+  complete silence (RFC 3414 §4). Hostile datagrams (empty, truncated
+  headers, huge declared lengths, non-BER noise) never kill the front
+  listener. Wrong-PSK DTLS clients fail the handshake (Connect error).
+  Gotchas for similar tests: `msg.Peek` returns PDUType 0 for v3
+  datagrams (the scopedPDU is opaque) — assert the Report's PDU type via
+  `msg.ParseV3(dg).PDU[0]`; a fake agent that only answers GET (0xA0)
+  makes GetBulk tests time out — echo GET/GETNEXT/GETBULK.
 - **Notification filtering** (`internal/notifyfilter`, `notifications.filter`):
   one filter (action allow|deny + dotted OID prefixes) applies at the
   **clear-notification ingress points only** (the 6 `handleClearTrap`/

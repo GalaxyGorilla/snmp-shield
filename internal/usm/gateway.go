@@ -244,13 +244,9 @@ func (g *GatewayTranslator) handleFrontRequest(addr net.Addr, dg []byte) {
 	}
 	pduBytes := m.PDU
 
-	// relay the inner PDU as clear v1/v2c toward the legacy agent
+	// relay the inner PDU as clear v2c toward the legacy agent
 	ver, community := g.downstreamFor(c)
 	pduType := pduBytes[0]
-	// GetBulk unsupported on v1: downgrade to GetNext per RFC 2576 4.1.1
-	if ver == msg.Version1 && pduType == msg.PDUGetBulkRequest {
-		pduType = msg.PDUGetNextRequest
-	}
 
 	downReqID := int32(g.msgID.Add(1))
 	downFields, downOK := pduCommon(pduBytes)

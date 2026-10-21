@@ -237,10 +237,17 @@ with `validate --json`, and offer a "test connection" button backed by
 
 - **Static binary** — `make release` produces a stripped, cgo-free
   static binary suitable for any Linux appliance (musl/glibc-free).
+- **Cross-builds** — `make release-all` produces stripped static binaries
+  for all appliance platforms into `dist/`: `linux-amd64`, `linux-arm64`,
+  `linux-armv7`. Pure Go with CGO disabled — cross-compiling is exact.
 - **systemd units** — [`deploy/`](deploy/) ships hardened unit files
-  (Restart=on-failure, `ProtectSystem=strict`, `CAP_NET_BIND_SERVICE`
+  (`Type=notify`, `WatchdogSec=30`, Restart=on-failure,
+  `ProtectSystem=strict`, `CAP_NET_BIND_SERVICE`
   for privileged ports, persistent `StateDirectory` for the engine
   boots store).
+- **systemd watchdog** — the binary speaks sd_notify: `READY=1` on
+  startup and `WATCHDOG=1` pings while running (internal/watchdog), so a
+  wedged process is restarted by the host. No-ops outside systemd.
 - **Engine state** — `security.engine_store` must be on persistent
   storage: engineBoots must never decrease (anti-rollback). systemd's
   `StateDirectory=snmp-shield` covers this.
@@ -278,12 +285,14 @@ with `validate --json`, and offer a "test connection" button backed by
 ## Building and testing
 
 ```bash
-make build     # bin/snmp-shield
-make test      # go test ./... -race -timeout 180s
-make vet       # go vet ./...
-make release   # stripped static binary for deployment
-make sbom      # SPDX + CycloneDX SBOMs for the release binary (syft) into dist/
-make vulnscan  # match the SBOM against NVD/GHSA/OSV; fails on HIGH+ (grype)
+make build       # bin/snmp-shield
+make test        # go test ./... -race -timeout 180s
+make vet         # go vet ./...
+make release     # stripped static binary for deployment
+make release-all # cross-builds: linux-amd64, linux-arm64, linux-armv7 into dist/
+make interop     # net-snmp CLI interop test (exit 77 = skip when missing)
+make sbom        # SPDX + CycloneDX SBOMs for the release binary (syft) into dist/
+make vulnscan    # match the SBOM against NVD/GHSA/OSV; fails on HIGH+ (grype)
 ```
 
 Every commit is expected to pass build + vet + the race suite (run

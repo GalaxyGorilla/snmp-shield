@@ -12,7 +12,8 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+WatchdogSec=30
 ExecStart=/usr/local/bin/snmp-shield manager --config /etc/snmp-shield/manager.yaml
 Restart=on-failure
 RestartSec=5

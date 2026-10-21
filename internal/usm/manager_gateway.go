@@ -306,7 +306,7 @@ func (g *ManagerGateway) handleAgentResponse(dg []byte) {
 	// Reports carry the agent's engine state: adopt them (the agent
 	// rebooted → boots went up; the notInTime Report re-syncs this
 	// cache so the next request uses fresh engine clocks).
-	if m2.PDU != nil && len(m2.PDU) > 0 && m2.PDU[0] == msg.PDUReport {
+	if len(m2.PDU) > 0 && m2.PDU[0] == msg.PDUReport {
 		g.adoptEngine(m2)
 		return
 	}

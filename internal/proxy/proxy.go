@@ -24,6 +24,7 @@ import (
 	"github.com/GalaxyGorilla/snmp-shield/internal/tsm"
 	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
 	"github.com/GalaxyGorilla/snmp-shield/internal/usm"
+	"github.com/GalaxyGorilla/snmp-shield/internal/watchdog"
 	"go.uber.org/zap"
 )
 
@@ -142,8 +143,24 @@ func Run(opts Options) error {
 	defer close(snmpStop)
 	serveSNMPMetrics(snmpAgent, opts, snmpStop)
 
+	// systemd watchdog: READY=1 once serving, WATCHDOG=1 pings while
+	// running (no-ops outside systemd). A wedged process is restarted
+	// by the host — the proxy is the device's only network path.
+	if wd := watchdog.Interval(); wd > 0 {
+		opts.Log.Info("systemd watchdog enabled", zap.Duration("interval", wd))
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	wdStop := make(chan struct{})
+	defer close(wdStop)
+	if wd := watchdog.Interval(); wd > 0 {
+		go watchdog.Start(wd, wdStop)
+	}
+	if _, err := watchdog.NotifyReady(); err != nil {
+		opts.Log.Warn("sd_notify READY failed", zap.Error(err))
+	}
 
 	switch opts.Config.Role {
 	case config.RoleManager:

@@ -53,6 +53,12 @@ clear/wrong-user traffic), the manager-gateway (snmpget/getnext/
 bulkwalk/set vs REAL snmpd, v3-on-front-leg rejection, v3 trap
 direction; needs snmpd), and the TSM gateway (snmpget/getnext/
 bulkwalk/set, untrusted-client rejection, trap direction).**
+Ops tooling now matches modbus-shield: `make release-all` cross-builds
+(amd64/arm64/armv7), `make interop` target, systemd watchdog
+(`Type=notify` + `WatchdogSec=30` in all three deploy units, sd_notify
+via internal/watchdog, no-ops outside systemd). Interop trap-recovery
+step showed a timing flake once (chain-dead false negative); reruns
+pass rc=0 — rerun before diagnosing.
 
 | Milestone | Status |
 |---|---|
@@ -85,7 +91,7 @@ bulkwalk/set, untrusted-client rejection, trap direction).**
 | Static analysis (staticcheck + govulncheck toolset, pragmatic: fix only meaningful findings) | done (tested, staticcheck zero findings — dead code removed, pion/dtls v3.1.4 upgrade for GO-2026-6165, options-API migration; govulncheck clean) |
 | `validate` subcommand (`--role` + same flags/`--config`; `--json` for tooling; pre-flights cert keypairs, CA files, engine-store writability) + `selftest` subcommand (validate + probes: tunnel handshake per endpoint (manager), SNMP GET sysDescr.0 to the real agent (agent/gateway), front-cert expiry (tsm-gateway); `--probe=false`) | done (tested, unit tests + manual live-agent/tunnel/dead-addr verification) |
 | `validate --json` exit-code fix (rc mirrors `ok` in both output modes; previously `validate --json` returned 0 on invalid configs while `selftest --json` always honored rc 1 — README/AGENTS "Exit 0/1" only held for text mode) | done (tested, unit + live rc verification; full race suite re-run green) |
-| Makefile (`make build/test/vet/release`), systemd units (`deploy/*.service`: hardening, CAP_NET_BIND_SERVICE, StateDirectory), examples directory (6 copy-paste walkthroughs), README rewrite | done |
+| Makefile (`make build/test/vet/release/release-all/interop`), systemd units (`deploy/*.service`: hardening, CAP_NET_BIND_SERVICE, StateDirectory, Type=notify + WatchdogSec=30), examples directory (6 copy-paste walkthroughs), README rewrite | done |
 | README decision guidance (native SNMPv3, WireGuard/IPsec, and `snmpfwd` alternatives; snmp-shield's DTLS/TSM and appliance-operations fit) | done |
 | Goroutine-leak regression test (`internal/tunnel/leak_test.go`: 30 connect/exchange/close cycles over real PSK-DTLS loopback, goroutine count must return to baseline; server side keyed on `Session.Done()` + production `SetTuning` so there is no test-end accounting noise) | done (tested, -race -count 8 stable: before=after=5) |
 | SBOM + automated vuln-DB comparison (`make sbom` → syft SPDX+CycloneDX into `dist/`; `make vulnscan` → `grype db update` + `grype --fail-on high` vs NVD/GHSA/OSV; `scripts/sbom.sh --sbom-only`) + x/crypto v0.48.0 → v0.58.0 upgrade clearing all Critical/High advisories (go directive 1.24 → 1.26, mandatory for x/crypto ≥ 0.56) | done (tested, `make vulnscan` rc=0 — only residual GO-2026-5932 is Unknown severity/unfixed deprecated-openpgp advisory, below the gate; direct symbol-precise binary scan: 0 findings) |
@@ -324,7 +330,7 @@ throwaway test PKI into gitignored certs/, scripts/tsm-sink raw-DTLS
 test receiver for interop, scripts/interop-manager-gateway.sh real-snmpd
 manager-gateway interop, scripts/sbom.sh SBOM+vulnscan entry point,
 deploy/ systemd unit files, examples/
-deployment walkthroughs, Makefile (build/test/vet/release/sbom/vulnscan).)
+deployment walkthroughs, Makefile (build/test/vet/release/release-all/interop/sbom/vulnscan).)
 
 ## 5. Build / Test
 
@@ -339,7 +345,14 @@ go test ./... -race -timeout 180s
 
 `make build` / `make test` / `make vet` / `make release` wrap the same
 commands (`release` = stripped static binary, `CGO_ENABLED=0
--trimpath -ldflags "-s -w"`, for appliance deployment).
+-trimpath -ldflags "-s -w"`, for appliance deployment). `make release-all`
+cross-builds stripped static binaries for all appliance platforms into
+`dist/`: `linux-amd64`, `linux-arm64`, `linux-armv7` (pure Go + CGO
+disabled = cross-compiling is exact; verified: all three build).
+`make interop` runs the net-snmp two-proxy interop suite (exit 77 =
+skip when net-snmp is missing); the other interop scripts
+(gateway/tsm/manager-gateway) run standalone via
+`sh scripts/interop-<name>.sh`.
 
 **Static analysis** (installed in `~/go/bin`, run after every dependency
 change or parser edit — pragmatic: fix only meaningful findings):

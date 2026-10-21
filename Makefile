@@ -5,7 +5,7 @@
 BINARY := snmp-shield
 GO     ?= go
 
-.PHONY: all build test vet staticcheck govulncheck race release sbom vulnscan clean
+.PHONY: all build test vet staticcheck govulncheck race interop release release-all sbom vulnscan clean
 
 all: build
 
@@ -29,6 +29,23 @@ race: test
 # release builds a stripped static binary for appliance deployment.
 release:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w" -o bin/$(BINARY) ./cmd/snmp-shield
+
+# release-all cross-builds stripped static binaries for the appliance
+# platforms (amd64 + arm64 + armv7) into dist/. The project is pure Go
+# with CGO disabled, so cross-compiling is exact — no ports, no ifdef.
+release-all:
+	@mkdir -p dist
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -ldflags "-s -w" -o dist/$(BINARY)-linux-amd64 ./cmd/snmp-shield
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -trimpath -ldflags "-s -w" -o dist/$(BINARY)-linux-arm64 ./cmd/snmp-shield
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 $(GO) build -trimpath -ldflags "-s -w" -o dist/$(BINARY)-linux-armv7 ./cmd/snmp-shield
+	@echo "release binaries written to dist/ ($(BINARY)-linux-{amd64,arm64,armv7})"
+
+# interop drives the built binary with the real net-snmp CLI against the
+# two-proxy chain (snmpget/snmpset/snmptrap ...). Exit 77 when net-snmp
+# is missing. The other interop scripts (gateway/tsm/manager-gateway)
+# run standalone: sh scripts/interop-<name>.sh
+interop: build
+	sh scripts/interop-snmp.sh
 
 # sbom generates SPDX + CycloneDX SBOMs for the release binary into dist/.
 # Requires syft (https://github.com/anchore/syft); exits 77 when missing.

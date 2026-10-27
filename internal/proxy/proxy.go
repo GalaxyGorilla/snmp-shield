@@ -143,6 +143,17 @@ func Run(opts Options) error {
 	defer close(snmpStop)
 	serveSNMPMetrics(snmpAgent, opts, snmpStop)
 
+	// Anti-rollback warning: an authoritative engine without a persistent
+	// store resets engineBoots on every restart, which re-anchors the
+	// RFC 3414 timeliness window. config.Validate only allows this when
+	// security.ephemeral_engine is set explicitly (flags mode sets it by
+	// default for the plug-and-play path).
+	if opts.Config.Security.EphemeralEngine &&
+		(opts.Config.Security.Mode == "usm-translate" || opts.Config.Security.Mode == "usm-gateway") {
+		opts.Log.Warn("engine state is memory-only (security.ephemeral_engine): engineBoots will reset on restart, weakening replay protection — set security.engine_store for production",
+			zap.String("security_mode", opts.Config.Security.Mode))
+	}
+
 	// systemd watchdog: READY=1 once serving, WATCHDOG=1 pings while
 	// running (no-ops outside systemd). A wedged process is restarted
 	// by the host — the proxy is the device's only network path.

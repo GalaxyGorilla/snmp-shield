@@ -233,17 +233,14 @@ func (a *AgentTranslator) handleTunnelRequest(f *tunnel.Frame) {
 		return
 	}
 
-	// security level enforcement
+	// security level enforcement: never serve a user below its
+	// configured level (no noAuthNoPriv downgrade for an authPriv user).
+	if err := enforceSecurityLevel(c, hdr.MsgFlags); err != nil {
+		a.dropOrReport(hdr, m, f.CorrID, err)
+		return
+	}
 	wantAuth := hdr.MsgFlags&msg.MsgFlagAuth != 0
 	wantPriv := hdr.MsgFlags&msg.MsgFlagPriv != 0
-	if wantAuth && c.p.AuthProtocol == AuthNone {
-		a.dropOrReport(hdr, m, f.CorrID, ErrUnsupportedSec)
-		return
-	}
-	if wantPriv && c.p.PrivProtocol == PrivNone {
-		a.dropOrReport(hdr, m, f.CorrID, ErrUnsupportedSec)
-		return
-	}
 
 	// authentication: verify digest (zeroed params) when flag set.
 	// verified stays false for NoAuth messages: they carry no digest, so
@@ -292,20 +289,9 @@ func (a *AgentTranslator) handleTunnelRequest(f *tunnel.Frame) {
 			a.dropOrReport(hdr, m, f.CorrID, err)
 			return
 		}
-		// UnwrapScopedPDU splits the plaintext scopedPDU TLV into
+		// UnwrapScopedPDU splits the decrypted scopedPDU TLV into
 		// context + PDU and stores the raw PDU TLV in m.PDU.
 		if err := m.UnwrapScopedPDU(plain); err != nil {
-			a.dropOrReport(hdr, m, f.CorrID, err)
-			return
-		}
-	} else {
-		// plaintext scopedPDU: split context + PDU
-		content, err := scopedContent(m.PDU)
-		if err != nil {
-			a.dropOrReport(hdr, m, f.CorrID, err)
-			return
-		}
-		if err := m.UnwrapScopedPDU(content); err != nil {
 			a.dropOrReport(hdr, m, f.CorrID, err)
 			return
 		}
@@ -451,23 +437,12 @@ func (a *AgentTranslator) buildAndSendResponse(pend *agentPending, c *compiled, 
 	etime := a.clock.Time()
 
 	var authParams []byte
-	var privParams []byte
 	if pend.flags&msg.MsgFlagAuth != 0 {
 		authParams = make([]byte, c.p.AuthProtocol.MacLength())
 	}
-	if pend.flags&msg.MsgFlagPriv != 0 {
-		if c.p.PrivProtocol == PrivDES {
-			privParams = a.salt.NextDES(boots)
-		} else {
-			privParams = a.salt.NextAES()
-		}
-	}
+	privParams := a.privParamsFor(pend.flags, c, boots)
 
 	scoped := msg.BuildScoped(engineID, []byte{}, resp)
-
-	encrypt := func(plain []byte) ([]byte, error) {
-		return encryptScoped(c.p.PrivProtocol, c.privKey, boots, etime, privParams, plain)
-	}
 	out, err := msg.BuildV3(msg.V3Header{
 		MsgID:      pend.msgID,
 		MsgMaxSize: msg.DefaultMsgMaxSize,
@@ -480,7 +455,7 @@ func (a *AgentTranslator) buildAndSendResponse(pend *agentPending, c *compiled, 
 		UserName:   pend.user,
 		AuthParams: authParams,
 		PrivParams: privParams,
-	}, scoped, encrypt)
+	}, scoped, encryptorFor(pend.flags, c, boots, etime, privParams))
 	if err != nil {
 		return err
 	}
@@ -617,17 +592,8 @@ func (a *AgentTranslator) sendInformResponse(m *msg.V3Message, pdu []byte, c *co
 	if m.Header.MsgFlags&msg.MsgFlagAuth != 0 {
 		authParams = make([]byte, c.p.AuthProtocol.MacLength())
 	}
-	if m.Header.MsgFlags&msg.MsgFlagPriv != 0 {
-		if c.p.PrivProtocol == PrivDES {
-			privParams = a.salt.NextDES(m.USM.Boots)
-		} else {
-			privParams = a.salt.NextAES()
-		}
-	}
+	privParams = a.privParamsFor(m.Header.MsgFlags, c, m.USM.Boots)
 	scoped := msg.BuildScoped(m.ContextEngineID, []byte{}, resp)
-	encrypt := func(plain []byte) ([]byte, error) {
-		return encryptScoped(c.p.PrivProtocol, c.privKey, m.USM.Boots, m.USM.Time, privParams, plain)
-	}
 	out, err := msg.BuildV3(msg.V3Header{
 		MsgID:      m.Header.MsgID,
 		MsgMaxSize: msg.DefaultMsgMaxSize,
@@ -640,7 +606,7 @@ func (a *AgentTranslator) sendInformResponse(m *msg.V3Message, pdu []byte, c *co
 		UserName:   m.USM.UserName,
 		AuthParams: authParams,
 		PrivParams: privParams,
-	}, scoped, encrypt)
+	}, scoped, encryptorFor(m.Header.MsgFlags, c, m.USM.Boots, m.USM.Time, privParams))
 	if err != nil {
 		return
 	}

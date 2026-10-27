@@ -97,16 +97,16 @@ func NewGatewayTranslator(cfg config.GatewayRole, users []Profile, clock *cache.
 			keys:   newKeyCache(users),
 			replay: newReplayCache(),
 		},
-		cfg:   cfg,
-		prof:  prof,
-		users: users,
-		clock: clock,
-		log:   log,
-		met:   met,
-		filtr: notifyfilter.From(filt...),
-		pend:  make(map[int32]*gwPending),
+		cfg:        cfg,
+		prof:       prof,
+		users:      users,
+		clock:      clock,
+		log:        log,
+		met:        met,
+		filtr:      notifyfilter.From(filt...),
+		pend:       make(map[int32]*gwPending),
 		informPend: make(map[int32]*gwInformPend),
-		stop:  make(chan struct{}),
+		stop:       make(chan struct{}),
 	}, nil
 }
 
@@ -219,17 +219,15 @@ func (g *GatewayTranslator) handleFrontRequest(addr net.Addr, dg []byte) {
 		return
 	}
 
-	// security level enforcement
+	// security level enforcement: the message level must meet the user's
+	// configured level and may never fall below it (no downgrade to
+	// noAuthNoPriv for an authPriv user).
+	if err := enforceSecurityLevel(c, hdr.MsgFlags); err != nil {
+		g.dropOrReport(hdr, m, addr, err)
+		return
+	}
 	wantAuth := hdr.MsgFlags&msg.MsgFlagAuth != 0
 	wantPriv := hdr.MsgFlags&msg.MsgFlagPriv != 0
-	if wantAuth && c.p.AuthProtocol == AuthNone {
-		g.dropOrReport(hdr, m, addr, ErrUnsupportedSec)
-		return
-	}
-	if wantPriv && c.p.PrivProtocol == PrivNone {
-		g.dropOrReport(hdr, m, addr, ErrUnsupportedSec)
-		return
-	}
 
 	// authentication: verify digest (zeroed params) when flag set.
 	// verified stays false for NoAuth messages: they carry no digest, so
@@ -266,7 +264,9 @@ func (g *GatewayTranslator) handleFrontRequest(addr net.Addr, dg []byte) {
 		}
 	}
 
-	// privacy: decrypt scopedPDU when flag set
+	// privacy: decrypt scopedPDU when flag set. ParseV3 already split a
+	// PLAINTEXT scopedPDU (context + PDU) and left m.PDU as the raw PDU
+	// TLV, so the unencrypted case needs no work here.
 	if wantPriv {
 		ct, err := scopedCiphertext(m.PDU)
 		if err != nil {
@@ -278,20 +278,9 @@ func (g *GatewayTranslator) handleFrontRequest(addr net.Addr, dg []byte) {
 			g.dropOrReport(hdr, m, addr, err)
 			return
 		}
-		// UnwrapScopedPDU splits the plaintext scopedPDU TLV into
+		// UnwrapScopedPDU splits the decrypted scopedPDU TLV into
 		// context + PDU and stores the raw PDU TLV in m.PDU.
 		if err := m.UnwrapScopedPDU(plain); err != nil {
-			g.dropOrReport(hdr, m, addr, err)
-			return
-		}
-	} else {
-		// plaintext scopedPDU: split context + PDU
-		content, err := scopedContent(m.PDU)
-		if err != nil {
-			g.dropOrReport(hdr, m, addr, err)
-			return
-		}
-		if err := m.UnwrapScopedPDU(content); err != nil {
 			g.dropOrReport(hdr, m, addr, err)
 			return
 		}
@@ -323,16 +312,22 @@ func (g *GatewayTranslator) handleFrontRequest(addr net.Addr, dg []byte) {
 	pdu := msg.BuildPDU(pduType, downReqID, downFields.ErrStatus, downFields.ErrIndex, downFields.Varbinds)
 	request, err := msg.BuildV1V2c(ver, []byte(community), pdu)
 	if err != nil {
+		g.dropPending(downReqID)
 		g.dropOrReport(hdr, m, addr, err)
 		return
 	}
 
 	udpAddr, err := net.ResolveUDPAddr("udp", g.cfg.AgentAddr)
 	if err != nil {
+		g.dropPending(downReqID)
 		g.dropOrReport(hdr, m, addr, err)
 		return
 	}
 	if _, err := g.agentConn.WriteTo(request, udpAddr); err != nil {
+		// Without this cleanup the entry (and its manager address)
+		// would live forever: the reaper below is only started on the
+		// success path.
+		g.dropPending(downReqID)
 		g.dropOrReport(hdr, m, addr, err)
 		return
 	}
@@ -352,6 +347,27 @@ func (g *GatewayTranslator) handleFrontRequest(addr net.Addr, dg []byte) {
 		case <-pend.cancel:
 		}
 	}()
+}
+
+// takePending removes a pending request and returns it. The cancel
+// channel is closed exactly once here, so the reaper goroutine exits and
+// no path can double-close it.
+func (g *GatewayTranslator) takePending(downReqID int32) (*gwPending, bool) {
+	g.pendMu.Lock()
+	p, ok := g.pend[downReqID]
+	if ok {
+		delete(g.pend, downReqID)
+	}
+	g.pendMu.Unlock()
+	if ok {
+		close(p.cancel)
+	}
+	return p, ok
+}
+
+// dropPending removes a pending request (error paths and timeouts).
+func (g *GatewayTranslator) dropPending(downReqID int32) {
+	_, _ = g.takePending(downReqID)
 }
 
 // readAgent reads responses from the legacy agent on the clear leg.
@@ -389,15 +405,10 @@ func (g *GatewayTranslator) handleAgentResponse(dg []byte) {
 	}
 
 	// find the pending request by the req-id we sent downstream
-	g.pendMu.Lock()
-	pend, ok := g.pend[info.RequestID]
+	pend, ok := g.takePending(info.RequestID)
 	if !ok {
-		g.pendMu.Unlock()
 		return
 	}
-	delete(g.pend, info.RequestID)
-	g.pendMu.Unlock()
-	close(pend.cancel)
 
 	c, ok := g.prof.Lookup(pend.user)
 	if !ok {
@@ -429,18 +440,9 @@ func (g *GatewayTranslator) buildAndSendResponse(pend *gwPending, c *compiled, p
 	if pend.flags&msg.MsgFlagAuth != 0 {
 		authParams = make([]byte, c.p.AuthProtocol.MacLength())
 	}
-	if pend.flags&msg.MsgFlagPriv != 0 {
-		if c.p.PrivProtocol == PrivDES {
-			privParams = g.salt.NextDES(boots)
-		} else {
-			privParams = g.salt.NextAES()
-		}
-	}
+	privParams = g.privParamsFor(pend.flags, c, boots)
 
 	scoped := msg.BuildScoped(engineID, []byte{}, resp)
-	encrypt := func(plain []byte) ([]byte, error) {
-		return encryptScoped(c.p.PrivProtocol, c.privKey, boots, etime, privParams, plain)
-	}
 	out, err := msg.BuildV3(msg.V3Header{
 		MsgID:      pend.msgID,
 		MsgMaxSize: msg.DefaultMsgMaxSize,
@@ -453,7 +455,7 @@ func (g *GatewayTranslator) buildAndSendResponse(pend *gwPending, c *compiled, p
 		UserName:   pend.user,
 		AuthParams: authParams,
 		PrivParams: privParams,
-	}, scoped, encrypt)
+	}, scoped, encryptorFor(pend.flags, c, boots, etime, privParams))
 	if err != nil {
 		return err
 	}
@@ -787,7 +789,16 @@ func (g *GatewayTranslator) buildTrapNotif(pdu []byte, reportable bool) ([]byte,
 		return nil, 0, fmt.Errorf("usm gateway: user %s not found", g.users[0].Name)
 	}
 
-	flags := byte(msg.MsgFlagAuth | msg.MsgFlagPriv)
+	// The notification is wrapped at the first user's CONFIGURED level
+	// (authPriv for every shipped default) — forcing authPriv here would
+	// build an undecryptable message for a priv-less user.
+	flags := byte(0)
+	if c.p.AuthProtocol != AuthNone {
+		flags |= msg.MsgFlagAuth
+	}
+	if c.p.PrivProtocol != PrivNone {
+		flags |= msg.MsgFlagPriv
+	}
 	if reportable {
 		flags |= msg.MsgFlagReportable
 	}
@@ -795,13 +806,13 @@ func (g *GatewayTranslator) buildTrapNotif(pdu []byte, reportable bool) ([]byte,
 	engineID := g.clock.EngineID()
 	boots := g.clock.Boots()
 	etime := g.clock.Time()
-	privParams := g.salt.NextAES()
-	authParams := make([]byte, c.p.AuthProtocol.MacLength())
+	privParams := g.privParamsFor(flags, c, boots)
+	var authParams []byte
+	if flags&msg.MsgFlagAuth != 0 {
+		authParams = make([]byte, c.p.AuthProtocol.MacLength())
+	}
 
 	scoped := msg.BuildScoped(engineID, []byte{}, pdu)
-	encrypt := func(plain []byte) ([]byte, error) {
-		return encryptScoped(c.p.PrivProtocol, c.privKey, boots, etime, privParams, plain)
-	}
 	out, err := msg.BuildV3(msg.V3Header{
 		MsgID:      msgID,
 		MsgMaxSize: msg.DefaultMsgMaxSize,
@@ -814,12 +825,14 @@ func (g *GatewayTranslator) buildTrapNotif(pdu []byte, reportable bool) ([]byte,
 		UserName:   g.users[0].Name,
 		AuthParams: authParams,
 		PrivParams: privParams,
-	}, scoped, encrypt)
+	}, scoped, encryptorFor(flags, c, boots, etime, privParams))
 	if err != nil {
 		return nil, 0, err
 	}
-	if err := signV3(out, c.p.AuthProtocol, c.authKey); err != nil {
-		return nil, 0, err
+	if flags&msg.MsgFlagAuth != 0 {
+		if err := signV3(out, c.p.AuthProtocol, c.authKey); err != nil {
+			return nil, 0, err
+		}
 	}
 	return out, msgID, nil
 }

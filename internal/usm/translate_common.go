@@ -54,15 +54,9 @@ func unwrapV3(keys *Profiles, m *msg.V3Message, packet []byte) (*compiled, []byt
 		if err := m.UnwrapScopedPDU(plain); err != nil {
 			return nil, nil, err
 		}
-	} else {
-		content, err := scopedContent(m.PDU)
-		if err != nil {
-			return nil, nil, err
-		}
-		if err := m.UnwrapScopedPDU(content); err != nil {
-			return nil, nil, err
-		}
 	}
+	// A PLAINTEXT scopedPDU needs no unwrapping here: ParseV3 already
+	// split it into context fields + the raw PDU TLV in m.PDU.
 	return c, m.PDU, nil
 }
 

@@ -98,6 +98,7 @@ type cliFlags struct {
 	authPass      *string
 	privPass      *string
 	v3User        *string
+	engineStore   *string
 	caFile        *string
 	certFile      *string
 	keyFile       *string
@@ -140,6 +141,7 @@ func register(fs *pflag.FlagSet) cliFlags {
 	c.authPass = fs.String("auth-pass", "", "v3 authentication passphrase (usm-translate/gateway mode; user 'proxy', SHA, AES)")
 	c.privPass = fs.String("priv-pass", "", "v3 privacy passphrase (usm-translate/gateway mode)")
 	c.v3User = fs.String("user", "", "v3 username for usm-manager-gateway mode (the REAL AGENT's configured user; default 'proxy')")
+	c.engineStore = fs.String("engine-store", "", "path to the persistent engine boots store (usm-translate/usm-gateway; YAML mode requires it, flags mode defaults to memory-only with a warning)")
 
 	// direct-flags mode: certificate material (tsm tunnel / tsm-gateway)
 	c.caFile = fs.String("ca-file", "", "CA certificate PEM file to verify peers (tsm-gateway)")
@@ -182,6 +184,7 @@ func (c cliFlags) opts() flagsOpts {
 		authPass:     *c.authPass,
 		privPass:     *c.privPass,
 		v3User:       *c.v3User,
+		engineStore:  *c.engineStore,
 		caFile:       *c.caFile,
 		certFile:     *c.certFile,
 		keyFile:      *c.keyFile,
@@ -271,6 +274,7 @@ type flagsOpts struct {
 	secMode      string
 	authPass     string
 	privPass     string
+	engineStore  string
 	v3User       string
 	caFile       string
 	certFile     string
@@ -404,6 +408,11 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 			cfg.Notifications = config.Notifications{Filter: filt}
 		}
 		cfg.Metrics = snmpMetrics(o)
+		// Engine state: flags mode is the plug-and-play path, so an
+		// unnamed store means memory-only — explicitly (YAML configs must
+		// name a persistent store; see config.Validate).
+		cfg.Security.EngineStore = o.engineStore
+		cfg.Security.EphemeralEngine = o.engineStore == ""
 		cfg.Defaults()
 		if err := cfg.Validate(); err != nil {
 			return nil, err
@@ -490,6 +499,13 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 		cfg.Notifications = config.Notifications{Filter: filt}
 	}
 	cfg.Metrics = snmpMetrics(o)
+	// Engine state: flags mode is the plug-and-play path (smoke tests,
+	// evaluations). Without --engine-store the engine state is memory-only,
+	// which must be EXPLICIT — YAML configs are required to name a
+	// persistent store (anti-rollback). The proxy logs the warning at
+	// startup.
+	cfg.Security.EngineStore = o.engineStore
+	cfg.Security.EphemeralEngine = o.engineStore == ""
 	cfg.Defaults()
 	if err := cfg.Validate(); err != nil {
 		return nil, err

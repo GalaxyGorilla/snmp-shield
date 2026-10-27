@@ -116,10 +116,15 @@ func TestValidateErrors(t *testing.T) {
 		Security: Security{
 			Mode: "usm-gateway",
 			Users: []UserCfg{{
-				Name:         "proxy",
-				AuthProtocol: "sha",
-				PrivProtocol: "aes",
+				Name:           "proxy",
+				AuthProtocol:   "sha",
+				AuthPassphrase: "authpass",
+				PrivProtocol:   "aes",
+				PrivPassphrase: "privpass",
 			}},
+			// the notification-only shape still owns an authoritative
+			// engine toward the manager
+			EphemeralEngine: true,
 		},
 	}
 	if err := goodUSMNotifOnly.Validate(); err != nil {
@@ -128,7 +133,7 @@ func TestValidateErrors(t *testing.T) {
 	halfNotify := &Config{
 		Role:     RoleGateway,
 		Gateway:  GatewayRole{TrapListenAddr: ":162"},
-		Security: Security{Mode: "usm-gateway", Users: []UserCfg{{Name: "proxy", AuthProtocol: "sha", PrivProtocol: "aes"}}},
+		Security: Security{Mode: "usm-gateway", Users: []UserCfg{{Name: "proxy", AuthProtocol: "sha", AuthPassphrase: "a", PrivProtocol: "aes", PrivPassphrase: "p"}}, EphemeralEngine: true},
 	}
 	if err := halfNotify.Validate(); err == nil {
 		t.Error("usm-gateway with trap_listen but no trap_sink accepted")
@@ -420,5 +425,134 @@ notifications:
 `)
 	if _, err := Load(path, RoleGateway); err == nil {
 		t.Error("invalid filter action must be rejected for gateway role")
+	}
+}
+
+// --- security.user validation ---------------------------------------------
+
+// gwCfg builds a minimal valid usm-gateway config (request path) whose
+// users/engine-store can be overridden per test.
+func gwCfg(users []UserCfg, store string, ephemeral bool) *Config {
+	return &Config{
+		Role:    RoleGateway,
+		Gateway: GatewayRole{ListenAddr: ":161", AgentAddr: "127.0.0.1:161"},
+		Security: Security{
+			Mode:            "usm-gateway",
+			Users:           users,
+			EngineStore:     store,
+			EphemeralEngine: ephemeral,
+		},
+	}
+}
+
+func goodUser() UserCfg {
+	return UserCfg{
+		Name:           "proxy",
+		AuthProtocol:   "sha",
+		AuthPassphrase: "authpass",
+		PrivProtocol:   "aes",
+		PrivPassphrase: "privpass",
+	}
+}
+
+func TestValidateUserProtocolNames(t *testing.T) {
+	// a typo used to silently delete the user at runtime: every request
+	// from that manager then failed with usmStatsUnknownUserNames
+	u := goodUser()
+	u.AuthProtocol = "shaa"
+	if err := gwCfg([]UserCfg{u}, "/tmp/e.json", false).Validate(); err == nil {
+		t.Error("unknown auth_protocol accepted")
+	}
+	u = goodUser()
+	u.PrivProtocol = "aes99"
+	if err := gwCfg([]UserCfg{u}, "/tmp/e.json", false).Validate(); err == nil {
+		t.Error("unknown priv_protocol accepted")
+	}
+	// aliases stay legal
+	u = goodUser()
+	u.AuthProtocol = "sha256"
+	u.PrivProtocol = "aes256"
+	if err := gwCfg([]UserCfg{u}, "/tmp/e.json", false).Validate(); err != nil {
+		t.Errorf("sha256/aes256 rejected: %v", err)
+	}
+}
+
+func TestValidateUserPassphrases(t *testing.T) {
+	u := goodUser()
+	u.AuthPassphrase = ""
+	if err := gwCfg([]UserCfg{u}, "/tmp/e.json", false).Validate(); err == nil {
+		t.Error("auth user without auth_passphrase accepted")
+	}
+	u = goodUser()
+	u.PrivPassphrase = ""
+	if err := gwCfg([]UserCfg{u}, "/tmp/e.json", false).Validate(); err == nil {
+		t.Error("priv user without priv_passphrase accepted")
+	}
+	// privacy without authentication is meaningless
+	u = goodUser()
+	u.AuthProtocol = "none"
+	u.AuthPassphrase = ""
+	if err := gwCfg([]UserCfg{u}, "/tmp/e.json", false).Validate(); err == nil {
+		t.Error("priv_protocol with auth_protocol none accepted")
+	}
+	dup := goodUser()
+	if err := gwCfg([]UserCfg{goodUser(), dup}, "/tmp/e.json", false).Validate(); err == nil {
+		t.Error("duplicate user names accepted")
+	}
+}
+
+func TestValidateRejectsNoAuthUsers(t *testing.T) {
+	// the gateway is a security gate: it must never relay on behalf of an
+	// unauthenticated (noAuthNoPriv) identity
+	u := goodUser()
+	u.AuthProtocol = "none"
+	u.AuthPassphrase = ""
+	u.PrivProtocol = "none"
+	u.PrivPassphrase = ""
+	if err := gwCfg([]UserCfg{u}, "/tmp/e.json", false).Validate(); err == nil {
+		t.Error("noAuthNoPriv user accepted in usm-gateway mode")
+	}
+	// authNoPriv stays legal
+	u = goodUser()
+	u.PrivProtocol = "none"
+	u.PrivPassphrase = ""
+	if err := gwCfg([]UserCfg{u}, "/tmp/e.json", false).Validate(); err != nil {
+		t.Errorf("authNoPriv user rejected: %v", err)
+	}
+}
+
+func TestValidateEngineStoreRequired(t *testing.T) {
+	// authoritative-engine modes must persist engineBoots
+	if err := gwCfg([]UserCfg{goodUser()}, "", false).Validate(); err == nil {
+		t.Error("usm-gateway without engine_store accepted")
+	}
+	if err := gwCfg([]UserCfg{goodUser()}, "", true).Validate(); err != nil {
+		t.Errorf("explicit ephemeral engine rejected: %v", err)
+	}
+	if err := gwCfg([]UserCfg{goodUser()}, "/var/lib/snmp-shield/e.json", false).Validate(); err != nil {
+		t.Errorf("persistent engine store rejected: %v", err)
+	}
+	// the manager-gateway FOLLOWS the agent's engine: no store needed
+	mgw := &Config{
+		Role:     RoleGateway,
+		Gateway:  GatewayRole{ListenAddr: ":161", AgentAddr: "10.0.0.9:161"},
+		Security: Security{Mode: "usm-manager-gateway", Users: []UserCfg{goodUser()}},
+	}
+	if err := mgw.Validate(); err != nil {
+		t.Errorf("usm-manager-gateway requires no engine store: %v", err)
+	}
+	// two-proxy usm-translate terminates USM on both sides: required too
+	tr := &Config{
+		Role:     RoleAgent,
+		Tunnel:   Tunnel{Mode: "dtls", ListenAddr: ":10162", PSK: "text:s"},
+		Agent:    AgentRole{AgentAddr: "127.0.0.1:161"},
+		Security: Security{Mode: "usm-translate", Users: []UserCfg{goodUser()}},
+	}
+	if err := tr.Validate(); err == nil {
+		t.Error("usm-translate without engine_store accepted")
+	}
+	tr.Security.EphemeralEngine = true
+	if err := tr.Validate(); err != nil {
+		t.Errorf("usm-translate with explicit ephemeral engine rejected: %v", err)
 	}
 }

@@ -2,7 +2,7 @@
 // usm-manager-gateway). The mirror of the agent-facing usm-gateway: this
 // proxy protects a LEGACY manager talking to a V3-CAPABLE agent.
 //
-//   [legacy manager] --clear v1/v2c--> [this proxy] --v3 USM authPriv--> [real v3 agent]
+//	[legacy manager] --clear v1/v2c--> [this proxy] --v3 USM authPriv--> [real v3 agent]
 //
 // The clear front leg accepts v1/v2c GET/GETNEXT/GETBULK/SET from the
 // legacy manager; every request is wrapped into an authenticated+encrypted

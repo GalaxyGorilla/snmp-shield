@@ -5,7 +5,6 @@
 package usm
 
 import (
-	"crypto"
 	"crypto/des"
 	"crypto/hmac"
 	"crypto/md5"
@@ -18,158 +17,48 @@ import (
 	"fmt"
 	"hash"
 	"sync/atomic"
+
+	"github.com/GalaxyGorilla/snmp-shield/internal/securitylevel"
 )
 
-// AuthProtocol enumerates the supported authentication protocols.
-type AuthProtocol int
+// AuthProtocol and PrivProtocol live in internal/securitylevel (a leaf
+// package, so config validation can use the same names/parsers without
+// importing usm). These aliases keep the usm-facing vocabulary unchanged.
+type AuthProtocol = securitylevel.AuthProtocol
+type PrivProtocol = securitylevel.PrivProtocol
 
 const (
-	AuthNone   AuthProtocol = 1
-	AuthMD5    AuthProtocol = 2
-	AuthSHA    AuthProtocol = 3
-	AuthSHA224 AuthProtocol = 4
-	AuthSHA256 AuthProtocol = 5
-	AuthSHA384 AuthProtocol = 6
-	AuthSHA512 AuthProtocol = 7
+	AuthNone   = securitylevel.AuthNone
+	AuthMD5    = securitylevel.AuthMD5
+	AuthSHA    = securitylevel.AuthSHA
+	AuthSHA224 = securitylevel.AuthSHA224
+	AuthSHA256 = securitylevel.AuthSHA256
+	AuthSHA384 = securitylevel.AuthSHA384
+	AuthSHA512 = securitylevel.AuthSHA512
 )
-
-// PrivProtocol enumerates the supported privacy protocols.
-type PrivProtocol int
 
 const (
-	PrivNone    PrivProtocol = 1
-	PrivDES     PrivProtocol = 2
-	PrivAES     PrivProtocol = 3 // AES-128 (CFB)
-	PrivAES192  PrivProtocol = 4 // Blumenthal extension
-	PrivAES256  PrivProtocol = 5 // Blumenthal extension
-	PrivAES192C PrivProtocol = 6 // Reeder extension
-	PrivAES256C PrivProtocol = 7 // Reeder extension
+	PrivNone    = securitylevel.PrivNone
+	PrivDES     = securitylevel.PrivDES
+	PrivAES     = securitylevel.PrivAES
+	PrivAES192  = securitylevel.PrivAES192
+	PrivAES256  = securitylevel.PrivAES256
+	PrivAES192C = securitylevel.PrivAES192C
+	PrivAES256C = securitylevel.PrivAES256C
 )
+
+// ParseAuthProtocol / ParsePrivProtocol delegate to the leaf package.
+func ParseAuthProtocol(s string) (AuthProtocol, error) { return securitylevel.ParseAuthProtocol(s) }
+func ParsePrivProtocol(s string) (PrivProtocol, error) { return securitylevel.ParsePrivProtocol(s) }
 
 // ErrAuth is returned when authentication fails verification.
 var ErrAuth = errors.New("usm: authentication failed")
-
-// hashFunc maps the protocol to its crypto.Hash (MD5/SHA1/SHA-2 family).
-func (a AuthProtocol) hashFunc() (crypto.Hash, error) {
-	switch a {
-	case AuthMD5:
-		return crypto.MD5, nil
-	case AuthSHA:
-		return crypto.SHA1, nil
-	case AuthSHA224:
-		return crypto.SHA224, nil
-	case AuthSHA256:
-		return crypto.SHA256, nil
-	case AuthSHA384:
-		return crypto.SHA384, nil
-	case AuthSHA512:
-		return crypto.SHA512, nil
-	default:
-		return 0, fmt.Errorf("usm: no hash for auth protocol %d", int(a))
-	}
-}
-
-// MacLength returns the authentication digest length on the wire.
-func (a AuthProtocol) MacLength() int {
-	switch a {
-	case AuthMD5, AuthSHA:
-		return 12
-	case AuthSHA224:
-		return 16
-	case AuthSHA256:
-		return 24
-	case AuthSHA384:
-		return 32
-	case AuthSHA512:
-		return 48
-	default:
-		return 0
-	}
-}
-
-// KeyLength returns the localized auth key length.
-func (a AuthProtocol) KeyLength() int {
-	switch a {
-	case AuthMD5:
-		return 16
-	case AuthSHA:
-		return 20
-	case AuthSHA224:
-		return 28
-	case AuthSHA256:
-		return 32
-	case AuthSHA384:
-		return 48
-	case AuthSHA512:
-		return 64
-	default:
-		return 0
-	}
-}
-
-// PrivKeyLength returns the privacy key length.
-func (p PrivProtocol) PrivKeyLength() int {
-	switch p {
-	case PrivDES, PrivAES:
-		return 16
-	case PrivAES192, PrivAES192C:
-		return 24
-	case PrivAES256, PrivAES256C:
-		return 32
-	default:
-		return 0
-	}
-}
-
-// ParseAuthProtocol maps config strings to AuthProtocol.
-func ParseAuthProtocol(s string) (AuthProtocol, error) {
-	switch s {
-	case "", "none":
-		return AuthNone, nil
-	case "md5":
-		return AuthMD5, nil
-	case "sha", "sha1":
-		return AuthSHA, nil
-	case "sha224":
-		return AuthSHA224, nil
-	case "sha256":
-		return AuthSHA256, nil
-	case "sha384":
-		return AuthSHA384, nil
-	case "sha512":
-		return AuthSHA512, nil
-	default:
-		return 0, fmt.Errorf("usm: unknown auth protocol %q", s)
-	}
-}
-
-// ParsePrivProtocol maps config strings to PrivProtocol.
-func ParsePrivProtocol(s string) (PrivProtocol, error) {
-	switch s {
-	case "", "none":
-		return PrivNone, nil
-	case "des":
-		return PrivDES, nil
-	case "aes", "aes128":
-		return PrivAES, nil
-	case "aes192":
-		return PrivAES192, nil
-	case "aes256":
-		return PrivAES256, nil
-	case "aes192c":
-		return PrivAES192C, nil
-	case "aes256c":
-		return PrivAES256C, nil
-	default:
-		return 0, fmt.Errorf("usm: unknown privacy protocol %q", s)
-	}
-}
 
 // PasswordToKey derives the localized authentication key (RFC 3414 2.6
 // with RFC 7860 hash extension): hash the password (1MiB cycling), then
 // localize with the engine ID: local = H(H | engineID | H).
 func PasswordToKey(a AuthProtocol, password, engineID string) ([]byte, error) {
-	hf, err := a.hashFunc()
+	hf, err := securitylevel.HashFunc(a)
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +101,7 @@ func localize(hfNew func() hash.Hash, hashed []byte, engineID string) []byte {
 // applying Blumenthal or Reeder extension for the AES-192/256 variants
 // (matching gosnmp/net-snmp behavior).
 func LocalizedPrivKey(a AuthProtocol, p PrivProtocol, password, engineID string) ([]byte, error) {
-	hf, err := a.hashFunc()
+	hf, err := securitylevel.HashFunc(a)
 	if err != nil {
 		return nil, err
 	}
@@ -262,7 +151,7 @@ func Digest(a AuthProtocol, packet, authKey []byte) ([]byte, error) {
 	case AuthMD5, AuthSHA:
 		return digestRFC3414(a, packet, authKey)
 	case AuthSHA224, AuthSHA256, AuthSHA384, AuthSHA512:
-		hf, err := a.hashFunc()
+		hf, err := securitylevel.HashFunc(a)
 		if err != nil {
 			return nil, err
 		}

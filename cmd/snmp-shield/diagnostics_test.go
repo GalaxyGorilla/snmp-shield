@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -56,6 +57,7 @@ agent:
   agent_addr: "127.0.0.1:161"
 security:
   mode: usm-translate
+  engine_store: "%s"
   users:
     - name: proxy
       auth_protocol: sha
@@ -63,6 +65,7 @@ security:
       priv_protocol: aes
       priv_passphrase: privpass
 `
+	yaml = fmt.Sprintf(yaml, filepath.Join(dir, "engine.json"))
 	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
 		t.Fatal(err)
 	}

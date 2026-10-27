@@ -92,6 +92,12 @@ func (t *translatorBase) receiveNotif(packet []byte, m *msg.V3Message) (*compile
 	if !ok {
 		return nil, nil, ErrUnknownUser
 	}
+	// The notification peer must meet the user's configured level: a
+	// noAuthNoPriv notification (or inform response) naming a user that
+	// is configured authPriv is a downgrade and must not be trusted.
+	if err := enforceSecurityLevel(c, m.Header.MsgFlags); err != nil {
+		return nil, nil, err
+	}
 	wantAuth := m.Header.MsgFlags&msg.MsgFlagAuth != 0
 	if wantAuth {
 		if c.authKey == nil {
@@ -123,15 +129,9 @@ func (t *translatorBase) receiveNotif(packet []byte, m *msg.V3Message) (*compile
 		if err := m.UnwrapScopedPDU(plain); err != nil {
 			return nil, nil, err
 		}
-	} else {
-		content, err := scopedContent(m.PDU)
-		if err != nil {
-			return nil, nil, err
-		}
-		if err := m.UnwrapScopedPDU(content); err != nil {
-			return nil, nil, err
-		}
 	}
+	// A PLAINTEXT scopedPDU needs no unwrapping here: ParseV3 already
+	// split it into context fields + the raw PDU TLV in m.PDU.
 	return c, m.PDU, nil
 }
 
@@ -141,6 +141,79 @@ type translatorBase struct {
 	keys   *keyCache
 	replay *replayCache
 	salt   SaltCounter
+}
+
+// --- security level enforcement -----------------------------------------------
+
+// privParamsFor returns the USM privacy parameters for an outbound
+// message: nil unless the privacy flag is set. An authNoPriv message must
+// carry an EMPTY privParameters field, and consuming a salt value for a
+// message that does not use privacy only burns the counter.
+func (t *translatorBase) privParamsFor(flags byte, c *compiled, boots uint32) []byte {
+	if flags&msg.MsgFlagPriv == 0 {
+		return nil
+	}
+	if c.p.PrivProtocol == PrivDES {
+		return t.salt.NextDES(boots)
+	}
+	return t.salt.NextAES()
+}
+
+// encryptorFor returns the scopedPDU encryptor for an outbound message:
+// nil unless the privacy flag is set. BuildV3 treats a non-nil encryptor
+// as "encrypt this scopedPDU now", so handing it one for an authNoPriv
+// message emits a ciphertext OCTET STRING the peer can never decrypt (an
+// authNoPriv message carries no privParameters to derive the key from).
+func encryptorFor(flags byte, c *compiled, boots, etime uint32, privParams []byte) func([]byte) ([]byte, error) {
+	if flags&msg.MsgFlagPriv == 0 || c.privKey == nil {
+		return nil
+	}
+	return func(plain []byte) ([]byte, error) {
+		return encryptScoped(c.p.PrivProtocol, c.privKey, boots, etime, privParams, plain)
+	}
+}
+
+// enforceSecurityLevel decides whether a message's requested security
+// level (its USM msgFlags) may be served by the compiled user profile.
+//
+// RFC 3414 §3.2 step 4 only defines the "message asks for MORE than the
+// user can do" direction. A security GATEWAY must also enforce the
+// inverse: a user configured with auth/priv must never be usable at a
+// LOWER level. Without that check anyone who learns the engine ID from an
+// unauthenticated discovery Report (which every USM engine answers by
+// design) could send a NoAuthNoPriv request naming an authPriv user —
+// no digest, no encryption — and have it relayed to the legacy device.
+//
+// The policy is therefore exact-or-higher per message:
+//
+//	authPriv user   -> only authPriv messages
+//	authNoPriv user -> authPriv or authNoPriv messages
+//	noAuthNoPriv    -> any level
+//
+// priv without auth is rejected outright: RFC 3414 §3.1 makes the priv
+// bit meaningful only together with the auth bit.
+func enforceSecurityLevel(c *compiled, flags byte) error {
+	wantAuth := flags&msg.MsgFlagAuth != 0
+	wantPriv := flags&msg.MsgFlagPriv != 0
+	if wantPriv && !wantAuth {
+		return ErrUnsupportedSec
+	}
+	// The message asks for more than the user can provide.
+	if wantAuth && c.p.AuthProtocol == AuthNone {
+		return ErrUnsupportedSec
+	}
+	if wantPriv && c.p.PrivProtocol == PrivNone {
+		return ErrUnsupportedSec
+	}
+	// The message asks for LESS than the user is configured for: a
+	// downgrade, and an authentication bypass if served.
+	if !wantAuth && c.p.AuthProtocol != AuthNone {
+		return ErrUnsupportedSec
+	}
+	if !wantPriv && c.p.PrivProtocol != PrivNone {
+		return ErrUnsupportedSec
+	}
+	return nil
 }
 
 // --- usmStats report helpers --------------------------------------------------
@@ -201,15 +274,6 @@ func appendBinding(dst, oid []byte, valTag byte, val []byte) []byte {
 }
 
 // --- v3 scopedPDU / crypto plumbing ----------------------------------------
-
-// scopedContent returns the scopedPDU SEQUENCE content when plaintext.
-func scopedContent(scopedTLV []byte) ([]byte, error) {
-	if len(scopedTLV) < 2 || scopedTLV[0] != 0x30 {
-		return nil, ErrUnsupportedSec
-	}
-	// berContentOf expects the length-octet position: skip the tag.
-	return berContentOf(scopedTLV[1:])
-}
 
 // scopedCiphertext returns the ciphertext content when the scopedPDU TLV
 // is an OCTET STRING (encrypted).

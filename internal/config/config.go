@@ -12,6 +12,7 @@ import (
 
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/notifyfilter"
+	"github.com/GalaxyGorilla/snmp-shield/internal/securitylevel"
 	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
 	"gopkg.in/yaml.v3"
 )
@@ -150,8 +151,16 @@ type Security struct {
 	// EngineID, when set, fixes this instance's SNMP engine ID; otherwise
 	// one is generated and persisted in EngineStore.
 	EngineID string `yaml:"engine_id"`
-	// EngineStore is the path of the engine boots/state store.
+	// EngineStore is the path of the engine boots/state store. REQUIRED
+	// whenever this instance is the authoritative engine (usm-translate,
+	// usm-gateway): engineBoots must never decrease across restarts, or
+	// the RFC 3414 replay window reopens. Only gateway modes that FOLLOW
+	// a remote engine (usm-manager-gateway) need no store.
 	EngineStore string `yaml:"engine_store"`
+	// EphemeralEngine explicitly accepts losing the engine state on
+	// restart. Testing and the no-YAML quick start only: a restart then
+	// resets engineBoots, which weakens replay protection.
+	EphemeralEngine bool `yaml:"ephemeral_engine"`
 
 	// TrapCommunity is the community used in v2c notifications delivered
 	// to local sinks (default "public").
@@ -287,10 +296,78 @@ func (c *Config) Defaults() {
 	}
 }
 
+// validateSecurityUsers checks the USM user database: protocol NAMES must
+// parse (a typo used to silently delete the user at runtime, so every
+// request from that manager failed with usmStatsUnknownUserNames), the
+// passphrases those protocols need must be present, and privacy may not
+// be requested without authentication.
+func (c *Config) validateSecurityUsers() error {
+	seen := make(map[string]bool, len(c.Security.Users))
+	for _, u := range c.Security.Users {
+		if u.Name == "" {
+			return fmt.Errorf("security.users: user name is required")
+		}
+		if seen[u.Name] {
+			return fmt.Errorf("security.users: duplicate user %q", u.Name)
+		}
+		seen[u.Name] = true
+		ap, err := securitylevel.ParseAuthProtocol(u.AuthProtocol)
+		if err != nil {
+			return fmt.Errorf("security.users: user %s: auth_protocol: %w", u.Name, err)
+		}
+		pp, err := securitylevel.ParsePrivProtocol(u.PrivProtocol)
+		if err != nil {
+			return fmt.Errorf("security.users: user %s: priv_protocol: %w", u.Name, err)
+		}
+		if pp != securitylevel.PrivNone && ap == securitylevel.AuthNone {
+			return fmt.Errorf("security.users: user %s: priv_protocol %q requires auth_protocol", u.Name, u.PrivProtocol)
+		}
+		if ap != securitylevel.AuthNone && u.AuthPassphrase == "" {
+			return fmt.Errorf("security.users: user %s: auth_passphrase is required with auth_protocol %q", u.Name, u.AuthProtocol)
+		}
+		if pp != securitylevel.PrivNone && u.PrivPassphrase == "" {
+			return fmt.Errorf("security.users: user %s: priv_passphrase is required with priv_protocol %q", u.Name, u.PrivProtocol)
+		}
+	}
+	return nil
+}
+
+// requireAuthenticatedUsers rejects noAuthNoPriv users in the modes where
+// this instance is the security gate: relaying traffic for an
+// unauthenticated identity would defeat the point of the box. authNoPriv
+// stays legal (authentication without encryption).
+func (c *Config) requireAuthenticatedUsers() error {
+	for _, u := range c.Security.Users {
+		ap, err := securitylevel.ParseAuthProtocol(u.AuthProtocol)
+		if err != nil {
+			return fmt.Errorf("security.users: user %s: auth_protocol: %w", u.Name, err)
+		}
+		if ap == securitylevel.AuthNone {
+			return fmt.Errorf("security.users: user %s: auth_protocol none is not allowed in %s mode (unauthenticated traffic must never be relayed)", u.Name, c.Security.Mode)
+		}
+	}
+	return nil
+}
+
+// requireEngineStore enforces the anti-rollback contract: an
+// authoritative engine must persist engineBoots. Memory-only state resets
+// boots on every restart, which re-anchors the timeliness window and lets
+// previously captured messages replay. EphemeralEngine is the explicit,
+// documented escape hatch (quick start / tests).
+func (c *Config) requireEngineStore() error {
+	if c.Security.EngineStore != "" || c.Security.EphemeralEngine {
+		return nil
+	}
+	return fmt.Errorf("security.engine_store is required for security.mode %s: engineBoots must never decrease across restarts (anti-rollback). Set security.engine_store to a persistent path (e.g. /var/lib/snmp-shield/engine.json), or set security.ephemeral_engine: true to accept losing engine state (testing only)", c.Security.Mode)
+}
+
 // Validate checks the configuration for the configured role.
 func (c *Config) Validate() error {
 	if _, err := c.TrapFilter(); err != nil {
 		return fmt.Errorf("notifications.filter: %w", err)
+	}
+	if err := c.validateSecurityUsers(); err != nil {
+		return err
 	}
 	if c.Metrics.BaseOID != "" {
 		dotted := strings.TrimSuffix(strings.TrimPrefix(c.Metrics.BaseOID, "."), ".")
@@ -327,14 +404,12 @@ func (c *Config) Validate() error {
 			if len(c.Security.Users) == 0 {
 				return fmt.Errorf("security.users: usm-gateway needs at least one user")
 			}
-			for _, u := range c.Security.Users {
-				if u.Name == "" {
-					return fmt.Errorf("security.users: user name is required")
-				}
-				if u.AuthProtocol == "" || u.PrivProtocol == "" {
-					return fmt.Errorf("security.users: user %s needs auth_protocol and priv_protocol", u.Name)
-				}
+			if err := c.requireAuthenticatedUsers(); err != nil {
+				return err
 			}
+			// The gateway IS the authoritative engine toward managers,
+			// so its boots must survive restarts.
+			return c.requireEngineStore()
 		case "usm-manager-gateway":
 			// The request path is required: legacy manager front leg +
 			// real v3 agent. The trap legs are optional (v3 agent
@@ -348,14 +423,9 @@ func (c *Config) Validate() error {
 			if len(c.Security.Users) == 0 {
 				return fmt.Errorf("security.users: usm-manager-gateway needs at least one user (the v3 agent's credentials)")
 			}
-			for _, u := range c.Security.Users {
-				if u.Name == "" {
-					return fmt.Errorf("security.users: user name is required")
-				}
-				if u.AuthProtocol == "" || u.PrivProtocol == "" {
-					return fmt.Errorf("security.users: user %s needs auth_protocol and priv_protocol", u.Name)
-				}
-			}
+			// The AGENT is the authoritative engine here: the gateway
+			// follows it and needs no engine store of its own.
+			return c.requireAuthenticatedUsers()
 		case "tsm-gateway":
 			if c.Gateway.ListenAddr == "" {
 				return fmt.Errorf("gateway.listen_addr is required")
@@ -424,13 +494,12 @@ func (c *Config) Validate() error {
 		if len(c.Security.Users) == 0 {
 			return fmt.Errorf("security.users: usm-translate needs at least one user")
 		}
-		for _, u := range c.Security.Users {
-			if u.Name == "" {
-				return fmt.Errorf("security.users: user name is required")
-			}
-			if u.AuthProtocol == "" || u.PrivProtocol == "" {
-				return fmt.Errorf("security.users: user %s needs auth_protocol and priv_protocol", u.Name)
-			}
+		if err := c.requireAuthenticatedUsers(); err != nil {
+			return err
+		}
+		// Both sides terminate USM, so both must persist engine boots.
+		if err := c.requireEngineStore(); err != nil {
+			return err
 		}
 	}
 	if c.Security.Mode == "tsm" {

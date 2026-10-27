@@ -735,17 +735,8 @@ func (m *ManagerTranslator) sendInformResponse(f *tunnel.Frame, m2 *msg.V3Messag
 	if m2.Header.MsgFlags&msg.MsgFlagAuth != 0 {
 		authParams = make([]byte, c.p.AuthProtocol.MacLength())
 	}
-	if m2.Header.MsgFlags&msg.MsgFlagPriv != 0 {
-		if c.p.PrivProtocol == PrivDES {
-			privParams = m.salt.NextDES(m2.USM.Boots)
-		} else {
-			privParams = m.salt.NextAES()
-		}
-	}
+	privParams = m.privParamsFor(m2.Header.MsgFlags, c, m2.USM.Boots)
 	scoped := msg.BuildScoped(m2.ContextEngineID, []byte{}, resp)
-	encrypt := func(plain []byte) ([]byte, error) {
-		return encryptScoped(c.p.PrivProtocol, c.privKey, m2.USM.Boots, m2.USM.Time, privParams, plain)
-	}
 	out, err := msg.BuildV3(msg.V3Header{
 		MsgID:      m2.Header.MsgID,
 		MsgMaxSize: msg.DefaultMsgMaxSize,
@@ -758,7 +749,7 @@ func (m *ManagerTranslator) sendInformResponse(f *tunnel.Frame, m2 *msg.V3Messag
 		UserName:   m2.USM.UserName,
 		AuthParams: authParams,
 		PrivParams: privParams,
-	}, scoped, encrypt)
+	}, scoped, encryptorFor(m2.Header.MsgFlags, c, m2.USM.Boots, m2.USM.Time, privParams))
 	if err != nil {
 		return
 	}

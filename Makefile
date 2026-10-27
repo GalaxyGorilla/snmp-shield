@@ -5,15 +5,23 @@
 BINARY := snmp-shield
 GO     ?= go
 
-.PHONY: all build test vet staticcheck govulncheck race interop release release-all sbom vulnscan clean
+.PHONY: all build test fmt-check vet staticcheck govulncheck race interop release release-all sbom vulnscan clean
 
 all: build
 
 build:
 	$(GO) build -o bin/$(BINARY) ./cmd/snmp-shield
 
-test:
+# test gates on formatting: an unformatted file used to slip into a green
+# suite because nothing checked (matches modbus-shield).
+test: fmt-check
 	$(GO) test ./... -race -timeout 180s
+
+fmt-check:
+	@unformatted=$$(gofmt -l . | grep -v '^vendor/' || true); \
+	if [ -n "$$unformatted" ]; then \
+		echo "gofmt needed:"; echo "$$unformatted"; exit 1; \
+	fi
 
 vet:
 	$(GO) vet ./...

@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GalaxyGorilla/snmp-shield/internal/access"
 	"github.com/GalaxyGorilla/snmp-shield/internal/cache"
 	"github.com/GalaxyGorilla/snmp-shield/internal/config"
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
@@ -48,6 +49,10 @@ type GatewayTranslator struct {
 	log   *zap.Logger
 	met   *observ.Metrics
 	filtr *notifyfilter.Filter // notification filter (nil = allow all)
+	// access is the front-leg policy (client allow-list, rate limit,
+	// write policy). Nil holder / nil policy = allow everything; a
+	// reload swaps it atomically.
+	access *access.Holder
 
 	msgID atomic.Uint32
 
@@ -109,6 +114,11 @@ func NewGatewayTranslator(cfg config.GatewayRole, users []Profile, clock *cache.
 		stop:       make(chan struct{}),
 	}, nil
 }
+
+// SetAccess installs (or replaces) the front-leg access policy. Safe to
+// call at any time: the policy is read per datagram, so a SIGHUP reload
+// takes effect on the next request without touching listeners.
+func (g *GatewayTranslator) SetAccess(h *access.Holder) { g.access = h }
 
 // Run binds the configured legs and serves until done is closed. The
 // front leg (ListenAddr), the clear agent socket and the trap listener
@@ -177,6 +187,26 @@ func (g *GatewayTranslator) readFront() {
 			continue
 		}
 		dg := append([]byte{}, buf[:n]...)
+
+		// Access policy, cheapest checks first, before any parsing: an
+		// off-list or over-rate client costs us nothing but the read.
+		// Denials are silent — answering unauthenticated traffic would
+		// reveal the proxy and amplify the flood.
+		switch g.access.Get().Check(access.IPOf(addr)) {
+		case access.DeniedClient:
+			if g.met != nil {
+				g.met.ACLDenied.Inc()
+			}
+			g.drop()
+			continue
+		case access.DeniedRate:
+			if g.met != nil {
+				g.met.RateLimited.Inc()
+			}
+			g.drop()
+			continue
+		}
+
 		info, err := msg.Peek(dg)
 		if err != nil {
 			g.drop()
@@ -305,6 +335,20 @@ func (g *GatewayTranslator) handleFrontRequest(addr net.Addr, dg []byte) {
 		user:        m.USM.UserName,
 		cancel:      make(chan struct{}),
 	}
+
+	// Write policy: this client is authenticated and admitted, so a
+	// refusal is answered (notWritable) instead of dropped — the manager
+	// learns immediately instead of retransmitting into a timeout.
+	if !g.access.Get().AllowWrite(pduBytes) {
+		if g.met != nil {
+			g.met.WritesDenied.Inc()
+		}
+		g.log.Debug("usm gateway: write refused by policy",
+			zap.String("user", m.USM.UserName), zap.String("peer", addr.String()))
+		g.denyWrite(pend, c, pduBytes)
+		return
+	}
+
 	g.pendMu.Lock()
 	g.pend[downReqID] = pend
 	g.pendMu.Unlock()
@@ -421,7 +465,9 @@ func (g *GatewayTranslator) handleAgentResponse(dg []byte) {
 }
 
 // buildAndSendResponse wraps a clear v1/v2c PDU into a signed+encrypted
-// v3 response for the manager and sends it on the front leg.
+// v3 response for the manager and sends it on the front leg. It counts
+// the request as forwarded; a locally generated answer (policy denial)
+// must use sendV3Response directly so the forwarding counter stays honest.
 func (g *GatewayTranslator) buildAndSendResponse(pend *gwPending, c *compiled, pdu []byte) error {
 	respFields, respOK := pduCommon(pdu)
 	if !respOK {
@@ -429,7 +475,19 @@ func (g *GatewayTranslator) buildAndSendResponse(pend *gwPending, c *compiled, p
 	}
 	// response PDU: same type, manager's req-id, error fields preserved
 	resp := msg.BuildPDU(msg.PDUGetResponse, pend.clientReqID, respFields.ErrStatus, respFields.ErrIndex, respFields.Varbinds)
+	if err := g.sendV3Response(pend, c, resp); err != nil {
+		return err
+	}
+	if g.met != nil {
+		g.met.ReqForwarded.Inc()
+	}
+	return nil
+}
 
+// sendV3Response wraps an already-built response PDU for the manager and
+// sends it on the front leg, echoing the request's msgID and security
+// level so the manager can correlate and verify it.
+func (g *GatewayTranslator) sendV3Response(pend *gwPending, c *compiled, resp []byte) error {
 	flags := pend.flags | msg.MsgFlagReportable
 	engineID := g.clock.EngineID()
 	boots := g.clock.Boots()
@@ -464,15 +522,23 @@ func (g *GatewayTranslator) buildAndSendResponse(pend *gwPending, c *compiled, p
 			return err
 		}
 	}
-
 	_, err = g.conn.WriteTo(out, pend.addr)
-	if err != nil {
-		return err
+	return err
+}
+
+// denyWrite answers a SET that the access policy refused with
+// notWritable, without forwarding it to the device and without counting a
+// forward. The manager gets a definite answer instead of a timeout.
+func (g *GatewayTranslator) denyWrite(pend *gwPending, c *compiled, pdu []byte) {
+	fields, ok := pduCommon(pdu)
+	if !ok {
+		g.drop()
+		return
 	}
-	if g.met != nil {
-		g.met.ReqForwarded.Inc()
+	resp := msg.BuildPDU(msg.PDUGetResponse, pend.clientReqID, msg.ErrStatusNotWritable, 0, fields.Varbinds)
+	if err := g.sendV3Response(pend, c, resp); err != nil {
+		g.log.Debug("usm gateway: notWritable response failed", zap.Error(err))
 	}
-	return nil
 }
 
 // downstreamFor returns the SNMP version + community toward the legacy

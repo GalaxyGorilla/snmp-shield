@@ -30,6 +30,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GalaxyGorilla/snmp-shield/internal/access"
 	"github.com/GalaxyGorilla/snmp-shield/internal/config"
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/notifyfilter"
@@ -48,6 +49,9 @@ type ManagerGateway struct {
 	log   *zap.Logger
 	met   *observ.Metrics
 	filtr *notifyfilter.Filter // notification filter (nil = allow all)
+	// access is the clear front-leg policy (client allow-list, rate
+	// limit, write policy); nil holder / nil policy = allow everything.
+	access *access.Holder
 
 	// remote agent engine state (discovered, refreshed)
 	engineMu sync.Mutex
@@ -99,6 +103,11 @@ func NewManagerGateway(cfg config.GatewayRole, sec config.Security, log *zap.Log
 		stop:  make(chan struct{}),
 	}, nil
 }
+
+// SetAccess installs (or replaces) the clear front-leg access policy. The
+// policy is read per datagram, so a reload takes effect on the next
+// request.
+func (g *ManagerGateway) SetAccess(h *access.Holder) { g.access = h }
 
 // Run binds the configured legs and serves until done is closed. The
 // front leg (ListenAddr) and the v3 trap listener (TrapListenAddr) are
@@ -197,6 +206,36 @@ func (g *ManagerGateway) handleClearRequest(addr net.Addr, dg []byte) {
 	}
 	fields, ok := pduCommon(pduTLV)
 	if !ok {
+		return
+	}
+
+	// Access policy on the clear front leg. Off-list and over-rate
+	// managers are dropped in silence; a write refusal is answered so the
+	// legacy manager does not retransmit into a timeout.
+	pol := g.access.Get()
+	switch pol.Check(access.IPOf(addr)) {
+	case access.DeniedClient:
+		if g.met != nil {
+			g.met.ACLDenied.Inc()
+		}
+		return
+	case access.DeniedRate:
+		if g.met != nil {
+			g.met.RateLimited.Inc()
+		}
+		return
+	}
+	if !pol.AllowWrite(pduTLV) {
+		if g.met != nil {
+			g.met.WritesDenied.Inc()
+		}
+		if out, dok := access.DenyResponse(info.Version, community, pduTLV); dok {
+			if udp, ok2 := addr.(*net.UDPAddr); ok2 {
+				if _, werr := g.conn.WriteTo(out, udp); werr != nil {
+					g.log.Debug("usm manager-gateway: notWritable delivery failed", zap.Error(werr))
+				}
+			}
+		}
 		return
 	}
 

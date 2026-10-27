@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GalaxyGorilla/snmp-shield/internal/access"
 	"github.com/GalaxyGorilla/snmp-shield/internal/config"
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/notifyfilter"
@@ -74,7 +75,13 @@ func securityNameFromCerts(certs []*x509.Certificate) (string, error) {
 // (net-snmp also validates that responses carry the request's security
 // level — auth/priv bits — even though TSM secParams stay empty).
 func wrapTSM(msgID int32, reqID int32, pduType uint8, pduBody []byte, ctxEngineID []byte, flags byte, secName string) ([]byte, error) {
-	pdu := msg.BuildPDU(pduType, reqID, 0, 0, pduBody)
+	return wrapTSMPDU(msgID, msg.BuildPDU(pduType, reqID, 0, 0, pduBody), ctxEngineID, flags, secName)
+}
+
+// wrapTSMPDU is wrapTSM for a caller that builds the PDU itself (for
+// example an error-status answer the gateway generates instead of
+// forwarding): errStatus is expressible here, unlike in wrapTSM.
+func wrapTSMPDU(msgID int32, pdu []byte, ctxEngineID []byte, flags byte, secName string) ([]byte, error) {
 	scoped := msg.BuildScoped(ctxEngineID, []byte{}, pdu)
 	return msg.BuildV3(msg.V3Header{
 		MsgID:      msgID,
@@ -172,6 +179,9 @@ type ManagerTranslator struct {
 	log   *zap.Logger
 	met   *observ.Metrics
 	filtr *notifyfilter.Filter // notification filter (nil = allow all)
+	// access is the clear-leg policy (client allow-list, rate limit,
+	// write policy); nil holder / nil policy = allow everything.
+	access *access.Holder
 
 	msgID atomic.Int32
 	reqID atomic.Int32
@@ -205,6 +215,10 @@ func NewManagerTranslator(cfg config.ManagerRole, sec config.Security, sess Fram
 		stop:   make(chan struct{}),
 	}, nil
 }
+
+// SetAccess installs (or replaces) the clear-leg access policy. The policy
+// is read per datagram, so a reload takes effect on the next request.
+func (m *ManagerTranslator) SetAccess(h *access.Holder) { m.access = h }
 
 // Run serves until done is closed. When supplied, ready is closed after all
 // configured sockets have been bound.
@@ -295,6 +309,34 @@ func (m *ManagerTranslator) handleClearRequest(dg []byte, addr net.Addr) {
 	fields, ok := pduCommon(pduTLV)
 	if !ok {
 		m.log.Debug("tsm manager: malformed PDU")
+		return
+	}
+
+	// Access policy on the manager leg (see the USM translator: off-list
+	// and over-rate clients are dropped silently, write refusals are
+	// answered so the manager learns immediately).
+	pol := m.access.Get()
+	switch pol.Check(access.IPOf(addr)) {
+	case access.DeniedClient:
+		if m.met != nil {
+			m.met.ACLDenied.Inc()
+		}
+		return
+	case access.DeniedRate:
+		if m.met != nil {
+			m.met.RateLimited.Inc()
+		}
+		return
+	}
+	if !pol.AllowWrite(pduTLV) {
+		if m.met != nil {
+			m.met.WritesDenied.Inc()
+		}
+		if out, dok := access.DenyResponse(ver, community, pduTLV); dok {
+			if _, werr := m.conn.WriteTo(out, addr); werr != nil {
+				m.log.Debug("tsm manager: notWritable delivery failed", zap.Error(werr))
+			}
+		}
 		return
 	}
 

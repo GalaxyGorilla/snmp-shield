@@ -34,6 +34,9 @@ long-haul segment between them.
 | SNMP versions | v2c and v3 are priority; v1 tolerated on clear leg |
 | Config | YAML file per instance, role via subcommand |
 | HA | Manager dials a list (`tunnel.dial_addrs`, sticky last-known-good); dead peers detected via keepalive (3 misses × 3×keepalive) and per-session work is cancelled through `Session.Done()`; replicas sharing one engineID converge on the highest seen engine state: digest-verified higher boots adopted as logical reboot, manager adopts Reports from ANY engineID and follows the wire for same-engine boots/time changes |
+| Access policy | One `access` section everywhere: `allow` (client IP/CIDR allow-list), `rate_per_sec` (per-client token bucket), `read_only` XOR `write_policy {default, rules[{oid, action}]}`. Key names mirror modbus-shield so operators learn the policy once. Scope: manager clear leg + gateway front legs get all three; the **agent** role (tunnel ingress) gets the write policy only (defense in depth at the device), since tunnel frames carry no client address — `allow`/`rate_per_sec` there are warned as ignored. `passthrough` write policy sees v1/v2c only. Denials: off-list + over-rate are dropped **silently**; a write refusal is **answered** `notWritable` (v1 `noSuchName`) |
+| Write-policy semantics | Deny-overrides, allow-must-cover, evaluated as a set (order irrelevant): any matching deny rejects the whole SET; an allow wins only if one rule covers every requested OID; else `default` (deny unless configured). Undecodable/empty-varbind SET is denied; non-SET PDUs pass |
+| Reload | `SIGHUP` re-reads the YAML and swaps **only** the access policy (read per datagram, no rebind). Everything socket/crypto-bound is logged `(restart required)`, never silently ignored. An invalid file or uncompilable policy keeps the running policy. Flags mode: logged no-op |
 
 ## 3. Status / Roadmap
 
@@ -53,6 +56,11 @@ clear/wrong-user traffic), the manager-gateway (snmpget/getnext/
 bulkwalk/set vs REAL snmpd, v3-on-front-leg rejection, v3 trap
 direction; needs snmpd), and the TSM gateway (snmpget/getnext/
 bulkwalk/set, untrusted-client rejection, trap direction).**
+Every role also enforces a request-leg **access policy** (client
+allow-list, per-client rate limit, read-only / OID-scoped write policy;
+the device-facing agent box enforces the write half itself) with SIGHUP
+access-only reload; denial semantics are wire-pinned in Go e2e tests
+(silent drop for off-list/over-rate, `notWritable` for a refused write).
 Ops tooling now matches modbus-shield: `make release-all` cross-builds
 (amd64/arm64/armv7), `make interop` target, systemd watchdog
 (`Type=notify` + `WatchdogSec=30` in all three deploy units, sd_notify
@@ -101,6 +109,7 @@ plus the short `/tmp` prefix hides it).
 | Goroutine-leak regression test (`internal/tunnel/leak_test.go`: 30 connect/exchange/close cycles over real PSK-DTLS loopback, goroutine count must return to baseline; server side keyed on `Session.Done()` + production `SetTuning` so there is no test-end accounting noise) | done (tested, -race -count 8 stable: before=after=5) |
 | SBOM + automated vuln-DB comparison (`make sbom` → syft SPDX+CycloneDX into `dist/`; `make vulnscan` → `grype db update` + `grype --fail-on high` vs NVD/GHSA/OSV; `scripts/sbom.sh --sbom-only`) + x/crypto v0.48.0 → v0.58.0 upgrade clearing all Critical/High advisories (go directive 1.24 → 1.26, mandatory for x/crypto ≥ 0.56) | done (tested, `make vulnscan` rc=0 — only residual GO-2026-5932 is Unknown severity/unfixed deprecated-openpgp advisory, below the gate; direct symbol-precise binary scan: 0 findings) |
 | SNMP metrics interface (`internal/snmpmetrics`: read-only SNMPv2c health MIB GET/GETNEXT on `metrics.listen_addr` + v2c tunnel-lifecycle traps to `metrics.trap_sink_addr`; `Session.SetEventFunc` events, all roles; Prometheus stays alongside) | done (tested, unit tests + e2e: two-proxy chain polling + tunnel-down trap pinned) |
+| Front-leg access policy (`internal/access` + `internal/oidmatch`): client allow-list, per-client rate limit, read-only and OID-scoped write policy on the 6 client-facing request ingress sites (usm gateway/manager, tsm gateway/manager, passthrough manager, usm manager-gateway) **plus the write policy at both device-facing agent ingress sites** (usm-translate + tsm tunnel requests, answered `notWritable` back through the tunnel); 3 new Prometheus counters; `access.*` YAML + `--allow`/`--rate-per-sec`/`--read-only`/`--write-default`/`--write-allow`/`--write-deny` flags; SIGHUP access-policy reload (`internal/proxy/reload.go`) | done (tested: access unit tests pin deny-overrides/allow-must-cover/arc boundaries/undecodable-SET/fail-closed cap; wire e2e `internal/usm/access_e2e_test.go` (gosnmp: read-only→notWritable with 0 SETs at the agent, allow-list silence + live holder swap, subtree allow/deny incl. straddling SET, rate-limit burst) + `internal/tsm/access_test.go` (TSM read-only → notWritable, msgID/req-id echoed, agent untouched) + `internal/proxy/proxy_test.go TestRunAgentReadOnlyE2E` (full usm-translate chain, agent-side policy, device sees 0 SETs) + `internal/tsm/tsm_e2e_test.go TestTSMEndToEndAgentReadOnly`; reload tests; full race suite + smoke + interop green) |
 
 ### Gateway modes (single proxy, no second proxy required)
 
@@ -313,6 +322,8 @@ internal/config/          YAML config + flag overrides
 internal/proxy/           shared proxy wiring
 internal/passthrough/     opaque forwarding of clear SNMP
 internal/notifyfilter/    notification allow/deny OID filtering
+internal/oidmatch/        OID canonicalization + arc-boundary prefix matching (shared by notifyfilter + access)
+internal/access/          front-leg access policy: client allow-list, rate limit, write policy
 internal/usm/             USM translate + gateway modes (incl. notification-only) + profiles
 internal/tsm/             TSM mode + TSM gateway mode
 internal/tunnel/          DTLS/TLS tunnel dialer/listener (+ PSK ciphersuite mapping)
@@ -325,9 +336,10 @@ internal/snmpmetrics/     SNMP health MIB agent + tunnel event traps
 ```
 
 (Directories with code: config, observ, tunnel, msg, passthrough, proxy,
-usm, tsm, cache, notifyfilter, snmpmetrics, cmd/snmp-shield. Still empty, reserved:
-discovery (discovery logic lives in internal/usm translate_manager.go),
-securitylevel. Also: configs/ example YAML (manager/agent × psk/usm/tsm +
+usm, tsm, cache, notifyfilter, oidmatch, access, snmpmetrics, securitylevel,
+cmd/snmp-shield. Still empty, reserved:
+discovery (discovery logic lives in internal/usm translate_manager.go).
+Also: configs/ example YAML (manager/agent × psk/usm/tsm +
 gateway-usm + gateway-tsm + gateway-manager-gateway +
 gateway-notifications-only
 [usm-gateway notification-only]), scripts/gen-certs.sh
@@ -335,7 +347,7 @@ throwaway test PKI into gitignored certs/, scripts/tsm-sink raw-DTLS
 test receiver for interop, scripts/interop-manager-gateway.sh real-snmpd
 manager-gateway interop, scripts/sbom.sh SBOM+vulnscan entry point,
 deploy/ systemd unit files, examples/
-deployment walkthroughs, Makefile (build/test/vet/release/release-all/interop/sbom/vulnscan).)
+deployment walkthroughs, Makefile (build/test/fmt-check/vet/release/release-all/interop/sbom/vulnscan).)
 
 ## 5. Build / Test
 
@@ -409,6 +421,10 @@ aes128-ccm-8), `--insecure`, `--security` (usm-translate|passthrough),
 usm-manager-gateway mode — the REAL AGENT's configured user, default
 'proxy'), `--filter-oid` (repeatable OID prefix) +
 `--filter-action` (allow|deny; notification filtering, see §7),
+`--allow` (repeatable IP/CIDR client entry) + `--rate-per-sec` +
+`--read-only` + `--write-default` (allow|deny; empty default, setting it
+enables the policy) + `--write-allow`/`--write-deny` (repeatable OID
+subtrees; access policy, see §7),
 `--metrics-snmp-listen` / `--metrics-snmp-trap-sink` /
 `--metrics-snmp-community` / `--metrics-snmp-base-oid` (SNMP metrics
 interface, see §7).
@@ -864,6 +880,72 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   keeping existing call sites compiling. Dropped notifications increment
   `snmp_shield_notifications_filtered_total`. Validation runs in
   `Config.Validate` before the gateway branch (which returns early).
+- **Access policy** (`internal/access`, `access.` config section; shared
+  OID primitives in `internal/oidmatch`): one policy governs the
+  **request** ingress of every leg — 6 client-facing `SetAccess(*access.Holder)`
+  call sites in `internal/proxy/proxy.go` (usm `GatewayTranslator` +
+  `ManagerTranslator` + `ManagerGateway`, tsm `ManagerTranslator` +
+  `TSMGateway`, passthrough `Manager`) **plus 2 device-facing ones**
+  (usm `AgentTranslator` + tsm `AgentTranslator`, where a denied write is
+  answered over the tunnel with `notWritable` — defense in depth: the box
+  next to the device refuses writes even if the manager side is
+  compromised). Three compiled parts: `List` (client IP/CIDR allow-list),
+  `Limit` (per-client token bucket), and `WritePolicy` (`read_only` XOR OID
+  rules). `Policy.Check(ip)` runs the client then rate check (in that
+  order: an off-list client never consumes a token); `Policy.AllowWrite(pdu)`
+  runs the write check separately, *after* authentication, because a
+  refusal must be answered.
+  **Scope differs per role** (documented in `config.Access` and warned at
+  startup): manager + gateway legs get all three; the agent role only gets
+  the write policy (tunnel frames carry no client address, so
+  `allow`/`rate_per_sec` are logged as ignored there);
+  `security.mode: passthrough` cannot inspect v3, so its write policy sees
+  v1/v2c only (on the agent side, nothing at all — the tunnel is opaque).
+  **Denial behaviour is deliberately asymmetric**: off-list and over-rate
+  clients are dropped in silence (`met.ACLDenied`/`met.RateLimited`, no
+  reply — no presence disclosure, no amplification), while a write
+  refusal is answered `notWritable` (`met.WritesDenied`) so the manager
+  does not retransmit into a timeout. v1 has no status above 5, so
+  `msg.ErrorStatusFor` maps it to `noSuchName` + error-index 1 (RFC 2576).
+  `access.DenyResponse` builds that clear answer; the v3/TSM legs wrap it
+  themselves (`sendV3Response` refactored out of `buildAndSendResponse` so
+  a locally generated answer does NOT increment `ReqForwarded`;
+  `wrapTSMPDU` is `wrapTSM` for a caller-built PDU so errStatus is
+  expressible).
+  **Write-policy semantics** (the modbus-parity contract): deny-overrides
+  + allow-must-cover, evaluated as a SET (rule order irrelevant). Any
+  matching deny rejects the whole SET (one forbidden varbind is enough —
+  a write can never straddle the boundary); an allow wins only if one
+  rule covers EVERY requested OID; else `default` (deny unless
+  configured). Undecodable/empty-varbind SET ⇒ denied (an unparseable
+  write cannot be authorized); non-SET PDUs pass. OID matching uses
+  `oidmatch.Match` (arc boundaries, shared with `notifyfilter`), and
+  `config.AccessPolicy()` compiles the YAML into the runtime policy —
+  `validateAccess` calls it so validation and runtime can never disagree.
+  `read_only` + `write_policy` are mutually exclusive; no rules + default
+  deny is rejected (that is what `read_only` is for).
+  **Rate limiter** (`ratelimit.go`): bucket table capped at 4096 entries
+  and swept every minute (5-minute idle horizon). The cap **fails
+  closed** — a new client is refused when the table is full, because an
+  unbounded table driven by spoofed UDP sources would be the DoS. Bucket
+  starts full (one second's burst absorbed); `nowFn` is injected for
+  tests and `lastGC` is initialized lazily so construction reads no clock.
+  **Reload** (`internal/proxy/reload.go`): `SIGHUP` gets its own
+  `signal.Notify` channel (putting it on the shutdown context would stop
+  the proxy); `applyReload` compiles the new `access` block and stores it
+  in the holder, then `restartRequired` diffs the remaining blocks and
+  logs each changed one as `(restart required)` — never silently ignored.
+  A compile error keeps the running policy. Flags mode has no file:
+  `Options.ConfigPath == ""` logs a no-op warning.
+  **Passthrough caveat** (logged at startup, role-specific text):
+  passthrough forwards v3 opaquely, so only v1/v2c PDUs reach the write
+  policy on the manager leg, and on the agent leg tunnel traffic is
+  invisible entirely; every PDU-inspecting mode (usm-translate/gateway/
+  manager-gateway, tsm, tsm-gateway) is fully covered.
+  **Flags**: `--write-default` defaults to `""` on purpose — a non-empty
+  default would make every flags-mode run build a default-deny policy and
+  fail validation. A zipped `--write-rule` pair was rejected in favour of
+  separate repeatable `--write-allow`/`--write-deny`.
 - **SNMP metrics interface** (`internal/snmpmetrics`, `metrics.` config
   section): every role can serve a small read-only SNMPv2c health agent
   (`metrics.listen_addr`, GET/GETNEXT only, community-gated; wrong
@@ -873,7 +955,10 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   .2 version, .3 role, .4 securityMode, .5 tunnelMode, .6 tunnelEndpoints,
   .7 uptimeSecs, .10 tunnelUp, .11 tunnelEndpoint, .20.<n> counters
   (1-based rows in `Metrics.CounterList()` order — a compatibility
-  contract, never reorder), .30 latencyCount, .31 latencySum. Events
+  contract, never reorder; the access-policy counters
+  `snmp_shield_acl_denied_total`, `snmp_shield_writes_denied_total`,
+  `snmp_shield_rate_limited_total` were APPENDED at the end for that
+  reason), .30 latencyCount, .31 latencySum. Events
   subtree (traps): .2.1 tunnel up (varbind-less distinction: .2.3 is sent
   instead when the event is an HA failover), .2.2 tunnel down.
   Wiring: `tunnel.Session.SetEventFunc` (tunnel-up/down/failover events,

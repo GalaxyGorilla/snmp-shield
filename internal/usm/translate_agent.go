@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GalaxyGorilla/snmp-shield/internal/access"
 	"github.com/GalaxyGorilla/snmp-shield/internal/cache"
 	"github.com/GalaxyGorilla/snmp-shield/internal/config"
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
@@ -124,6 +125,12 @@ type AgentTranslator struct {
 	sess  FrameSink
 	log   *zap.Logger
 	met   *observ.Metrics
+	// access is the write policy for requests arriving over the tunnel
+	// (the agent-side box sits next to the device, so read_only /
+	// write_policy here protect the device itself, independent of the
+	// manager-side proxy). The client allow-list and rate limit do not
+	// apply: tunnel frames carry no client address.
+	access *access.Holder
 
 	msgID atomic.Uint32
 
@@ -168,6 +175,11 @@ func NewAgentTranslator(cfg config.AgentRole, users []Profile, clock *cache.Engi
 		stop:  make(chan struct{}),
 	}, nil
 }
+
+// SetAccess installs (or replaces) the write policy enforced on requests
+// arriving over the tunnel. The policy is read per request, so a reload
+// takes effect on the next one.
+func (a *AgentTranslator) SetAccess(h *access.Holder) { a.access = h }
 
 // Run starts the translator: subscribes to tunnel REQ frames, binds the
 // clear agent socket, and serves until done is closed.
@@ -321,6 +333,20 @@ func (a *AgentTranslator) handleTunnelRequest(f *tunnel.Frame) {
 		user:         m.USM.UserName,
 		cancel:       make(chan struct{}),
 	}
+
+	// Write policy: the device-facing box can refuse writes on its own,
+	// independent of the manager-side proxy (defense in depth). The peer
+	// is authenticated by definition here, so answer instead of dropping.
+	if !a.access.Get().AllowWrite(pduBytes) {
+		if a.met != nil {
+			a.met.WritesDenied.Inc()
+		}
+		a.log.Debug("usm agent: write refused by policy",
+			zap.String("user", m.USM.UserName))
+		a.denyWrite(pend, c, pduBytes)
+		return
+	}
+
 	a.pendMu.Lock()
 	a.pend[f.CorrID] = pend
 	a.pendMu.Unlock()
@@ -430,7 +456,33 @@ func (a *AgentTranslator) buildAndSendResponse(pend *agentPending, c *compiled, 
 	}
 	// response PDU: same type, client's req-id, error fields preserved
 	resp := msg.BuildPDU(msg.PDUGetResponse, pend.clientReqID, respFields.ErrStatus, respFields.ErrIndex, respFields.Varbinds)
+	if err := a.sendV3Response(pend, c, resp); err != nil {
+		return err
+	}
+	if a.met != nil {
+		a.met.ReqForwarded.Inc()
+	}
+	return nil
+}
 
+// denyWrite answers a write the policy refused with notWritable over the
+// tunnel (the manager side relays that back to the client). Nothing
+// reaches the device and no forward is counted.
+func (a *AgentTranslator) denyWrite(pend *agentPending, c *compiled, pdu []byte) {
+	fields, ok := pduCommon(pdu)
+	if !ok {
+		return
+	}
+	resp := msg.BuildPDU(msg.PDUGetResponse, pend.clientReqID, msg.ErrStatusNotWritable, 0, fields.Varbinds)
+	if err := a.sendV3Response(pend, c, resp); err != nil {
+		a.log.Debug("usm agent: notWritable response failed", zap.Error(err))
+	}
+}
+
+// sendV3Response wraps an already-built response PDU for the manager-side
+// proxy and ships it over the tunnel, echoing the request's msgID and
+// security level.
+func (a *AgentTranslator) sendV3Response(pend *agentPending, c *compiled, resp []byte) error {
 	flags := pend.flags | msg.MsgFlagReportable
 	engineID := a.clock.EngineID()
 	boots := a.clock.Boots()
@@ -466,13 +518,7 @@ func (a *AgentTranslator) buildAndSendResponse(pend *agentPending, c *compiled, 
 		}
 	}
 
-	if err := a.sess.Send(context.Background(), tunnel.TypeRESP, 0, pend.tunnelCorrID, out); err != nil {
-		return err
-	}
-	if a.met != nil {
-		a.met.ReqForwarded.Inc()
-	}
-	return nil
+	return a.sess.Send(context.Background(), tunnel.TypeRESP, 0, pend.tunnelCorrID, out)
 }
 
 // downstreamFor returns the SNMP version + community toward the real agent.

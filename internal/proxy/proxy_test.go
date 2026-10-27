@@ -13,9 +13,11 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/GalaxyGorilla/snmp-shield/internal/access"
 	"github.com/GalaxyGorilla/snmp-shield/internal/config"
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
@@ -92,6 +94,45 @@ func fakeAgent(t *testing.T, addr string) net.PacketConn {
 	return conn
 }
 
+// countingFakeAgent is fakeAgent plus a counter of every SET that reaches
+// it — the oracle for "the device never saw the write".
+func countingFakeAgent(t *testing.T, addr string) (net.PacketConn, *atomic.Int32) {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sets atomic.Int32
+	go func() {
+		buf := make([]byte, 65536)
+		for {
+			n, from, rerr := conn.ReadFrom(buf)
+			if rerr != nil {
+				return
+			}
+			dg := append([]byte(nil), buf[:n]...)
+			ver, community, pdu, serr := msg.SplitV1V2c(dg)
+			if serr != nil {
+				continue
+			}
+			if info, ierr := msg.Peek(dg); ierr == nil && msg.IsSet(info.PDUType) {
+				sets.Add(1)
+			}
+			_, fields, perr := msg.ParsePDU(pdu)
+			if perr != nil {
+				continue
+			}
+			resp := msg.BuildPDU(msg.PDUGetResponse, fields.ReqID, 0, 0, fields.Varbinds)
+			out, berr := msg.BuildV1V2c(ver, community, resp)
+			if berr != nil {
+				continue
+			}
+			_, _ = conn.WriteTo(out, from)
+		}
+	}()
+	return conn, &sets
+}
+
 // gosnmpV3 builds an authPriv (SHA/AES) gosnmp v3 client matching the
 // default test user ("proxy").
 func gosnmpV3(t *testing.T, addr string) *gosnmp.GoSNMP {
@@ -154,13 +195,17 @@ func gosnmpV2c(t *testing.T, addr string) *gosnmp.GoSNMP {
 }
 
 // startAgent runs runAgent in the background with a cancelable context.
-func startAgent(t *testing.T, cfg *config.Config, met *observ.Metrics) (cancel context.CancelFunc, errCh chan error) {
+func startAgent(t *testing.T, cfg *config.Config, met *observ.Metrics, holders ...*access.Holder) (cancel context.CancelFunc, errCh chan error) {
 	t.Helper()
+	var h *access.Holder
+	if len(holders) > 0 {
+		h = holders[0]
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh = make(chan error, 1)
 	ready := make(chan struct{})
 	go func() {
-		errCh <- runAgent(ctx, Options{Config: cfg, Log: zap.NewNop(), Version: "test"}, met, nil, ready)
+		errCh <- runAgent(ctx, Options{Config: cfg, Log: zap.NewNop(), Version: "test", Access: h}, met, nil, ready)
 	}()
 	select {
 	case <-ready:
@@ -909,4 +954,76 @@ func freeListenerDTLS(t *testing.T) net.Listener {
 		t.Fatalf("listen: %v", err)
 	}
 	return l
+}
+
+// TestRunAgentReadOnlyE2E pins the agent-side write policy: read_only on
+// the DEVICE-facing box refuses a SET that arrives over the tunnel, so the
+// device is protected even if the manager-side proxy (or the manager leg)
+// is compromised. The clear v2c client must get notWritable (not a
+// timeout) and the fake agent must never receive the write.
+func TestRunAgentReadOnlyE2E(t *testing.T) {
+	met := observ.NewMetrics()
+	agent, sets := countingFakeAgent(t, "127.0.0.1:0")
+	defer agent.Close()
+	agentAddr := agent.LocalAddr().String()
+
+	agentCfg := &config.Config{Role: config.RoleAgent}
+	agentCfg.Defaults()
+	agentCfg.Tunnel.Mode = "dtls"
+	agentCfg.Tunnel.ListenAddr = freeUDPPort(t)
+	agentCfg.Tunnel.PSK = "text:testpsk"
+	agentCfg.Agent.AgentAddr = agentAddr
+	agentCfg.Security.Mode = "usm-translate"
+	agentCfg.Security.Users = testUsers()
+	agentCfg.Security.EngineStore = filepath.Join(t.TempDir(), "engine.json")
+	agentCfg.Access = config.Access{ReadOnly: true}
+	pol, err := agentCfg.AccessPolicy()
+	if err != nil {
+		t.Fatalf("agent access policy: %v", err)
+	}
+	agentListen := agentCfg.Tunnel.ListenAddr
+
+	agCancel, agErr := startAgent(t, agentCfg, met, access.NewHolder(pol))
+	defer agCancel()
+
+	mgrCfg := &config.Config{Role: config.RoleManager}
+	mgrCfg.Defaults()
+	mgrCfg.Tunnel.Mode = "dtls"
+	mgrCfg.Tunnel.DialAddr = agentListen
+	mgrCfg.Tunnel.PSK = "text:testpsk"
+	mgrCfg.Manager.ListenAddr = freeUDPPort(t)
+	mgrCfg.Security.Mode = "usm-translate"
+	mgrCfg.Security.Users = testUsers()
+	mgrCfg.Security.EngineStore = filepath.Join(t.TempDir(), "engine.json")
+	mgrListen := mgrCfg.Manager.ListenAddr
+
+	mgCancel, mgErr := startManager(t, mgrCfg, met)
+	defer mgCancel()
+	waitBound(t, mgrListen)
+
+	g := gosnmpV2c(t, mgrListen)
+	defer g.Conn.Close()
+
+	// reads still work through the chain
+	if _, gerr := g.Get([]string{"1.3.6.1.2.1.1.1.0"}); gerr != nil {
+		t.Fatalf("GET through read-only agent: %v", gerr)
+	}
+
+	res, serr := g.Set([]gosnmp.SnmpPDU{{
+		Name:  "1.3.6.1.2.1.1.5.0",
+		Type:  gosnmp.OctetString,
+		Value: "nope",
+	}})
+	if serr != nil {
+		t.Fatalf("SET returned a transport error instead of an error-status: %v", serr)
+	}
+	if res.Error != gosnmp.NotWritable {
+		t.Fatalf("SET error-status = %v, want notWritable", res.Error)
+	}
+	if n := sets.Load(); n != 0 {
+		t.Fatalf("refused SET reached the legacy agent %d time(s)", n)
+	}
+
+	stopRun(t, agCancel, agErr, "agent")
+	stopRun(t, mgCancel, mgErr, "manager")
 }

@@ -6,10 +6,12 @@ package config
 import (
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/GalaxyGorilla/snmp-shield/internal/access"
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/notifyfilter"
 	"github.com/GalaxyGorilla/snmp-shield/internal/securitylevel"
@@ -188,6 +190,55 @@ type Notifications struct {
 	Filter *NotifyFilter `yaml:"filter"`
 }
 
+// Access configures the request-leg access policy: which clients may talk
+// to the proxy, how fast, and which objects they may write. It applies to
+// REQUEST ingress only — the notification paths are governed by
+// notifications.filter.
+//
+// Which parts apply where:
+//   - manager role: the clear manager leg has a client address, so allow,
+//     rate_per_sec and the write policy all apply.
+//   - gateway role: the front leg (USM or TSM) is a client leg, so all
+//     three apply.
+//   - agent role: requests arrive over the trusted tunnel and carry no
+//     client address, so only read_only/write_policy apply (defense in
+//     depth for the device); allow/rate_per_sec are reported as ignored
+//     at startup. A passthrough tunnel is opaque, so even the write
+//     policy cannot see those requests.
+type Access struct {
+	// Allow is the client allow-list: bare IPs ("10.0.0.5") or CIDR
+	// ranges ("10.8.0.0/24", IPv6 too). Empty allows every client.
+	Allow []string `yaml:"allow"`
+	// RatePerSec caps requests per client per second (a full second's
+	// worth of burst is absorbed). 0 = unlimited.
+	RatePerSec int `yaml:"rate_per_sec"`
+	// ReadOnly refuses every SET with notWritable. Use the coarse switch
+	// when nobody should write; use write_policy when some objects are
+	// still writable.
+	ReadOnly bool `yaml:"read_only"`
+	// WritePolicy is the OID-scoped write policy. Mutually exclusive
+	// with ReadOnly.
+	WritePolicy *WritePolicyCfg `yaml:"write_policy"`
+}
+
+// WritePolicyCfg is the YAML shape of an OID-scoped write policy.
+type WritePolicyCfg struct {
+	// Default is the verdict for a write no rule covers: "deny" (default)
+	// or "allow".
+	Default string `yaml:"default"`
+	// Rules are evaluated as a set (order is irrelevant): any matching
+	// deny rejects the write, otherwise an allow must cover every
+	// requested object.
+	Rules []WriteRuleCfg `yaml:"rules"`
+}
+
+// WriteRuleCfg is one write-policy rule: a dotted OID subtree root and
+// the verdict for writes inside it.
+type WriteRuleCfg struct {
+	OID    string `yaml:"oid"`
+	Action string `yaml:"action"` // "allow" or "deny"
+}
+
 // MetricsRole configures the SNMP metrics interface: a small read-only
 // SNMPv2c agent (health polling) and optional v2c event traps for tunnel
 // lifecycle changes. This lets an SNMP-native monitoring system watch
@@ -228,6 +279,7 @@ type Config struct {
 	Gateway       GatewayRole   `yaml:"gateway"`
 	Security      Security      `yaml:"security"`
 	Notifications Notifications `yaml:"notifications"`
+	Access        Access        `yaml:"access"`
 	Metrics       MetricsRole   `yaml:"metrics"`
 }
 
@@ -254,6 +306,107 @@ func (c *Config) TrapFilter() (*notifyfilter.Filter, error) {
 	}
 	f := c.Notifications.Filter
 	return notifyfilter.New(f.Action, f.Oids)
+}
+
+// AccessPolicy compiles the access section into a runtime policy. A
+// zero-valued Access section yields a nil policy (allow everything), so
+// callers can install the result unconditionally.
+func (c *Config) AccessPolicy() (*access.Policy, error) {
+	a := c.Access
+	if len(a.Allow) == 0 && a.RatePerSec == 0 && !a.ReadOnly && a.WritePolicy == nil {
+		// Nothing configured: a nil policy is the "no restriction" value
+		// and keeps the reload path able to tell "configured" from "not".
+		return nil, nil
+	}
+	var writes *access.WritePolicy
+	switch {
+	case a.ReadOnly && a.WritePolicy != nil:
+		return nil, fmt.Errorf("access.read_only and access.write_policy are mutually exclusive")
+	case a.ReadOnly:
+		writes = access.NewReadOnly()
+	case a.WritePolicy != nil:
+		defaultAllow := false
+		switch a.WritePolicy.Default {
+		case "", "deny":
+		case "allow":
+			defaultAllow = true
+		default:
+			return nil, fmt.Errorf("access.write_policy.default: unknown value %q (want allow or deny)", a.WritePolicy.Default)
+		}
+		rules := make([]access.WriteRule, 0, len(a.WritePolicy.Rules))
+		for i, r := range a.WritePolicy.Rules {
+			if r.OID == "" {
+				return nil, fmt.Errorf("access.write_policy.rules[%d]: oid is required", i)
+			}
+			var allow bool
+			switch r.Action {
+			case "", "deny":
+			case "allow":
+				allow = true
+			default:
+				return nil, fmt.Errorf("access.write_policy.rules[%d]: unknown action %q (want allow or deny)", i, r.Action)
+			}
+			rules = append(rules, access.WriteRule{OID: r.OID, Allow: allow})
+		}
+		wp, err := access.NewWritePolicy(defaultAllow, rules)
+		if err != nil {
+			return nil, err
+		}
+		writes = wp
+	}
+	return access.New(a.Allow, a.RatePerSec, writes)
+}
+
+// validateAccess checks the access section before the process starts: a
+// bad allow entry or OID rule must never silently widen (or narrow) the
+// policy at runtime.
+func (c *Config) validateAccess() error {
+	a := c.Access
+	for _, e := range a.Allow {
+		if e == "" {
+			return fmt.Errorf("access.allow: empty entry")
+		}
+		if net.ParseIP(e) != nil {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(e); err != nil {
+			return fmt.Errorf("access.allow: %q is neither an IP nor a CIDR range", e)
+		}
+	}
+	if a.RatePerSec < 0 {
+		return fmt.Errorf("access.rate_per_sec: must be >= 0 (0 = unlimited)")
+	}
+	if a.ReadOnly && a.WritePolicy != nil {
+		return fmt.Errorf("access.read_only and access.write_policy are mutually exclusive (read_only refuses every write)")
+	}
+	if a.WritePolicy != nil {
+		switch a.WritePolicy.Default {
+		case "", "deny", "allow":
+		default:
+			return fmt.Errorf("access.write_policy.default: unknown value %q (want allow or deny)", a.WritePolicy.Default)
+		}
+		for i, r := range a.WritePolicy.Rules {
+			if r.OID == "" {
+				return fmt.Errorf("access.write_policy.rules[%d]: oid is required", i)
+			}
+			if err := access.ValidateOID(r.OID); err != nil {
+				return fmt.Errorf("access.write_policy.rules[%d]: %w", i, err)
+			}
+			switch r.Action {
+			case "", "allow", "deny":
+			default:
+				return fmt.Errorf("access.write_policy.rules[%d]: unknown action %q (want allow or deny)", i, r.Action)
+			}
+		}
+		if len(a.WritePolicy.Rules) == 0 && a.WritePolicy.Default != "allow" {
+			return fmt.Errorf("access.write_policy: no rules with default deny would block every write (use access.read_only instead)")
+		}
+	}
+	// Compile once so validation and runtime can never disagree.
+	if _, err := c.AccessPolicy(); err != nil {
+		return fmt.Errorf("access: %w", err)
+	}
+	return nil
 }
 
 // DialEndpoints returns the tunnel endpoints the manager role dials, most
@@ -365,6 +518,9 @@ func (c *Config) requireEngineStore() error {
 func (c *Config) Validate() error {
 	if _, err := c.TrapFilter(); err != nil {
 		return fmt.Errorf("notifications.filter: %w", err)
+	}
+	if err := c.validateAccess(); err != nil {
+		return err
 	}
 	if err := c.validateSecurityUsers(); err != nil {
 		return err

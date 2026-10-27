@@ -8,6 +8,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GalaxyGorilla/snmp-shield/internal/access"
 	"github.com/GalaxyGorilla/snmp-shield/internal/config"
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/notifyfilter"
@@ -27,6 +28,9 @@ type Manager struct {
 	log   *zap.Logger
 	met   *observ.Metrics
 	filtr *notifyfilter.Filter // notification filter (nil = allow all)
+	// access is the clear-leg policy (client allow-list, rate limit,
+	// write policy); nil holder / nil policy = allow everything.
+	access *access.Holder
 
 	conn     *net.UDPConn // clear request listener
 	trapConn *net.UDPConn // optional clear trap listener
@@ -62,6 +66,10 @@ func NewManager(cfg config.ManagerRole, sess *tunnel.Session, log *zap.Logger, m
 		stop:  make(chan struct{}),
 	}
 }
+
+// SetAccess installs (or replaces) the clear-leg access policy. The policy
+// is read per datagram, so a reload takes effect on the next request.
+func (m *Manager) SetAccess(h *access.Holder) { m.access = h }
 
 // Run starts the manager-side forwarder. It blocks until ctx is
 // cancelled or a fatal error occurs.
@@ -182,6 +190,40 @@ func (m *Manager) serveClearRequests() error {
 		}
 		payload := make([]byte, n)
 		copy(payload, buf[:n])
+
+		// Access policy on the clear manager leg. Off-list and over-rate
+		// clients are dropped in silence; a write refusal is answered so
+		// the manager learns immediately.
+		pol := m.access.Get()
+		switch pol.Check(access.IPOf(addr)) {
+		case access.DeniedClient:
+			if m.met != nil {
+				m.met.ACLDenied.Inc()
+			}
+			continue
+		case access.DeniedRate:
+			if m.met != nil {
+				m.met.RateLimited.Inc()
+			}
+			continue
+		}
+		// The write policy only sees v1/v2c: passthrough forwards v3
+		// opaquely, so a v3 SET cannot be inspected (inherent to
+		// passthrough, not a gap here).
+		if ver, community, pdu, serr := msg.SplitV1V2c(payload); serr == nil {
+			if !pol.AllowWrite(pdu) {
+				if m.met != nil {
+					m.met.WritesDenied.Inc()
+				}
+				if out, ok := access.DenyResponse(ver, community, pdu); ok {
+					if _, werr := conn.WriteToUDP(out, addr); werr != nil && m.log != nil {
+						m.log.Debug("notWritable delivery failed", zap.Error(werr))
+					}
+				}
+				continue
+			}
+		}
+
 		corrID := uint16(m.nextID.Add(1))
 		p := &pending{addr: addr, ready: make(chan struct{})}
 		m.pendMu.Lock()

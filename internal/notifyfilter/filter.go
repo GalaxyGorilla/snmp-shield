@@ -6,9 +6,8 @@ package notifyfilter
 
 import (
 	"fmt"
-	"strings"
 
-	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
+	"github.com/GalaxyGorilla/snmp-shield/internal/oidmatch"
 )
 
 // Filter classifies notification trap OIDs against a prefix list.
@@ -32,11 +31,7 @@ func New(action string, oids []string) (*Filter, error) {
 	}
 	canon := make([]string, 0, len(oids))
 	for _, o := range oids {
-		ber, err := msg.EncodeOID(o)
-		if err != nil {
-			return nil, fmt.Errorf("notifyfilter: OID %q: %w", o, err)
-		}
-		dotted, err := msg.DecodeOID(ber)
+		dotted, err := oidmatch.Canonical(o)
 		if err != nil {
 			return nil, fmt.Errorf("notifyfilter: OID %q: %w", o, err)
 		}
@@ -55,7 +50,7 @@ func (f *Filter) Allowed(trapOID string) bool {
 	}
 	matched := false
 	for _, p := range f.oids {
-		if trapOID == p || strings.HasPrefix(trapOID, p+".") {
+		if oidmatch.Match(p, trapOID) {
 			matched = true
 			break
 		}

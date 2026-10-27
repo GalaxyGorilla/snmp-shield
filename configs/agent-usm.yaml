@@ -52,3 +52,24 @@ agent:
 #   trap_sink_addr: "127.0.0.1:10164" # v2c event traps
 #   community: "public"
 #   # base_oid: ".1.3.6.1.4.1.58427.1" # enterprise OID (default)
+
+# Optional write policy for requests arriving over the tunnel. This box
+# sits next to the device, so read_only / write_policy here protect the
+# device itself, independent of the manager-side proxy. A refused SET is
+# answered with notWritable (v1: noSuchName) so the manager does not
+# retransmit into a timeout.
+# access.allow / access.rate_per_sec do NOT apply on the agent role:
+# requests arrive over the trusted tunnel and carry no client address
+# (the proxy warns at startup if they are set) — configure those on the
+# manager-side proxy. A passthrough tunnel is opaque, so the write policy
+# cannot inspect it either; use usm-translate or tsm.
+# A SIGHUP reload re-reads ONLY this block in place (systemctl reload);
+# every other block needs a restart. See README "Access control".
+# access:
+#   read_only: true
+#   # ...or an OID-scoped policy (deny overrides, allow must cover all):
+#   # write_policy:
+#   #   default: deny
+#   #   rules:
+#   #     - {oid: "1.3.6.1.4.1.99.1",   action: allow}
+#   #     - {oid: "1.3.6.1.4.1.99.1.9", action: deny}

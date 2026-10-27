@@ -355,3 +355,90 @@ func TestUsage(t *testing.T) {
 		t.Fatalf("usage output missing program name: %q", string(buf[:n]))
 	}
 }
+
+// --- access policy flags ---------------------------------------------------
+
+func TestAccessPolicyFlags(t *testing.T) {
+	// no access flags: no section at all
+	a, err := accessPolicy(flagsOpts{})
+	if err != nil || a != nil {
+		t.Fatalf("accessPolicy(none) = %+v, %v; want nil, nil", a, err)
+	}
+
+	// allow-list + rate only
+	a, err = accessPolicy(flagsOpts{allow: []string{"10.8.0.0/24"}, ratePerSec: 40})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == nil || len(a.Allow) != 1 || a.RatePerSec != 40 || a.WritePolicy != nil || a.ReadOnly {
+		t.Fatalf("accessPolicy(allow+rate) = %+v", a)
+	}
+
+	// read-only
+	a, err = accessPolicy(flagsOpts{readOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == nil || !a.ReadOnly {
+		t.Fatalf("accessPolicy(read-only) = %+v", a)
+	}
+
+	// read-only and write subtrees cannot be combined
+	if _, err := accessPolicy(flagsOpts{readOnly: true, writeAllow: []string{"1.3.6.1"}}); err == nil {
+		t.Error("--read-only with --write-allow accepted")
+	}
+
+	// explicit write policy: deny by default, one allowed and one denied
+	// subtree (deny appended last; evaluation is order-independent)
+	a, err = accessPolicy(flagsOpts{
+		writeAllow: []string{"1.3.6.1.4.1.99.1"},
+		writeDeny:  []string{"1.3.6.1.4.1.99.1.9"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == nil || a.WritePolicy == nil {
+		t.Fatal("write policy not built")
+	}
+	if a.WritePolicy.Default != "deny" {
+		t.Errorf("default = %q, want deny", a.WritePolicy.Default)
+	}
+	if len(a.WritePolicy.Rules) != 2 ||
+		a.WritePolicy.Rules[0].Action != "allow" || a.WritePolicy.Rules[1].Action != "deny" {
+		t.Errorf("rules = %+v", a.WritePolicy.Rules)
+	}
+	// --write-default alone enables the policy
+	a, err = accessPolicy(flagsOpts{writeDefault: "allow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == nil || a.WritePolicy == nil || a.WritePolicy.Default != "allow" {
+		t.Fatalf("accessPolicy(write-default allow) = %+v", a)
+	}
+}
+
+func TestFlagsConfigAccess(t *testing.T) {
+	cfg, err := flagsConfig(config.RoleManager, flagsOpts{
+		tunnelAddr: "127.0.0.1:19611",
+		psk:        "00112233445566778899aabbccddeeff",
+		secMode:    "passthrough",
+		authPass:   "authpass",
+		privPass:   "privpass",
+		listen:     "127.0.0.1:161",
+		allow:      []string{"127.0.0.1"},
+		readOnly:   true,
+	})
+	if err != nil {
+		t.Fatalf("flagsConfig with access: %v", err)
+	}
+	if len(cfg.Access.Allow) != 1 || !cfg.Access.ReadOnly {
+		t.Fatalf("access = %+v", cfg.Access)
+	}
+	pol, err := cfg.AccessPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pol == nil || !pol.ReadOnly() {
+		t.Fatalf("compiled access policy = %v", pol)
+	}
+}

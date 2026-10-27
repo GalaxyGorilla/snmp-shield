@@ -16,6 +16,7 @@ Wants=network-online.target
 Type=notify
 WatchdogSec=30
 ExecStart=/usr/local/bin/snmp-shield gateway --config /etc/snmp-shield/gateway.yaml
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5
 

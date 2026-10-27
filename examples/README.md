@@ -13,6 +13,7 @@ Config-file templates for every example live in [`configs/`](../configs/).
 | [manager-gateway](manager-gateway.md) | One box in front of a legacy manager | The proxy–agent leg: the legacy manager keeps talking v2c, requests are re-issued as authenticated v3 toward the real v3 agent |
 | [gateway-notifications-only](gateway-notifications-only.md) | One box in front of a manager | The manager leg: legacy device traps/informs are wrapped into authenticated v3 toward the manager (usm-gateway, notification-only) |
 | [ha-two-proxy](ha-two-proxy.md) | Two proxy pairs, redundant agent side | Adds failover: the manager proxy dials a list of agent-side replicas and shares engine state |
+| [access-control](access-control.md) | Any shape, layered on top | The request leg: client allow-list, per-client rate limit, read-only / OID-scoped write policy — plus SIGHUP reload |
 
 Which one do I want?
 
@@ -28,3 +29,6 @@ Which one do I want?
   legs).
 - Redundancy matters (the agent-side box must survive failure) →
   **ha-two-proxy**.
+- You want to restrict who may poll, how fast, or which objects may be
+  written — and change that without restarting → **access-control**
+  (layered on any shape above).

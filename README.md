@@ -119,6 +119,78 @@ snmp-shield proxies (any endpoints, any SNMP versions); USM is the
 *endpoint* security toward managers and agents, which everything
 industry-standard speaks.
 
+## Access control
+
+Every deployment has a request leg with a peer you may or may not trust, so
+the same `access` section exists on all three roles: **who** may talk to
+the proxy, **how fast**, and **what may be written**.
+
+```yaml
+access:
+  allow: ["10.8.0.0/24", "192.168.1.5"]   # client allow-list (IP or CIDR)
+  rate_per_sec: 50                        # per-client request rate (0 = unlimited)
+  read_only: true                         # refuse every SET
+  # …or, instead of read_only, a scope-limited write policy:
+  # write_policy:
+  #   default: deny
+  #   rules:
+  #     - {oid: "1.3.6.1.4.1.99.1",     action: allow}
+  #     - {oid: "1.3.6.1.4.1.99.1.9",   action: deny}
+```
+
+`read_only` and `write_policy` are mutually exclusive; `rate_per_sec` and
+`allow` are independent and optional. In flags mode: `--allow` (repeatable),
+`--rate-per-sec`, `--read-only`, or `--write-default deny --write-allow
+<oid> --write-deny <oid>`.
+
+**Where each part applies** — the policy follows the client address:
+
+| Role | `allow` / `rate_per_sec` | `read_only` / `write_policy` |
+|---|---|---|
+| `manager` (clear manager leg) | yes | yes |
+| `gateway` (USM or TSM front leg) | yes | yes |
+| `agent` (tunnel ingress, device-facing box) | no — requests carry no client address (warned at startup) | yes — defense in depth: the box next to the device refuses writes itself, even if the manager side is compromised |
+| any role, `security.mode: passthrough` | yes | v1/v2c only — v3 crosses the tunnel opaquely (warned at startup) |
+
+**What happens on a denial** — the cases are deliberately different:
+
+| Denial | Behaviour | Why |
+|---|---|---|
+| Client not on `allow` | **Silent drop** | An off-list peer must not learn a proxy is there, and an error answer would amplify a flood. |
+| Client over `rate_per_sec` | **Silent drop** | Same reasoning: the limit exists to absorb a flood, not to chat with it. |
+| SET outside the write policy | **Answered** (`notWritable`, v1: `noSuchName`) | The peer is authenticated and legitimate; a timeout would only make it retransmit into the policy forever. |
+
+Write-policy evaluation is **deny-overrides, allow-must-cover**, and rules
+are evaluated as a *set* (order is irrelevant):
+
+- any matching **deny** rejects the entire SET — one forbidden object in a
+  multi-varbind SET is enough (a write can never straddle the boundary);
+- an **allow** only wins when a single rule covers **every** requested
+  object;
+- otherwise `default` applies (`deny` unless configured `allow`).
+
+Matching is prefix-based on OID arc boundaries (`1.3.6.1.4.1.99` matches
+`…99.5` but not `…9999`). A SET whose varbinds cannot be decoded is denied —
+an unparseable write cannot be authorized. Non-SET PDUs always pass; reads
+are governed by the allow-list and rate limit, not by the write policy.
+
+**Passthrough caveat**: `passthrough` forwards SNMPv3 opaquely, so a v3 SET
+cannot be inspected. `write_policy`/`read_only` therefore govern v1/v2c
+only there (on the agent side they cannot see tunnel traffic at all); the
+proxy warns at startup if you configure this combination. Notify filtering
+is unaffected (notifications are inspected on their clear legs in every
+mode).
+
+**Reload**: `SIGHUP` re-reads the YAML file and applies **the access policy
+only** — the part you change during an incident (cut off a noisy client,
+lock a write path). It is read per datagram, so the swap takes effect on
+the next packet with no listener rebind. Everything socket- or
+crypto-bound (tunnel, security/users, listeners, notification filters,
+metrics endpoints) is logged as `(restart required)` rather than silently
+ignored. An invalid file, or a policy that does not compile, keeps the
+running policy: a reload typo must never leave the proxy unprotected or
+wide open.
+
 ## Tunnel transport
 
 - **DTLS over UDP** (primary) — preserves SNMP's connectionless model.
@@ -244,7 +316,8 @@ with `validate --json`, and offer a "test connection" button backed by
   (`Type=notify`, `WatchdogSec=30`, Restart=on-failure,
   `ProtectSystem=strict`, `CAP_NET_BIND_SERVICE`
   for privileged ports, persistent `StateDirectory` for the engine
-  boots store).
+  boots store, and `ExecReload=/bin/kill -HUP $MAINPID` for
+  `systemctl reload` → access-policy reload).
 - **systemd watchdog** — the binary speaks sd_notify: `READY=1` on
   startup and `WATCHDOG=1` pings while running (internal/watchdog), so a
   wedged process is restarted by the host. No-ops outside systemd.
@@ -258,7 +331,9 @@ with `validate --json`, and offer a "test connection" button backed by
   standalone (`--sbom-only` skips the scan).
 - **Metrics** — Prometheus endpoint via `--metrics-addr`: tunnel
   frames/bytes, forwarded requests, errors, notifications relayed/
-  filtered/dropped, reconnects, tunnel-up gauge, forwarding latency.
+  filtered/dropped, reconnects, tunnel-up gauge, forwarding latency, and
+  the access-policy counters (`snmp_shield_acl_denied_total`,
+  `snmp_shield_writes_denied_total`, `snmp_shield_rate_limited_total`).
 - **SNMP metrics interface** — every role can expose its health over
   SNMP itself: `metrics.listen_addr` (or `--metrics-snmp-listen`)
   serves a small read-only SNMPv2c agent (GET/GETNEXT: identity,
@@ -279,6 +354,11 @@ with `validate --json`, and offer a "test connection" button backed by
 - **Notification filtering** — `notifications.filter` (allow/deny OID
   prefixes, arc-boundary match) drops unwanted notifications at the
   relay ingress; `--filter-oid`/`--filter-action` in flags mode.
+- **Access control** — `access.allow` / `access.rate_per_sec` /
+  `access.read_only` / `access.write_policy` gate the request leg of
+  every role (see [Access control](#access-control)).
+- **Config reload** — `SIGHUP` re-reads the YAML file and swaps the
+  access policy in place; other blocks are reported as restart-only.
 - **Engine state persistence** — engineBoots persisted to disk;
   timeliness enforced per RFC 3414 §3.2 (±150 s window).
 
@@ -286,7 +366,7 @@ with `validate --json`, and offer a "test connection" button backed by
 
 ```bash
 make build       # bin/snmp-shield
-make test        # go test ./... -race -timeout 180s
+make test        # gofmt gate + go test ./... -race -timeout 180s
 make vet         # go vet ./...
 make release     # stripped static binary for deployment
 make release-all # cross-builds: linux-amd64, linux-arm64, linux-armv7 into dist/

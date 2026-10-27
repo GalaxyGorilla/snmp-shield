@@ -44,6 +44,9 @@ type Metrics struct {
 	NotifsFiltered prometheus.Counter // notifications dropped by the configured filter
 	DropTotal      prometheus.Counter // dropped datagrams/frames (all causes)
 	Reconnects     prometheus.Counter // tunnel reconnects
+	ACLDenied      prometheus.Counter // front-leg clients refused by the allow-list
+	WritesDenied   prometheus.Counter // SET requests refused by the write policy
+	RateLimited    prometheus.Counter // front-leg requests refused by the rate limit
 	TunnelUp       prometheus.Gauge   // 1 when the tunnel session is up
 	ForwardLatency prometheus.Histogram
 }
@@ -61,6 +64,9 @@ func NewMetrics() *Metrics {
 	m.NotifsFiltered = mustCounter(m.reg, "snmp_shield_notifications_filtered_total", "Notifications dropped by the configured filter.")
 	m.DropTotal = mustCounter(m.reg, "snmp_shield_drops_total", "Datagrams or frames dropped.")
 	m.Reconnects = mustCounter(m.reg, "snmp_shield_tunnel_reconnects_total", "Tunnel reconnections.")
+	m.ACLDenied = mustCounter(m.reg, "snmp_shield_acl_denied_total", "Front-leg requests refused by the client allow-list.")
+	m.WritesDenied = mustCounter(m.reg, "snmp_shield_writes_denied_total", "SET requests refused by the write policy.")
+	m.RateLimited = mustCounter(m.reg, "snmp_shield_rate_limited_total", "Front-leg requests refused by the per-client rate limit.")
 	m.TunnelUp = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "snmp_shield_tunnel_up",
 		Help: "1 when the tunnel session is established.",
@@ -88,14 +94,16 @@ func (m *Metrics) Handler() http.Handler {
 
 // CounterList returns the counters in the fixed SNMP MIB row order
 // (.20.1..n): frames sent/received, bytes sent/received, requests
-// forwarded/errors, notifications relayed/filtered, drops, reconnects.
-// The order is a compatibility contract for the SNMP metrics MIB —
-// never reorder.
+// forwarded/errors, notifications relayed/filtered, drops, reconnects,
+// then the access-policy counters (ACL denied, writes denied, rate
+// limited). The order is a compatibility contract for the SNMP metrics
+// MIB — append only, never reorder.
 func (m *Metrics) CounterList() []prometheus.Counter {
 	return []prometheus.Counter{
 		m.FramesSent, m.FramesRecv, m.BytesSent, m.BytesRecv,
 		m.ReqForwarded, m.ReqErrors, m.NotifsRelayed, m.NotifsFiltered,
 		m.DropTotal, m.Reconnects,
+		m.ACLDenied, m.WritesDenied, m.RateLimited,
 	}
 }
 

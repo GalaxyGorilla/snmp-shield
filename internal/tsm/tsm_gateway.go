@@ -23,6 +23,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GalaxyGorilla/snmp-shield/internal/access"
 	"github.com/GalaxyGorilla/snmp-shield/internal/config"
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/notifyfilter"
@@ -82,6 +83,9 @@ type TSMGateway struct {
 	log   *zap.Logger
 	met   *observ.Metrics
 	filtr *notifyfilter.Filter // notification filter (nil = allow all)
+	// access is the front-leg policy (client allow-list, rate limit,
+	// write policy); nil holder / nil policy = allow everything.
+	access *access.Holder
 
 	// identity allow-list (from security.tsm_identities / users)
 	allowed []string
@@ -133,6 +137,10 @@ func NewTSMGateway(cfg config.GatewayRole, sec config.Security, lcfg tunnel.List
 		stop:    make(chan struct{}),
 	}, nil
 }
+
+// SetAccess installs (or replaces) the front-leg access policy. The policy
+// is read per datagram, so a reload takes effect on the next request.
+func (g *TSMGateway) SetAccess(h *access.Holder) { g.access = h }
 
 // Run binds the raw DTLS front leg, the clear agent socket and
 // (optionally) the clear trap listener, and serves until done is closed.
@@ -256,6 +264,39 @@ func (g *TSMGateway) handleFrontDatagram(conn net.Conn, dg []byte) {
 	fields, ok := pduCommon(pdu)
 	if !ok {
 		g.drop()
+		return
+	}
+
+	// Access policy on the DTLS front leg. The certificate identity check
+	// above answers "who are you"; this answers "may you, and may you
+	// write that?". Off-list and over-rate peers are dropped; a write
+	// refusal is answered with notWritable so the manager learns at once.
+	pol := g.access.Get()
+	switch pol.Check(access.IPOf(conn.RemoteAddr())) {
+	case access.DeniedClient:
+		if g.met != nil {
+			g.met.ACLDenied.Inc()
+		}
+		g.drop()
+		return
+	case access.DeniedRate:
+		if g.met != nil {
+			g.met.RateLimited.Inc()
+		}
+		g.drop()
+		return
+	}
+	if !pol.AllowWrite(pdu) {
+		if g.met != nil {
+			g.met.WritesDenied.Inc()
+		}
+		refusal := msg.BuildPDU(msg.PDUGetResponse, fields.ReqID, msg.ErrStatusNotWritable, 0, fields.Varbinds)
+		out, werr := wrapTSMPDU(int32(m.Header.MsgID), refusal, m.ContextEngineID, m.Header.MsgFlags|msg.MsgFlagReportable, m.USM.UserName)
+		if werr == nil {
+			if _, werr = conn.Write(out); werr != nil {
+				g.log.Debug("tsm gateway: notWritable delivery failed", zap.Error(werr))
+			}
+		}
 		return
 	}
 

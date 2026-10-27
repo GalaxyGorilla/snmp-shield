@@ -17,6 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GalaxyGorilla/snmp-shield/internal/access"
 	"github.com/GalaxyGorilla/snmp-shield/internal/cache"
 	"github.com/GalaxyGorilla/snmp-shield/internal/config"
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
@@ -66,6 +67,9 @@ type ManagerTranslator struct {
 	log   *zap.Logger
 	met   *observ.Metrics
 	filtr *notifyfilter.Filter // notification filter (nil = allow all)
+	// access is the clear-leg policy (client allow-list, rate limit,
+	// write policy); nil holder / nil policy = allow everything.
+	access *access.Holder
 
 	engineMu sync.Mutex
 	remote   *remoteEngine
@@ -109,6 +113,10 @@ func NewManagerTranslator(cfg config.ManagerRole, sec config.Security, clock *ca
 		stop:       make(chan struct{}),
 	}, nil
 }
+
+// SetAccess installs (or replaces) the clear-leg access policy. The policy
+// is read per datagram, so a reload takes effect on the next request.
+func (m *ManagerTranslator) SetAccess(h *access.Holder) { m.access = h }
 
 // Run starts the translator: binds the clear listener(s), subscribes to
 // tunnel RESP/NOTIF frames, and serves until done is closed.
@@ -206,6 +214,36 @@ func (m *ManagerTranslator) handleClearRequest(addr net.Addr, dg []byte) {
 	fields, fieldsOK := pduCommon(pduTLV)
 	if !fieldsOK {
 		m.log.Debug("usm manager: undecodable PDU in clear request")
+		return
+	}
+
+	// Access policy on the manager leg. Off-list and over-rate clients are
+	// dropped in silence; a write refusal is answered, because the manager
+	// is a legitimate talker and a timeout would only make it retransmit.
+	pol := m.access.Get()
+	switch pol.Check(access.IPOf(addr)) {
+	case access.DeniedClient:
+		if m.met != nil {
+			m.met.ACLDenied.Inc()
+		}
+		return
+	case access.DeniedRate:
+		if m.met != nil {
+			m.met.RateLimited.Inc()
+		}
+		return
+	}
+	if !pol.AllowWrite(pduTLV) {
+		if m.met != nil {
+			m.met.WritesDenied.Inc()
+		}
+		if out, ok := access.DenyResponse(ver, community, pduTLV); ok {
+			if udp, ok2 := addr.(*net.UDPAddr); ok2 {
+				if _, werr := m.conn.WriteTo(out, udp); werr != nil {
+					m.log.Debug("usm manager: notWritable delivery failed", zap.Error(werr))
+				}
+			}
+		}
 		return
 	}
 

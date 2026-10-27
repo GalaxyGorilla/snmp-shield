@@ -71,6 +71,28 @@ func IsPDUType(t uint8) bool {
 	return t >= 0xA0 && t <= 0xA8
 }
 
+// Error-status values the proxy uses when it answers a request on the
+// device's behalf (RFC 3416 §3). A v1 front leg has only 0..5, so a
+// v2-only status must be translated before it goes on a v1 wire (see
+// ErrorStatusFor).
+const (
+	ErrStatusNoError     int32 = 0
+	ErrStatusNoSuchName  int32 = 2
+	ErrStatusNoAccess    int32 = 6
+	ErrStatusNotWritable int32 = 17
+)
+
+// ErrorStatusFor maps a v2 error-status onto the version that will carry
+// it. v1 has no status above 5, so anything else becomes noSuchName
+// (RFC 2576 §4.3) with error-index 1 (a SET always carries at least one
+// varbind, so 1 is a valid 1-based index).
+func ErrorStatusFor(version int, status int32) (int32, int32) {
+	if version == Version1 && status > ErrStatusNoSuchName {
+		return ErrStatusNoSuchName, 1
+	}
+	return status, 0
+}
+
 // --- PDU field access (tag + content level, no varbind parsing) ----------
 
 // PDUFields is the common header of a v1/v2c PDU: request-id, error-status,

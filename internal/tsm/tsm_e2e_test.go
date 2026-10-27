@@ -15,9 +15,11 @@ import (
 	"math/big"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/GalaxyGorilla/snmp-shield/internal/access"
 	"github.com/GalaxyGorilla/snmp-shield/internal/config"
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/tsm"
@@ -134,15 +136,24 @@ func testCert(t *testing.T, cn string) *x509.Certificate {
 // suite runs in parallel (test packages share the loopback namespace).
 func fakeAgentOnFreePort(t *testing.T) (net.PacketConn, string) {
 	t.Helper()
+	conn, _, addr := countingFakeAgentOnFreePort(t)
+	return conn, addr
+}
+
+// countingFakeAgentOnFreePort also counts the SET requests that reach the
+// fake device (nil counter = not asked).
+func countingFakeAgentOnFreePort(t *testing.T) (net.PacketConn, *atomic.Int32, string) {
+	t.Helper()
 	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	go agentLoop(conn)
-	return conn, conn.LocalAddr().String()
+	sets := new(atomic.Int32)
+	go agentLoop(conn, sets)
+	return conn, sets, conn.LocalAddr().String()
 }
 
-func agentLoop(conn net.PacketConn) {
+func agentLoop(conn net.PacketConn, sets *atomic.Int32) {
 	buf := make([]byte, 65536)
 	for {
 		n, from, err := conn.ReadFrom(buf)
@@ -158,6 +169,11 @@ func agentLoop(conn net.PacketConn) {
 		if err != nil {
 			continue
 		}
+		if sets != nil {
+			if info, ierr := msg.Peek(dg); ierr == nil && msg.IsSet(info.PDUType) {
+				sets.Add(1)
+			}
+		}
 		resp := msg.BuildPDU(msg.PDUGetResponse, fields.ReqID, 0, 0, fields.Varbinds)
 		out, err := msg.BuildV1V2c(ver, community, resp)
 		if err != nil {
@@ -171,12 +187,21 @@ func agentLoop(conn net.PacketConn) {
 
 type tsmPair struct {
 	stop func()
+	sets *atomic.Int32 // SET requests that reached the fake device
 }
 
-func newTSMPair(t *testing.T, agentCertCN string, identities []string) (*tsmPair, string) {
+// newTSMPair builds a manager+agent translator pair over the pipe. An
+// optional access holder is installed on the AGENT side (the device-facing
+// box), which is where read_only/write_policy protect the device.
+func newTSMPair(t *testing.T, agentCertCN string, identities []string, holders ...*access.Holder) (*tsmPair, string) {
 	t.Helper()
 
-	fake, fakeAddr := fakeAgentOnFreePort(t)
+	var h *access.Holder
+	if len(holders) > 0 {
+		h = holders[0]
+	}
+
+	fake, sets, fakeAddr := countingFakeAgentOnFreePort(t)
 
 	var agentCert *x509.Certificate
 	if agentCertCN != "" {
@@ -194,6 +219,7 @@ func newTSMPair(t *testing.T, agentCertCN string, identities []string) (*tsmPair
 		fake.Close()
 		t.Fatal(err)
 	}
+	atr.SetAccess(h)
 
 	mgrAddr := freeUDPPort(t)
 	mgrSec := config.Security{Mode: "tsm", TrapCommunity: "trapcomm"}
@@ -208,7 +234,7 @@ func newTSMPair(t *testing.T, agentCertCN string, identities []string) (*tsmPair
 	go func() { _ = atr.Run(done) }()
 	startTSMManager(t, mtr, done)
 
-	return &tsmPair{stop: func() { close(done); fake.Close() }}, mgrAddr
+	return &tsmPair{stop: func() { close(done); fake.Close() }, sets: sets}, mgrAddr
 }
 
 // startTSMManager starts a manager and waits for its explicit readiness
@@ -662,5 +688,70 @@ func TestTSMEndToEndAgentInform(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("no inform response from manager translator")
+	}
+}
+
+// TestTSMEndToEndAgentReadOnly pins the agent-side write policy of the TSM
+// two-proxy chain: read_only on the device-facing box refuses a SET with
+// notWritable (relayed back to the clear v2c client) and the device never
+// sees it.
+func TestTSMEndToEndAgentReadOnly(t *testing.T) {
+	pol, err := access.New(nil, 0, access.NewReadOnly())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, mgrAddr := newTSMPair(t, "snmp-shield-manager", []string{"snmp-shield-manager"}, access.NewHolder(pol))
+	defer pair.stop()
+
+	client, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	raddr, err := net.ResolveUDPAddr("udp", mgrAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// v2c SET for sysName.0
+	oid, err := msg.EncodeOID("1.3.6.1.2.1.1.5.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vb := msg.AppendTLV(nil, 0x06, oid)
+	vb = msg.AppendTLV(vb, 0x04, []byte("nope"))
+	vbs := msg.AppendTLV(nil, 0x30, vb)
+	reqID := int32(7777)
+	pdu := msg.BuildPDU(msg.PDUSetRequest, reqID, 0, 0, vbs)
+	req, err := msg.BuildV1V2c(msg.Version2c, []byte("clientcomm"), pdu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.WriteTo(req, raddr); err != nil {
+		t.Fatal(err)
+	}
+
+	client.SetReadDeadline(time.Now().Add(10 * time.Second))
+	buf := make([]byte, 65536)
+	n, _, err := client.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("no answer for the refused SET (timeout instead of notWritable): %v", err)
+	}
+	_, _, pduTLV, err := msg.SplitV1V2c(buf[:n])
+	if err != nil {
+		t.Fatalf("bad response: %v", err)
+	}
+	_, fields, err := msg.ParsePDU(pduTLV)
+	if err != nil {
+		t.Fatalf("bad response PDU: %v", err)
+	}
+	if fields.ErrStatus != msg.ErrStatusNotWritable {
+		t.Errorf("errStatus = %d, want notWritable (%d)", fields.ErrStatus, msg.ErrStatusNotWritable)
+	}
+	if fields.ReqID != reqID {
+		t.Errorf("response req-id = %d, want %d", fields.ReqID, reqID)
+	}
+	if n := pair.sets.Load(); n != 0 {
+		t.Errorf("refused SET reached the legacy device %d time(s)", n)
 	}
 }

@@ -109,6 +109,12 @@ type cliFlags struct {
 	trapSink      *string
 	filterAction  *string
 	filterOID     *[]string
+	allow         *[]string
+	ratePerSec    *int
+	readOnly      *bool
+	writeDefault  *string
+	writeAllow    *[]string
+	writeDeny     *[]string
 	snmpListen    *string
 	snmpCommunity *string
 	snmpBaseOID   *string
@@ -158,6 +164,13 @@ func register(fs *pflag.FlagSet) cliFlags {
 	// direct-flags mode: notification filtering
 	c.filterAction = fs.String("filter-action", "allow", "notification filter action: allow or deny")
 	c.filterOID = fs.StringArray("filter-oid", nil, "notification filter OID prefix (repeatable, e.g. --filter-oid 1.3.6.1.4.1.8072)")
+	// access policy (front-leg clients, rate, writes)
+	c.allow = fs.StringArray("allow", nil, "client allow-list entry: bare IP or CIDR range (repeatable; empty = every client)")
+	c.ratePerSec = fs.Int("rate-per-sec", 0, "per-client request rate limit (0 = unlimited)")
+	c.readOnly = fs.Bool("read-only", false, "refuse every SET (write) request")
+	c.writeDefault = fs.String("write-default", "", "write policy verdict for objects no rule covers: allow or deny (default deny; setting this enables the policy)")
+	c.writeAllow = fs.StringArray("write-allow", nil, "writable OID subtree (repeatable)")
+	c.writeDeny = fs.StringArray("write-deny", nil, "forbidden OID subtree, wins over allow (repeatable)")
 
 	// direct-flags mode: SNMP metrics interface (health MIB + event traps)
 	c.snmpListen = fs.String("metrics-snmp-listen", "", "SNMP health MIB listen address ip:port (GET/GETNEXT; enables the SNMP metrics agent)")
@@ -195,6 +208,12 @@ func (c cliFlags) opts() flagsOpts {
 		trapSink:     *c.trapSink,
 		filterAction: *c.filterAction,
 		filterOids:   *c.filterOID,
+		allow:        *c.allow,
+		ratePerSec:   *c.ratePerSec,
+		readOnly:     *c.readOnly,
+		writeDefault: *c.writeDefault,
+		writeAllow:   *c.writeAllow,
+		writeDeny:    *c.writeDeny,
 		snmpListen:   *c.snmpListen,
 		snmpComm:     *c.snmpCommunity,
 		snmpBaseOID:  *c.snmpBaseOID,
@@ -254,6 +273,9 @@ func runRole(role string, args []string) int {
 		MetricsAddr: *c.metricsAddr,
 		Log:         log,
 		Version:     version,
+		// SIGHUP re-reads this file and applies the reloadable parts
+		// (access policy). Empty in flags mode = logged no-op.
+		ConfigPath: *c.configPath,
 	})
 	if err != nil {
 		log.Error("proxy exited", zap.Error(err))
@@ -286,6 +308,12 @@ type flagsOpts struct {
 	trapSink     string
 	filterAction string
 	filterOids   []string
+	allow        []string
+	ratePerSec   int
+	readOnly     bool
+	writeDefault string
+	writeAllow   []string
+	writeDeny    []string
 	snmpListen   string
 	snmpComm     string
 	snmpBaseOID  string
@@ -310,6 +338,44 @@ func trapFilter(o flagsOpts) (*config.NotifyFilter, error) {
 		return nil, nil
 	}
 	return &config.NotifyFilter{Action: o.filterAction, Oids: o.filterOids}, nil
+}
+
+// accessPolicy builds the config Access section from flags: the client
+// allow-list, the per-client rate limit and the write policy (--read-only,
+// or --write-default with --write-allow/--write-deny subtrees).
+func accessPolicy(o flagsOpts) (*config.Access, error) {
+	a := &config.Access{
+		Allow:      o.allow,
+		RatePerSec: o.ratePerSec,
+		ReadOnly:   o.readOnly,
+	}
+	hasRules := len(o.writeAllow) > 0 || len(o.writeDeny) > 0
+	if hasRules || o.writeDefault != "" {
+		if o.readOnly {
+			if hasRules {
+				return nil, fmt.Errorf("--read-only and --write-allow/--write-deny are mutually exclusive")
+			}
+			return a, nil
+		}
+		// An explicit policy: --write-default (deny unless set) plus the
+		// allow/deny subtrees. Deny rules always win.
+		def := o.writeDefault
+		if def == "" {
+			def = "deny"
+		}
+		wp := &config.WritePolicyCfg{Default: def}
+		for _, oid := range o.writeAllow {
+			wp.Rules = append(wp.Rules, config.WriteRuleCfg{OID: oid, Action: "allow"})
+		}
+		for _, oid := range o.writeDeny {
+			wp.Rules = append(wp.Rules, config.WriteRuleCfg{OID: oid, Action: "deny"})
+		}
+		a.WritePolicy = wp
+	}
+	if len(a.Allow) == 0 && a.RatePerSec == 0 && !a.ReadOnly && a.WritePolicy == nil {
+		return nil, nil
+	}
+	return a, nil
 }
 
 // flagsConfig assembles a validated Config from direct flags (plug-and-play
@@ -497,6 +563,13 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 		return nil, ferr
 	} else if filt != nil {
 		cfg.Notifications = config.Notifications{Filter: filt}
+	}
+	acc, aerr := accessPolicy(o)
+	if aerr != nil {
+		return nil, aerr
+	}
+	if acc != nil {
+		cfg.Access = *acc
 	}
 	cfg.Metrics = snmpMetrics(o)
 	// Engine state: flags mode is the plug-and-play path (smoke tests,

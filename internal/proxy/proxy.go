@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/GalaxyGorilla/snmp-shield/internal/access"
 	"github.com/GalaxyGorilla/snmp-shield/internal/cache"
 	"github.com/GalaxyGorilla/snmp-shield/internal/config"
 	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
@@ -36,6 +37,14 @@ type Options struct {
 	// Version is the product version string surfaced in the SNMP health
 	// MIB (defaults to "dev" when empty).
 	Version string
+	// ConfigPath is the YAML file the process was started from. When set,
+	// SIGHUP re-reads it and applies the reloadable parts (the access
+	// policy). Flags mode leaves it empty: SIGHUP is then a logged no-op.
+	ConfigPath string
+	// Access is the live front-leg access policy installed into every
+	// ingress leg. Run creates it from Config.AccessPolicy() and a reload
+	// swaps it atomically; nil means "no policy" (allow everything).
+	Access *access.Holder
 }
 
 // SNMP event trap OIDs, relative to the metrics base (base + ".2.x").
@@ -128,6 +137,38 @@ func installTunnelEvents(sess *tunnel.Session, agent *snmpmetrics.Agent, opts Op
 	})
 }
 
+// reloadLoop applies SIGHUP reloads until the process shuts down. A bad
+// file keeps the running configuration: an operator typo must never take
+// the proxy down or silently relax the policy.
+func reloadLoop(ch <-chan os.Signal, opts Options, done <-chan struct{}) {
+	for {
+		select {
+		case <-done:
+			return
+		case <-ch:
+			reloadConfig(opts)
+		}
+	}
+}
+
+// reloadConfig re-reads the YAML file and installs the reloadable parts.
+func reloadConfig(opts Options) {
+	if opts.ConfigPath == "" {
+		opts.Log.Warn("SIGHUP ignored: reload requires --config (flags-mode settings come from the command line)")
+		return
+	}
+	next, err := config.Load(opts.ConfigPath, opts.Config.Role)
+	if err != nil {
+		opts.Log.Error("reload: new config invalid, keeping the running configuration", zap.Error(err))
+		return
+	}
+	for _, w := range applyReload(opts.Config, next, opts.Access) {
+		opts.Log.Warn("reload: " + w)
+	}
+	opts.Log.Info("SIGHUP: configuration reloaded",
+		zap.String("access", describePolicy(opts.Access.Get())))
+}
+
 // Run executes the configured role until SIGINT/SIGTERM.
 func Run(opts Options) error {
 	met := observ.NewMetrics()
@@ -161,8 +202,37 @@ func Run(opts Options) error {
 		opts.Log.Info("systemd watchdog enabled", zap.Duration("interval", wd))
 	}
 
+	// Access policy: compiled once here and installed into every ingress
+	// leg below; SIGHUP swaps the holder's contents.
+	if opts.Access == nil {
+		pol, aerr := opts.Config.AccessPolicy()
+		if aerr != nil {
+			return aerr
+		}
+		opts.Access = access.NewHolder(pol)
+		opts.Log.Info("access policy", zap.String("policy", describePolicy(pol)))
+	}
+	if opts.Config.Access.WritePolicy != nil && opts.Config.Security.Mode == "passthrough" {
+		if opts.Config.Role == config.RoleAgent {
+			opts.Log.Warn("access.write_policy cannot inspect passthrough traffic: requests crossing the tunnel are opaque v3, so the write policy does not apply here (use usm-translate or tsm)")
+		} else {
+			opts.Log.Warn("access.write_policy is configured but security.mode is passthrough: v3 requests are forwarded opaquely, so the write policy governs v1/v2c only")
+		}
+	}
+	if opts.Config.Role == config.RoleAgent &&
+		(len(opts.Config.Access.Allow) > 0 || opts.Config.Access.RatePerSec > 0) {
+		opts.Log.Warn("access.allow/rate_per_sec are ignored on the agent role: requests arrive over the tunnel and carry no client address — configure them on the manager-side proxy")
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// SIGHUP reloads the access policy in place. It gets its own channel:
+	// putting SIGHUP on the shutdown context would stop the proxy.
+	hupCh := make(chan os.Signal, 1)
+	signal.Notify(hupCh, syscall.SIGHUP)
+	defer signal.Stop(hupCh)
+	go reloadLoop(hupCh, opts, ctx.Done())
 
 	wdStop := make(chan struct{})
 	defer close(wdStop)
@@ -232,6 +302,7 @@ func runManager(ctx context.Context, opts Options, met *observ.Metrics, snmpAgen
 		if err != nil {
 			return err
 		}
+		tr.SetAccess(opts.Access)
 		return tr.Run(ctx.Done())
 	default:
 		filt, ferr := opts.Config.TrapFilter()
@@ -239,6 +310,7 @@ func runManager(ctx context.Context, opts Options, met *observ.Metrics, snmpAgen
 			return ferr
 		}
 		mgr := passthrough.NewManager(opts.Config.Manager, sess, opts.Log, met, filt)
+		mgr.SetAccess(opts.Access)
 		return mgr.Run(ctx)
 	}
 }
@@ -265,6 +337,7 @@ func runManagerUSM(ctx context.Context, opts Options, met *observ.Metrics, sess 
 	if terr != nil {
 		return terr
 	}
+	tr.SetAccess(opts.Access)
 	return tr.Run(ctx.Done())
 }
 
@@ -361,12 +434,14 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent 
 				var tr *usm.AgentTranslator
 				tr, rerr = usm.NewAgentTranslator(opts.Config.Agent, usm.ProfilesFromSecurity(opts.Config.Security), clock, sess, opts.Log, met)
 				if rerr == nil {
+					tr.SetAccess(opts.Access)
 					rerr = tr.Run(sctx.Done())
 				}
 			} else if tsmMode {
 				var tr *tsm.AgentTranslator
 				tr, rerr = tsm.NewAgentTranslator(opts.Config.Agent, opts.Config.Security, sess, opts.Log, met)
 				if rerr == nil {
+					tr.SetAccess(opts.Access)
 					rerr = tr.Run(sctx.Done())
 				}
 			} else {
@@ -414,6 +489,7 @@ func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
 		if err != nil {
 			return err
 		}
+		gw.SetAccess(opts.Access)
 		return gw.Run(ctx.Done())
 	case "tsm-gateway":
 		lcfg := tunnel.ListenerConfig{
@@ -427,6 +503,7 @@ func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
 		if err != nil {
 			return err
 		}
+		gw.SetAccess(opts.Access)
 		return gw.Run(ctx.Done())
 	default:
 		store, err := cache.Open(opts.Config.Security.EngineStore)
@@ -449,6 +526,7 @@ func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
 		if terr != nil {
 			return terr
 		}
+		tr.SetAccess(opts.Access)
 		return tr.Run(ctx.Done())
 	}
 }

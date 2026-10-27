@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/GalaxyGorilla/snmp-shield/internal/access"
 	"github.com/GalaxyGorilla/snmp-shield/internal/config"
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
@@ -44,6 +45,11 @@ type AgentTranslator struct {
 	sess FrameSink
 	log  *zap.Logger
 	met  *observ.Metrics
+	// access is the write policy for requests arriving over the tunnel:
+	// the device-facing box can protect the device itself, independent
+	// of the manager-side proxy. The client allow-list and rate limit do
+	// not apply (tunnel frames carry no client address).
+	access *access.Holder
 
 	// identity allow-list (from security.tsm_identities / users)
 	allowed []string
@@ -80,6 +86,11 @@ func NewAgentTranslator(cfg config.AgentRole, sec config.Security, sess FrameSin
 		stop:    make(chan struct{}),
 	}, nil
 }
+
+// SetAccess installs (or replaces) the write policy enforced on requests
+// arriving over the tunnel. The policy is read per request, so a reload
+// takes effect on the next one.
+func (a *AgentTranslator) SetAccess(h *access.Holder) { a.access = h }
 
 // Run serves until done is closed.
 func (a *AgentTranslator) Run(done <-chan struct{}) error {
@@ -178,6 +189,23 @@ func (a *AgentTranslator) handleTunnelRequest(f *tunnel.Frame) {
 	}
 	fields, ok := pduCommon(pdu)
 	if !ok {
+		return
+	}
+
+	// Write policy: refuse before anything reaches the device, and answer
+	// so the manager does not retransmit into a timeout.
+	if !a.access.Get().AllowWrite(pdu) {
+		if a.met != nil {
+			a.met.WritesDenied.Inc()
+		}
+		refusal := msg.BuildPDU(msg.PDUGetResponse, fields.ReqID, msg.ErrStatusNotWritable, 0, fields.Varbinds)
+		out, werr := wrapTSMPDU(a.msgID.Add(1), refusal, nil, msg.MsgFlagReportable, "")
+		if werr != nil {
+			return
+		}
+		if werr = a.sess.Send(context.Background(), tunnel.TypeRESP, 0, f.CorrID, out); werr != nil {
+			a.log.Debug("tsm agent: notWritable send failed", zap.Error(werr))
+		}
 		return
 	}
 

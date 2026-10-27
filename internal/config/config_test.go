@@ -556,3 +556,138 @@ func TestValidateEngineStoreRequired(t *testing.T) {
 		t.Errorf("usm-translate with explicit ephemeral engine rejected: %v", err)
 	}
 }
+
+// --- access policy ---------------------------------------------------------
+
+// gwAccess builds a minimal valid usm-gateway config with an access section.
+func gwAccess(a Access) *Config {
+	c := gwCfg([]UserCfg{goodUser()}, "/tmp/e.json", false)
+	c.Access = a
+	return c
+}
+
+func TestValidateAccess(t *testing.T) {
+	// client allow-list entries must be IPs or CIDR ranges
+	if err := gwAccess(Access{Allow: []string{"10.0.0.0/33"}}).Validate(); err == nil {
+		t.Error("invalid CIDR in access.allow accepted")
+	}
+	if err := gwAccess(Access{Allow: []string{"not-an-ip"}}).Validate(); err == nil {
+		t.Error("invalid IP in access.allow accepted")
+	}
+	if err := gwAccess(Access{Allow: []string{"10.0.0.5", "10.8.0.0/24", "2001:db8::/32"}}).Validate(); err != nil {
+		t.Errorf("valid access.allow rejected: %v", err)
+	}
+	if err := gwAccess(Access{RatePerSec: -1}).Validate(); err == nil {
+		t.Error("negative access.rate_per_sec accepted")
+	}
+	// read_only and write_policy are two ways to say the same thing
+	both := Access{ReadOnly: true, WritePolicy: &WritePolicyCfg{
+		Default: "allow",
+	}}
+	if err := gwAccess(both).Validate(); err == nil {
+		t.Error("read_only + write_policy accepted")
+	}
+}
+
+func TestValidateWritePolicy(t *testing.T) {
+	bad := []WritePolicyCfg{
+		{Default: "maybe"},
+		{Rules: []WriteRuleCfg{{OID: "", Action: "allow"}}},
+		{Rules: []WriteRuleCfg{{OID: "not-an-oid", Action: "allow"}}},
+		{Rules: []WriteRuleCfg{{OID: "1.3.6.1", Action: "drop"}}},
+		// no rules + default deny is what read_only is for
+		{Default: "deny"},
+		{},
+	}
+	for i, wp := range bad {
+		if err := gwAccess(Access{WritePolicy: &wp}).Validate(); err == nil {
+			t.Errorf("write_policy case %d accepted: %+v", i, wp)
+		}
+	}
+	good := []WritePolicyCfg{
+		{Default: "allow"},
+		{Default: "deny", Rules: []WriteRuleCfg{{OID: "1.3.6.1.4.1.99.1", Action: "allow"}}},
+		{Rules: []WriteRuleCfg{{OID: ".1.3.6.1.4.1.99", Action: "deny"}, {OID: "1.3.6.1.2", Action: "allow"}}},
+	}
+	for i, wp := range good {
+		if err := gwAccess(Access{WritePolicy: &wp}).Validate(); err != nil {
+			t.Errorf("valid write_policy case %d rejected: %v", i, err)
+		}
+	}
+}
+
+func TestAccessPolicyCompiles(t *testing.T) {
+	// zero value: nil policy (allow everything)
+	p, err := (&Config{}).AccessPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p != nil {
+		t.Error("empty access section produced a policy")
+	}
+
+	c := gwAccess(Access{
+		Allow:      []string{"10.8.0.0/24"},
+		RatePerSec: 25,
+		WritePolicy: &WritePolicyCfg{
+			Default: "deny",
+			Rules:   []WriteRuleCfg{{OID: "1.3.6.1.4.1.99.1", Action: "allow"}},
+		},
+	})
+	p, err = c.AccessPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p == nil {
+		t.Fatal("access section produced a nil policy")
+	}
+	if p.ReadOnly() {
+		t.Error("write_policy reported as read_only")
+	}
+	if p.WritePolicyRules() != 1 {
+		t.Errorf("WritePolicyRules() = %d, want 1", p.WritePolicyRules())
+	}
+
+	ro, err := gwAccess(Access{ReadOnly: true}).AccessPolicy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ro.ReadOnly() {
+		t.Error("read_only did not compile to a read-only policy")
+	}
+}
+
+func TestLoadAccessYAML(t *testing.T) {
+	path := writeTemp(t, `
+tunnel:
+  listen_addr: ":19611"
+  psk: "hex:aabbccdd"
+agent:
+  agent_addr: "127.0.0.1:161"
+security:
+  mode: passthrough
+access:
+  allow: ["10.8.0.0/24", "192.168.1.5"]
+  rate_per_sec: 50
+  write_policy:
+    default: deny
+    rules:
+      - oid: "1.3.6.1.4.1.99.1"
+        action: allow
+      - oid: "1.3.6.1.4.1.99.1.9"
+        action: deny
+`)
+	cfg, err := Load(path, RoleAgent)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.Access.Allow) != 2 || cfg.Access.RatePerSec != 50 {
+		t.Fatalf("access = %+v", cfg.Access)
+	}
+	if cfg.Access.WritePolicy == nil || len(cfg.Access.WritePolicy.Rules) != 2 {
+		t.Fatalf("write_policy = %+v", cfg.Access.WritePolicy)
+	}
+	if _, err := cfg.AccessPolicy(); err != nil {
+		t.Errorf("compiled policy: %v", err)
+	}
+}

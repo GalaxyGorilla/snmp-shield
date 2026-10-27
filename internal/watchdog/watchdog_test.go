@@ -10,11 +10,17 @@ import (
 
 // startFakeSystemd starts a Unix-socket fake of systemd's NOTIFY_SOCKET
 // and returns the socket path plus a channel delivering every received
-// state string.
+// state string. The socket lives in a SHORT MkdirTemp path: macOS caps
+// unix socket paths at 104 bytes (sun_path), and t.TempDir() embeds the
+// test name — long test names overflow it (bind: invalid argument).
 func startFakeSystemd(t *testing.T) (string, <-chan string) {
 	t.Helper()
-	dir := t.TempDir()
-	sockPath := filepath.Join(dir, "notify.sock")
+	dir, err := os.MkdirTemp("", "sdnw")
+	if err != nil {
+		t.Fatalf("mkdir temp: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	sockPath := filepath.Join(dir, "s.sock")
 	ln, err := net.ListenUnixgram("unixgram", &net.UnixAddr{Name: sockPath, Net: "unixgram"})
 	if err != nil {
 		t.Fatalf("listen unix: %v", err)

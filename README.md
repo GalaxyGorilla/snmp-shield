@@ -388,6 +388,9 @@ exit 77 (skip) when syft/grype are not installed.
 - [`deploy/`](deploy/) — systemd unit files.
 - [`AGENTS.md`](AGENTS.md) — architecture, wire-level quirks
   (pion/dtls, gosnmp, net-snmp, BER) and the maintenance rules.
+- [`docs/security-hardening.md`](docs/security-hardening.md) — review
+  notes for the security-level and access-policy hardening: what was
+  broken, what fixed it, and what was deliberately left out.
 
 ## License
 

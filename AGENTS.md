@@ -58,7 +58,12 @@ Ops tooling now matches modbus-shield: `make release-all` cross-builds
 (`Type=notify` + `WatchdogSec=30` in all three deploy units, sd_notify
 via internal/watchdog, no-ops outside systemd). Interop trap-recovery
 step showed a timing flake once (chain-dead false negative); reruns
-pass rc=0 — rerun before diagnosing.
+pass rc=0 — rerun before diagnosing. Watchdog-test gotcha: **macOS caps
+unix socket paths at 104 bytes (sun_path)** — fake-socket test
+harnesses must bind in a short `os.MkdirTemp("", …)` path, not
+`t.TempDir()` (which embeds the test name; long names overflow →
+`bind: invalid argument`, caught on macOS arm64; Linux's 108-byte limit
+plus the short `/tmp` prefix hides it).
 
 | Milestone | Status |
 |---|---|

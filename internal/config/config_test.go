@@ -20,7 +20,7 @@ func TestLoadManagerHexPSK(t *testing.T) {
 	path := writeTemp(t, `
 tunnel:
   mode: dtls
-  dial_addr: "10.0.0.1:10162"
+  dial_addrs: ["10.0.0.1:10162"]
   psk: "hex:00112233445566778899aabbccddeeff"
 manager:
   listen_addr: ":161"
@@ -32,7 +32,7 @@ manager:
 	if cfg.Role != RoleManager {
 		t.Errorf("role = %q", cfg.Role)
 	}
-	if cfg.Tunnel.Mode != "dtls" || cfg.Tunnel.DialAddr != "10.0.0.1:10162" {
+	if cfg.Tunnel.Mode != "dtls" || len(cfg.Tunnel.DialAddrs) != 1 || cfg.Tunnel.DialAddrs[0] != "10.0.0.1:10162" {
 		t.Errorf("tunnel = %+v", cfg.Tunnel)
 	}
 	want := []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}
@@ -91,15 +91,15 @@ func TestPSKBareAndBadHex(t *testing.T) {
 }
 
 func TestValidateErrors(t *testing.T) {
-	goodM := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", DialAddr: "x:1", PSK: "text:s"}, Manager: ManagerRole{ListenAddr: ":161"}, Security: Security{Mode: "passthrough"}}
+	goodM := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", DialAddrs: []string{"x:1"}, PSK: "text:s"}, Manager: ManagerRole{ListenAddr: ":161"}, Security: Security{Mode: "passthrough"}}
 	if err := goodM.Validate(); err != nil {
 		t.Errorf("manager validate: %v", err)
 	}
 	noDial := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", PSK: "text:s"}, Manager: ManagerRole{ListenAddr: ":161"}}
 	if err := noDial.Validate(); err == nil {
-		t.Error("manager without dial_addr accepted")
+		t.Error("manager without dial_addrs accepted")
 	}
-	noListen := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", DialAddr: "x:1", PSK: "text:s"}}
+	noListen := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", DialAddrs: []string{"x:1"}, PSK: "text:s"}}
 	if err := noListen.Validate(); err == nil {
 		t.Error("manager without listen_addr accepted")
 	}
@@ -160,7 +160,7 @@ func TestLoadPskCiphersuites(t *testing.T) {
 	path := writeTemp(t, `
 tunnel:
   mode: dtls
-  dial_addr: "10.0.0.1:10162"
+  dial_addrs: ["10.0.0.1:10162"]
   psk: "text:shared-secret"
   psk_ciphersuites: ["aes256-ccm-8", "aes128-gcm"]
 manager:
@@ -177,16 +177,16 @@ manager:
 }
 
 func TestValidatePskCiphersuites(t *testing.T) {
-	good := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", DialAddr: "x:1", PSK: "text:s", PskCiphersuites: []string{"aes256-ccm-8", "TLS_PSK_WITH_AES_128_CCM"}}, Manager: ManagerRole{ListenAddr: ":161"}, Security: Security{Mode: "passthrough"}}
+	good := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", DialAddrs: []string{"x:1"}, PSK: "text:s", PskCiphersuites: []string{"aes256-ccm-8", "TLS_PSK_WITH_AES_128_CCM"}}, Manager: ManagerRole{ListenAddr: ":161"}, Security: Security{Mode: "passthrough"}}
 	if err := good.Validate(); err != nil {
 		t.Errorf("valid suites rejected: %v", err)
 	}
-	bad := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", DialAddr: "x:1", PSK: "text:s", PskCiphersuites: []string{"chacha20"}}, Manager: ManagerRole{ListenAddr: ":161"}, Security: Security{Mode: "passthrough"}}
+	bad := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", DialAddrs: []string{"x:1"}, PSK: "text:s", PskCiphersuites: []string{"chacha20"}}, Manager: ManagerRole{ListenAddr: ":161"}, Security: Security{Mode: "passthrough"}}
 	if err := bad.Validate(); err == nil {
 		t.Error("unknown psk ciphersuite accepted")
 	}
 	// Suites without a PSK are also validated (harmless, forward-proof).
-	noPSK := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "tls", DialAddr: "x:1", PskCiphersuites: []string{"bogus"}}, Manager: ManagerRole{ListenAddr: ":161"}, Security: Security{Mode: "passthrough"}}
+	noPSK := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "tls", DialAddrs: []string{"x:1"}, PskCiphersuites: []string{"bogus"}}, Manager: ManagerRole{ListenAddr: ":161"}, Security: Security{Mode: "passthrough"}}
 	if err := noPSK.Validate(); err == nil {
 		t.Error("unknown psk ciphersuite without psk accepted")
 	}
@@ -232,34 +232,26 @@ manager:
 		t.Errorf("dial_addrs = %v", addrs)
 	}
 
-	// dial_addrs wins over dial_addr.
+	// A single endpoint is just a one-element list.
 	path = writeTemp(t, `
 tunnel:
   mode: dtls
-  dial_addr: "10.0.0.9:10162"
-  dial_addrs: ["10.0.0.1:10162"]
+  dial_addrs: ["10.0.0.7:10162"]
   psk: "text:shared-secret"
 manager:
   listen_addr: ":161"
 `)
-	cfg, err = Load(path, RoleManager)
-	if err != nil {
-		t.Fatalf("load dial_addrs+dial_addr: %v", err)
+	if cfg, err = Load(path, RoleManager); err != nil {
+		t.Fatalf("load single dial_addrs: %v", err)
 	}
-	if addrs := cfg.DialEndpoints(); len(addrs) != 1 || addrs[0] != "10.0.0.1:10162" {
-		t.Errorf("dial_addrs must win over dial_addr: %v", addrs)
-	}
-
-	// Legacy single dial_addr still resolves.
-	legacy := &Config{Tunnel: Tunnel{DialAddr: "x:1"}}
-	if addrs := legacy.DialEndpoints(); len(addrs) != 1 || addrs[0] != "x:1" {
-		t.Errorf("legacy dial_addr = %v", addrs)
+	if addrs := cfg.DialEndpoints(); len(addrs) != 1 || addrs[0] != "10.0.0.7:10162" {
+		t.Errorf("single dial_addrs = %v", addrs)
 	}
 
-	// Manager without either is rejected.
+	// Manager without any endpoint is rejected.
 	none := &Config{Role: RoleManager, Tunnel: Tunnel{Mode: "dtls", PSK: "text:s"}, Manager: ManagerRole{ListenAddr: ":161"}}
 	if err := none.Validate(); err == nil {
-		t.Error("manager without dial_addr/dial_addrs accepted")
+		t.Error("manager without dial_addrs accepted")
 	}
 }
 
@@ -280,7 +272,7 @@ func TestTrapFilterFromConfig(t *testing.T) {
 	path := writeTemp(t, `
 tunnel:
   mode: dtls
-  dial_addr: "10.0.0.1:10162"
+  dial_addrs: ["10.0.0.1:10162"]
   psk: "hex:00112233445566778899aabbccddeeff"
 manager:
   listen_addr: ":161"
@@ -317,7 +309,7 @@ func TestTrapFilterNilWhenUnset(t *testing.T) {
 	path := writeTemp(t, `
 tunnel:
   mode: dtls
-  dial_addr: "10.0.0.1:10162"
+  dial_addrs: ["10.0.0.1:10162"]
   psk: "hex:00112233445566778899aabbccddeeff"
 manager:
   listen_addr: ":161"
@@ -346,7 +338,7 @@ func TestTrapFilterInvalidConfig(t *testing.T) {
 			`
 tunnel:
   mode: dtls
-  dial_addr: "10.0.0.1:10162"
+  dial_addrs: ["10.0.0.1:10162"]
   psk: "hex:00112233445566778899aabbccddeeff"
 manager:
   listen_addr: ":161"
@@ -362,7 +354,7 @@ notifications:
 			`
 tunnel:
   mode: dtls
-  dial_addr: "10.0.0.1:10162"
+  dial_addrs: ["10.0.0.1:10162"]
   psk: "hex:00112233445566778899aabbccddeeff"
 manager:
   listen_addr: ":161"
@@ -378,7 +370,7 @@ notifications:
 			`
 tunnel:
   mode: dtls
-  dial_addr: "10.0.0.1:10162"
+  dial_addrs: ["10.0.0.1:10162"]
   psk: "hex:00112233445566778899aabbccddeeff"
 manager:
   listen_addr: ":161"

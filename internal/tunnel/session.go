@@ -42,9 +42,9 @@ type Session struct {
 	readLoopOnce sync.Once
 	readStop     chan struct{}
 
-	// keepalive interval; read deadline = 3×keepalive. 0 = legacy 90s.
+	// keepalive interval; read deadline = 3×keepalive. 0 = defaultKeepalive.
 	keepalive time.Duration
-	// maxBackoff caps the reconnect backoff. 0 = legacy 5s.
+	// maxBackoff caps the reconnect backoff. 0 = defaultMaxBackoff.
 	maxBackoff time.Duration
 	// met is the optional metrics set (Reconnects counter, TunnelUp gauge).
 	met *observ.Metrics
@@ -68,10 +68,13 @@ type Session struct {
 	lastFailIdx int
 }
 
-// Session tuning: the legacy hardcoded values.
+// Session defaults: used when SetTuning is given a zero value. They match
+// the config defaults (keepalive_secs 10, max_reconnect_backoff 30s) so a
+// session behaves the same whether or not the caller passed tuning.
 const (
-	legacyReadDeadline   = 90 * time.Second
-	legacyMaxBackoff     = 5 * time.Second
+	defaultKeepalive  = 10 * time.Second
+	defaultMaxBackoff = 30 * time.Second
+
 	deadlinePerKeepalive = 3
 	maxIdleMisses        = 3
 )
@@ -135,8 +138,9 @@ func NewServerSession(conn net.Conn, maxPayload, chunk int, log *zap.Logger) *Se
 // SetTuning configures keepalive-based dead-peer detection: the read
 // deadline becomes 3×keepalive and after maxIdleMisses consecutive idle
 // timeouts the connection is dropped (server side) or probed then dropped
-// (client side). maxBackoff caps the reconnect backoff. Zero values keep
-// the legacy behavior (90s deadline, 5s backoff, never declare dead).
+// (client side). maxBackoff caps the reconnect backoff. A zero value falls
+// back to the package default (defaultKeepalive / defaultMaxBackoff), so
+// dead-peer detection is always active — there is no "never detect" mode.
 func (s *Session) SetTuning(keepalive, maxBackoff time.Duration) {
 	s.mu.Lock()
 	s.keepalive = keepalive
@@ -185,16 +189,16 @@ func (s *Session) closeDone() {
 	s.doneOnce.Do(func() { close(s.doneCh) })
 }
 
-// readDeadline returns the per-read timeout: 3×keepalive when tuning is
-// set, else the legacy 90s.
+// readDeadline returns the per-read timeout: 3×keepalive, or 3× the default
+// keepalive when no tuning was supplied.
 func (s *Session) readDeadline() time.Duration {
 	s.mu.Lock()
 	keepalive := s.keepalive
 	s.mu.Unlock()
-	if keepalive > 0 {
-		return keepalive * deadlinePerKeepalive
+	if keepalive <= 0 {
+		keepalive = defaultKeepalive
 	}
-	return legacyReadDeadline
+	return keepalive * deadlinePerKeepalive
 }
 
 // backoffCap returns the reconnect backoff cap.
@@ -202,10 +206,10 @@ func (s *Session) backoffCap() time.Duration {
 	s.mu.Lock()
 	maxBackoff := s.maxBackoff
 	s.mu.Unlock()
-	if maxBackoff > 0 {
-		return maxBackoff
+	if maxBackoff <= 0 {
+		return defaultMaxBackoff
 	}
-	return legacyMaxBackoff
+	return maxBackoff
 }
 
 // PeerCerts reports the peer certificate chain of the tunnel connection,

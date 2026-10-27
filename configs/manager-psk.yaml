@@ -3,15 +3,12 @@ role: manager
 
 tunnel:
   mode: dtls
-  # Address of the agent-side proxy's tunnel listener. For HA, dial_addrs
-  # lists multiple agent-side proxies (most preferred first): the dialer
-  # fails over to the next endpoint when one dies and sticks to the
-  # last-known-good one.
-  # dial_addr: "192.0.2.20:10162"
-  # dial_addrs:
-  #   - "192.0.2.20:10162"
-  #   - "192.0.2.21:10162"
-  dial_addr: "192.0.2.20:10162"
+  # Address(es) of the agent-side proxy's tunnel listener, most preferred
+  # first. The dialer fails over to the next endpoint when one dies and
+  # sticks to the last-known-good one; a single endpoint is a one-element
+  # list.
+  dial_addrs:
+    - "192.0.2.20:10162"
   psk_identity: "snmp-shield-manager"
   # Accepts "hex:<hex>", "text:<string>", or a bare string (treated as text).
   psk: "text:change-me-shared-secret"

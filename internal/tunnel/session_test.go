@@ -122,3 +122,34 @@ func TestSessionFragmentedEcho(t *testing.T) {
 		t.Fatal("fragmented echo timeout")
 	}
 }
+
+// TestTuningDefaults pins the removal of the legacy "0 = old behaviour"
+// branch: an untuned session must still get dead-peer detection, with the
+// same values the config defaults produce (keepalive 10s → 30s deadline,
+// 30s backoff cap). Before this, 0 meant a 90s deadline and a 5s cap, so the
+// zero value silently bought the worse behaviour.
+func TestTuningDefaults(t *testing.T) {
+	s := &Session{}
+	if got, want := s.readDeadline(), defaultKeepalive*deadlinePerKeepalive; got != want {
+		t.Errorf("untuned readDeadline = %v, want %v", got, want)
+	}
+	if got, want := s.backoffCap(), defaultMaxBackoff; got != want {
+		t.Errorf("untuned backoffCap = %v, want %v", got, want)
+	}
+
+	// Explicit tuning still wins.
+	s.SetTuning(2*time.Second, time.Second)
+	if got, want := s.readDeadline(), 6*time.Second; got != want {
+		t.Errorf("tuned readDeadline = %v, want %v", got, want)
+	}
+	if got, want := s.backoffCap(), time.Second; got != want {
+		t.Errorf("tuned backoffCap = %v, want %v", got, want)
+	}
+
+	// A partial tune (server sessions pass 0 for the unused backoff) falls
+	// back per-field rather than to the whole legacy set.
+	s.SetTuning(2*time.Second, 0)
+	if got, want := s.backoffCap(), defaultMaxBackoff; got != want {
+		t.Errorf("partial-tune backoffCap = %v, want %v", got, want)
+	}
+}

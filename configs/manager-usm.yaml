@@ -5,8 +5,10 @@ role: manager
 
 tunnel:
   mode: dtls
-  # Address of the agent-side proxy's tunnel listener.
-  dial_addr: "192.0.2.20:10162"
+  # Address(es) of the agent-side proxy's tunnel listener, most preferred
+  # first (HA failover); a single endpoint is a one-element list.
+  dial_addrs:
+    - "192.0.2.20:10162"
   psk_identity: "snmp-shield-manager"
   psk: "text:change-me-shared-secret"
   server_name: "snmp-shield-agent"

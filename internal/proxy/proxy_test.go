@@ -365,7 +365,7 @@ func TestRunManagerPassthroughE2E(t *testing.T) {
 	mgrCfg := &config.Config{Role: config.RoleManager}
 	mgrCfg.Defaults()
 	mgrCfg.Tunnel.Mode = "dtls"
-	mgrCfg.Tunnel.DialAddr = agentListen
+	mgrCfg.Tunnel.DialAddrs = []string{agentListen}
 	mgrCfg.Tunnel.PSK = "text:testpsk"
 	mgrCfg.Manager.ListenAddr = freeUDPPort(t)
 	mgrListen := mgrCfg.Manager.ListenAddr
@@ -454,7 +454,7 @@ func TestRunManagerUSME2E(t *testing.T) {
 	mgrCfg := &config.Config{Role: config.RoleManager}
 	mgrCfg.Defaults()
 	mgrCfg.Tunnel.Mode = "dtls"
-	mgrCfg.Tunnel.DialAddr = agentListen
+	mgrCfg.Tunnel.DialAddrs = []string{agentListen}
 	mgrCfg.Tunnel.PSK = "text:testpsk"
 	mgrCfg.Manager.ListenAddr = freeUDPPort(t)
 	mgrCfg.Security.Mode = "usm-translate"
@@ -677,7 +677,7 @@ func TestSNMPMetricsE2E(t *testing.T) {
 	mgrCfg := &config.Config{Role: config.RoleManager}
 	mgrCfg.Defaults()
 	mgrCfg.Tunnel.Mode = "dtls"
-	mgrCfg.Tunnel.DialAddr = agentListen
+	mgrCfg.Tunnel.DialAddrs = []string{agentListen}
 	mgrCfg.Tunnel.PSK = "text:testpsk"
 	// Short keepalive so dead-peer detection drops the session quickly
 	// after the agent-side listener dies (UDP gives no connection-state
@@ -989,7 +989,7 @@ func TestRunAgentReadOnlyE2E(t *testing.T) {
 	mgrCfg := &config.Config{Role: config.RoleManager}
 	mgrCfg.Defaults()
 	mgrCfg.Tunnel.Mode = "dtls"
-	mgrCfg.Tunnel.DialAddr = agentListen
+	mgrCfg.Tunnel.DialAddrs = []string{agentListen}
 	mgrCfg.Tunnel.PSK = "text:testpsk"
 	mgrCfg.Manager.ListenAddr = freeUDPPort(t)
 	mgrCfg.Security.Mode = "usm-translate"

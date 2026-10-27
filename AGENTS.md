@@ -593,11 +593,10 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   (HA pair state sync, see below).
 - **HA (tunnel failover + dead-peer detection)**:
   - Manager dials a list: `tunnel.dial_addrs` (YAML, most preferred
-    first; supersedes `tunnel.dial_addr`, which still works as the
-    single-entry form). The Dialer walks endpoints starting at the
-    sticky last-known-good index; each endpoint gets the full dial
-    timeout; the first success pins the index. `--tunnel-addr` accepts a
-    comma-separated list in flags mode.
+    first; a single endpoint is a one-element list). The Dialer walks
+    endpoints starting at the sticky last-known-good index; each endpoint
+    gets the full dial timeout; the first success pins the index.
+    `--tunnel-addr` accepts a comma-separated list in flags mode.
   - **pion `dtls.Dial` does NOT handshake** — it returns instantly and
     the handshake completes lazily on first Read/Write, so a dead
     endpoint "dials" successfully. `Dialer.Dial` now runs
@@ -607,9 +606,14 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
     sets the read deadline to 3×keepalive; after 3 consecutive idle
     timeouts the connection is dropped (client probes with PING first;
     server just drops and its readLoop returns, firing `Session.Done()`).
-    0 values = legacy behavior (90s deadline, never declare dead, 5s
-    backoff cap). `keepalive_secs`/`max_reconnect_backoff_secs` are now
-    live config (were dead code before). `Session.Close()` fires Done.
+    A zero value falls back to the package defaults
+    (`defaultKeepalive` 10s → 30s deadline, `defaultMaxBackoff` 30s),
+    which match the config defaults — there is no "legacy / never
+    detect" mode any more (it was removed with the no-back-compat rule;
+    the old comment claiming it "never declares dead" was also wrong:
+    three 90s misses did drop the peer, just after 270s).
+    `keepalive_secs`/`max_reconnect_backoff_secs` are live config.
+    `Session.Close()` fires Done.
   - Agent-side proxy cancels per-session translators via
     `Session.Done()` → per-session context (previously the translator
     leaked per reconnect until process exit).

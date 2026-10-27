@@ -12,7 +12,7 @@ import (
 func reloadCfg(a config.Access) *config.Config {
 	return &config.Config{
 		Role:     config.RoleManager,
-		Tunnel:   config.Tunnel{Mode: "dtls", DialAddr: "10.0.0.1:10162", PSK: "text:s"},
+		Tunnel:   config.Tunnel{Mode: "dtls", DialAddrs: []string{"10.0.0.1:10162"}, PSK: "text:s"},
 		Manager:  config.ManagerRole{ListenAddr: ":161"},
 		Security: config.Security{Mode: "passthrough"},
 		Access:   a,
@@ -87,7 +87,7 @@ func TestReloadWarnsOnRestartOnlyChanges(t *testing.T) {
 	h := access.NewHolder(nil)
 
 	next := reloadCfg(config.Access{})
-	next.Tunnel.DialAddr = "10.0.0.9:10162" // listener/endpoint: restart only
+	next.Tunnel.DialAddrs = []string{"10.0.0.9:10162"} // listener/endpoint: restart only
 	next.Security.Mode = "usm-translate"
 	next.Manager.ListenAddr = ":1161"
 	next.Notifications.Filter = &config.NotifyFilter{Action: "allow", Oids: []string{"1.3.6.1"}}

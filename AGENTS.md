@@ -24,6 +24,12 @@ Deployment model:
 Two instances of one binary; each secures its local clear leg and encrypts the
 long-haul segment between them.
 
+**Scope boundary:** this repository is snmp-shield only. Combining it with
+modbus-shield on one appliance is a **separate project** — do not scope that
+work here. The `access` block deliberately mirrors modbus-shield's key names so
+that a combined product could present one policy vocabulary, but that parity is
+a design property, not pending integration work.
+
 ## 2. Decisions (do not re-litigate without strong reason)
 
 | Topic | Decision |

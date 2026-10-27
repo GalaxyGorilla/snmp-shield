@@ -272,10 +272,10 @@ regressions; all are pre-existing.
 
 ---
 
-## Not yet scoped
+## Out of scope
 
-The original goal this hardening serves: **one appliance running both
-snmp-shield and modbus-shield**. The access layer was written with that in mind
-(identical key names, identical denial semantics), but the integration itself —
-one binary or two, one config file or two, how the two engines share a policy
-and an ops surface — has not been designed.
+**Single-box integration with modbus-shield is a separate project** and is not
+tracked here. The access layer was still written with modbus parity in mind
+(identical key names, identical denial semantics) so that one appliance could
+later present one policy vocabulary — but that is a property of the policy
+design, not pending work in this repository.

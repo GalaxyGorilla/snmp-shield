@@ -71,6 +71,12 @@ and SNMP health metrics, and SBOM/vulnerability tooling.
 
 ## Security modes
 
+**Naming note:** in this project `TSM` always means SNMP's **Transport
+Security Model** (RFC 5591) — logging in with a certificate instead of a
+passphrase. It has nothing to do with **Time-Sensitive Networking**
+(IEEE 802.1, usually abbreviated *TSN*); the acronyms are close enough that
+the mix-up has already happened once at planning time.
+
 | Mode | How it works | Use when |
 |---|---|---|
 | `passthrough` | Opaque forwarding of clear SNMP (v1/v2c/v3). v3 USM params forwarded byte-exact, never decrypted. | Managers/agents already speak SNMPv3; you only need to protect the long-haul link. |
@@ -96,8 +102,9 @@ users in `security.users` — every shipped default is SHA + AES
 speak noAuthNoPriv v3 (framed, not secured). Configure real passphrases
 and the leg is authPriv.
 
-**Why TSM is not everywhere**: TSM (RFC 5591) exists in exactly two
-shapes here — the two-proxy tunnel and the agent-side gateway front leg
+**Why TSM is not everywhere**: TSM — the Transport Security Model, RFC 5591 —
+exists in exactly two shapes here — the two-proxy tunnel and the agent-side
+gateway front leg
 (`tsm-gateway`). There is no TSM variant of the manager-side gateway,
 and TSM gateway support is a niche option rather than the default:
 

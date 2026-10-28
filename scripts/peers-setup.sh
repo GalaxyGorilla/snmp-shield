@@ -4,7 +4,9 @@
 #
 #   python venv + pysnmp + cryptography   -> test/peers/.venv
 #   node net-snmp                         -> test/peers/node_modules
-#   net-snmp in Docker (TSM/DTLS client)  -> docker image snmp-shield-net-snmp:peer
+#   net-snmp in Docker                    -> docker image snmp-shield-net-snmp:peer
+#       (current-release clear-leg peer + RFC 6353 TSM client + snmptrapd as
+#        a v3 notification receiver; needs python3 for the shared adapter)
 #
 # net-snmp on the host is NOT installed here: it is a system package
 # (apt-get install snmp / brew install net-snmp), and the adapter simply
@@ -79,16 +81,27 @@ fi
 # The host's net-snmp may be built without TLS (Apple's is), and RFC 6353
 # cannot be exercised without a `dtls:` transport. A small Debian image with
 # a current net-snmp gives the TSM scenarios a real third-party client.
+#
+# Three capabilities are required, and an image left over from an earlier
+# revision can be missing two of them (snmptrapd for the receiver scenarios,
+# python3 for the net-snmp adapter that runs INSIDE the container). Checking
+# `docker image inspect` alone is not enough: a stale image then surfaces as a
+# failing test instead of a rebuild.
+image_ok() {
+    docker image inspect "$1" >/dev/null 2>&1 || return 1
+    docker run --rm --entrypoint sh "$1" -c \
+        'command -v snmpget && command -v snmptrapd && command -v python3' >/dev/null 2>&1
+}
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-    if docker image inspect snmp-shield-net-snmp:peer >/dev/null 2>&1; then
+    if image_ok snmp-shield-net-snmp:peer; then
         echo "== net-snmp docker peer: already built"
     else
         echo "== building net-snmp docker peer image (test/peers/netsnmp-docker)"
         docker build --quiet -t snmp-shield-net-snmp:peer "$here/netsnmp-docker" >/dev/null 2>&1 \
             || echo "   docker build failed"
     fi
-    if docker image inspect snmp-shield-net-snmp:peer >/dev/null 2>&1; then
-        echo "== net-snmp docker peer: $(docker run --rm snmp-shield-net-snmp:peer snmpget --version 2>&1 | head -1) ready"
+    if image_ok snmp-shield-net-snmp:peer; then
+        echo "== net-snmp docker peer: $(docker run --rm --entrypoint snmpget snmp-shield-net-snmp:peer --version 2>&1 | head -1) ready"
         ready=1
     else
         missing="$missing docker-netsnmp"

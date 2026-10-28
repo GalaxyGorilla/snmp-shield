@@ -15,9 +15,15 @@ import (
 // process: standard SNMPv3 in, clear v2c out to a fake legacy device, plus
 // the notification ingress leg.
 type usmGatewayFixture struct {
-	Front    string
-	TrapAddr string
-	Device   *testkit.Agent
+	// Front / TrapAddr are what a scenario dials; BindFront / BindTrap are
+	// what the proxy listens on. They differ for a container peer, which
+	// cannot reach a loopback-bound listener (see peerFront), and the
+	// restart test must rebind on the same address as the first start.
+	Front     string
+	TrapAddr  string
+	BindFront string
+	BindTrap  string
+	Device    *testkit.Agent
 	// Sink is a real USM trap receiver: it verifies the digest, decrypts,
 	// and confirms informs, so a notification that arrives proves the wrap
 	// is interoperable rather than merely present.
@@ -26,26 +32,27 @@ type usmGatewayFixture struct {
 	Proc  *proxyProc
 }
 
-func startUSMGateway(t *testing.T) *usmGatewayFixture {
+func startUSMGateway(t *testing.T, p Peer) *usmGatewayFixture {
 	t.Helper()
 	dev := newDevice(t, testkit.AgentOptions{})
-	front := testkit.FreeUDPPort(t, "")
-	trapAddr := testkit.FreeUDPPort(t, "")
+	bindFront, front := peerFront(t, p)
+	bindTrap, trapAddr := peerFront(t, p)
 	sink := testkit.NewV3Sink(t, testkit.V3SinkOptions{
 		User: gatewayUsr, AuthPass: authPass, PrivPass: privPass,
 	})
 	store := filepath.Join(t.TempDir(), "engine.json")
-	p := startProxy(t, "usm-gateway",
+	proc := startProxy(t, "usm-gateway",
 		"gateway", "--security", "usm-gateway",
-		"--listen", front, "--agent", dev.Addr(), "--community", community,
-		"--trap-listen", trapAddr, "--trap-sink", sink.Addr,
+		"--listen", bindFront, "--agent", dev.Addr(), "--community", community,
+		"--trap-listen", bindTrap, "--trap-sink", sink.Addr,
 		"--auth-pass", authPass, "--priv-pass", privPass,
 		"--engine-store", store,
 	)
 	waitFront(t, front)
 	waitFront(t, trapAddr)
 	return &usmGatewayFixture{
-		Front: front, TrapAddr: trapAddr, Device: dev, Sink: sink, Store: store, Proc: p,
+		Front: front, TrapAddr: trapAddr, BindFront: bindFront, BindTrap: bindTrap,
+		Device: dev, Sink: sink, Store: store, Proc: proc,
 	}
 }
 
@@ -70,7 +77,7 @@ func (f *usmGatewayFixture) v3(verb Verb, oids ...string) Request {
 // legacy device sees ordinary v2c requests.
 func TestUSMGatewayRequests(t *testing.T) {
 	eachPeer(t, func(t *testing.T, p Peer) {
-		f := startUSMGateway(t)
+		f := startUSMGateway(t, p)
 
 		t.Run("get", func(t *testing.T) {
 			res := mustRun(t, p, f.v3(VerbGet, sysDescr))
@@ -163,7 +170,7 @@ func TestUSMGatewayRequests(t *testing.T) {
 // front leg is USM only, and a wrong credential must never reach the device.
 func TestUSMGatewayRejections(t *testing.T) {
 	eachPeer(t, func(t *testing.T, p Peer) {
-		f := startUSMGateway(t)
+		f := startUSMGateway(t, p)
 		devGETs := f.Device.GETs()
 
 		cases := []struct {
@@ -238,7 +245,7 @@ func TestUSMGatewayRejections(t *testing.T) {
 // keeps using the old boots/time until we announce new ones.
 func TestUSMGatewayEnginePersistence(t *testing.T) {
 	eachPeer(t, func(t *testing.T, p Peer) {
-		f := startUSMGateway(t)
+		f := startUSMGateway(t, p)
 
 		requireOK(t, mustRun(t, p, f.v3(VerbGet, sysDescr)))
 		first := readEngineStore(t, f.Store)
@@ -249,8 +256,8 @@ func TestUSMGatewayEnginePersistence(t *testing.T) {
 		f.Proc.Stop(t)
 		f.Proc = startProxy(t, "usm-gateway-restarted",
 			"gateway", "--security", "usm-gateway",
-			"--listen", f.Front, "--agent", f.Device.Addr(), "--community", community,
-			"--trap-listen", f.TrapAddr, "--trap-sink", f.Sink.Addr,
+			"--listen", f.BindFront, "--agent", f.Device.Addr(), "--community", community,
+			"--trap-listen", f.BindTrap, "--trap-sink", f.Sink.Addr,
 			"--auth-pass", authPass, "--priv-pass", privPass,
 			"--engine-store", f.Store,
 		)
@@ -276,7 +283,7 @@ func TestUSMGatewayEnginePersistence(t *testing.T) {
 // sent them.
 func TestUSMGatewayNotificationIngress(t *testing.T) {
 	eachPeer(t, func(t *testing.T, p Peer) {
-		f := startUSMGateway(t)
+		f := startUSMGateway(t, p)
 		const trapOID = "1.3.6.1.4.1.99.2.1"
 
 		t.Run("v2c-trap-is-wrapped", func(t *testing.T) {

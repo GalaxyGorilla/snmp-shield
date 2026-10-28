@@ -100,6 +100,7 @@ type cliFlags struct {
 	privPass      *string
 	v3User        *string
 	engineStore   *string
+	engineID      *string
 	caFile        *string
 	certFile      *string
 	keyFile       *string
@@ -150,6 +151,7 @@ func register(fs *pflag.FlagSet) cliFlags {
 	c.privPass = fs.String("priv-pass", "", "v3 privacy passphrase (usm-translate/gateway mode)")
 	c.v3User = fs.String("user", "", "v3 username for usm-manager-gateway mode (the REAL AGENT's configured user; default 'proxy')")
 	c.engineStore = fs.String("engine-store", "", "path to the persistent engine boots store (usm-translate/usm-gateway; YAML mode requires it, flags mode defaults to memory-only with a warning)")
+	c.engineID = fs.String("engine-id", "", "fix this instance's SNMP engine ID (hex, e.g. 8000000001020304); HA replicas must share it")
 
 	// direct-flags mode: certificate material (tsm tunnel / tsm-gateway)
 	c.caFile = fs.String("ca-file", "", "CA certificate PEM file to verify peers (tsm-gateway)")
@@ -201,6 +203,7 @@ func (c cliFlags) opts() flagsOpts {
 		privPass:     *c.privPass,
 		v3User:       *c.v3User,
 		engineStore:  *c.engineStore,
+		engineID:     *c.engineID,
 		caFile:       *c.caFile,
 		certFile:     *c.certFile,
 		keyFile:      *c.keyFile,
@@ -301,6 +304,7 @@ type flagsOpts struct {
 	authPass     string
 	privPass     string
 	engineStore  string
+	engineID     string
 	v3User       string
 	caFile       string
 	certFile     string
@@ -494,6 +498,7 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 		// unnamed store means memory-only — explicitly (YAML configs must
 		// name a persistent store; see config.Validate).
 		cfg.Security.EngineStore = o.engineStore
+		cfg.Security.EngineID = o.engineID
 		cfg.Security.EphemeralEngine = o.engineStore == ""
 		cfg.Defaults()
 		if err := cfg.Validate(); err != nil {
@@ -595,6 +600,7 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 	// persistent store (anti-rollback). The proxy logs the warning at
 	// startup.
 	cfg.Security.EngineStore = o.engineStore
+	cfg.Security.EngineID = o.engineID
 	cfg.Security.EphemeralEngine = o.engineStore == ""
 	cfg.Defaults()
 	if err := cfg.Validate(); err != nil {

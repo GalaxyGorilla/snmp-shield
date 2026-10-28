@@ -19,19 +19,6 @@ import (
 // the TSM scenarios drive the container directly instead of forcing the
 // contract to grow a transport-shaped hole.
 
-// dockerNetSNMPImage is built by `make peers`
-// (test/peers/netsnmp-docker/Dockerfile): a current net-snmp with OpenSSL,
-// i.e. one that can actually speak `dtls:`. The host's own net-snmp may be
-// Apple's 5.6.2.1, which has no TLS support at all.
-const dockerNetSNMPImage = "snmp-shield-net-snmp:peer"
-
-// dockerHost is how a container reaches this machine. net-snmp's TSM client
-// cannot be pointed at an IP at all — it compares the server certificate
-// against the *name* you dial ("No matching names in the certificate to
-// match the expected 127.0.0.1") — so the certificate must carry this name
-// and the target must be `dtls:host.docker.internal:port`.
-const dockerHost = "host.docker.internal"
-
 // requireDockerNetSNMP skips unless a usable Docker daemon and the peer image
 // are present. Like every other peer: a missing toolchain is a skip, never a
 // failure (this repository has no CI).

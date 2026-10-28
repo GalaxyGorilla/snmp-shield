@@ -18,7 +18,16 @@ about, and what cannot be verified on this host.
 | `pysnmp` | pure Python | 7.1.30 | `make peers` (venv) |
 | `node` | node `net-snmp` | 3.29.2 | `make peers` (npm) |
 | `snmpd` | net-snmp agent | 5.6.2.1 (Apple) | system `snmpd` (agent-leg scenario) |
+| `netsnmp59` | net-snmp CLI (clear legs) | 5.9.3 (Debian, Docker) | Docker daemon (`make peers` builds the image) |
 | `netsnmp-docker` | net-snmp CLI over **DTLS/TSM** | 5.9.3 (Debian) | Docker daemon (`make peers` builds the image) |
+| `snmptrapd` | net-snmp v3 notification **receiver** | 5.9.3 (Debian, Docker) | Docker daemon (`make peers` builds the image) |
+
+Two net-snmp peers run the *same* adapter (`test/peers/peer_netsnmp.py`):
+the host CLI is Apple's 5.6.2.1 (2010) and the container is a current 5.9.3.
+A disagreement between them is a finding about net-snmp or about us, never an
+adapter difference. The container peer needs the fixture to bind a routable
+address (`peerFront`) because a container cannot reach the host's loopback;
+the adapter rewrites a loopback target to `host.docker.internal`.
 
 `make peers` runs `scripts/peers-setup.sh`; it exits 77 when nothing can be
 provisioned. A peer with a missing toolchain **skips**, it never fails: this
@@ -40,11 +49,17 @@ runs, so the matrix can never become empty.
 | `TestManagerGatewayRealAgent` (real snmpd) | v3 **request generation**: RFC 3414 discovery, signed+encrypted requests, and parsing a real agent's answer; v3 trap and v3 inform reception, including the authoritative-inform handshake |
 | `TestTSMGatewayVendorClient` (net-snmp 5.9 in Docker) | RFC 6353 **TSM**: a third-party client completes the DTLS handshake, presents a client certificate, and accepts our responses over `dtls:` — GET, GETNEXT, WALK, SET, plus a foreign-CA client being refused before anything reaches the device |
 | `TestTSMGatewayVendorClientReadOnly` | A locally generated `notWritable` reaches the vendor client as an answer, not a timeout, and the device sees no SET |
+| `TestUSMGatewayVendorTrapReceiver` | A **vendor** v3 trap receiver (`snmptrapd` 5.9) verifies and decrypts our wrapped trap and logs the payload varbind — every vendor stack as the sending side |
+| `TestUSMGatewayVendorInformReceiver` | The wrapped inform is **confirmed by a vendor receiver** and the confirmation travels back to the device: the sender's own `snmpinform`/`inform` exits successfully |
 
-The TSM scenarios are the only ones that need Docker. A host whose net-snmp
-has no TLS (Apple's does not) would otherwise leave RFC 6353 verified only
-against our own DTLS stack — which is exactly the self-consistency trap this
-layer exists to avoid.
+Docker scenarios: the TSM client, the 5.9 clear-leg peer and the
+`snmptrapd` receiver. A host whose net-snmp has no TLS (Apple's does not)
+would otherwise leave RFC 6353 verified only against our own DTLS stack —
+which is exactly the self-consistency trap this layer exists to avoid. The
+same trap applies to notifications: without `snmptrapd`, every "did the
+manager accept our v3 trap?" assertion ran through `testkit.V3Sink`, which
+is written against our own `msg` package and therefore accepts whatever we
+emit (finding 6 is what that cost).
 
 ## Findings: real bugs the vendor matrix forced out
 
@@ -104,6 +119,34 @@ These were **our** bugs. Each is fixed and pinned by a regression test.
    `TestTSMGatewayGet` and `TestTSMGatewayReadOnlyRefusesWrites`, and the
    cleared form is what the vendor TSM client above verifies.
 
+6. **USM gateway wrapped informs sender-authoritatively, so a strict
+   receiver never confirmed them.** Traps and informs disagree about the
+   authoritative engine (RFC 3414 §2.2): a trap names the **sender's**
+   engine, an inform must name the **receiver's** (the sender discovers it
+   first). The notification path used one wrap for both, naming our own
+   engine. gosnmp's `TrapListener` and `testkit.V3Sink` are lenient — both
+   localize keys to whatever engineID the message carries, so they accepted
+   it — while net-snmp 5.9's `snmptrapd` answers only when it is the
+   addressed engine and otherwise drops the inform in silence. The device
+   then retransmits into a timeout. Proven on the wire: an inform sent to a
+   fresh `snmptrapd` timed out; the *same* inform delivered immediately
+   after a trap from the same engine was accepted, because the trap had
+   taught the receiver our engine state. Fixed with `ensureSinkEngine`
+   (RFC 3414 §4 discovery probe on a dedicated socket, 60s cache) and a
+   per-engine wrap in `buildNotif` (`internal/usm/gateway.go`); traps keep
+   the sender-authoritative path unchanged. Pinned by
+   `internal/usm/gateway_inform_engine_test.go` (asserts the inform's
+   msgAuthoritativeEngineID/boots/time are the sink's and that its digest
+   verifies with sink-localized keys, and that a trap still names our own
+   engine and performs **no** discovery) and by
+   `TestUSMGatewayVendorInformReceiver`. If discovery fails the proxy logs a
+   warning and falls back to the sender-authoritative wrap, so a receiver
+   that does not answer discovery is not made worse. A **verified** answer
+   from the sink also re-anchors the cache — including the
+   `usmStatsNotInTimeWindows` Report a restarted receiver sends — so a
+   receiver restart is followed on the next inform rather than after the
+   60s discovery TTL (`TestGatewayFollowsSinkRestartFromResponse`).
+
 ## Findings: vendor divergences (not our bugs)
 
 Recorded so nobody "fixes" the proxy to match one vendor. Adapters normalize
@@ -129,6 +172,12 @@ Recorded so nobody "fixes" the proxy to match one vendor. Adapters normalize
   addresses them to its own engine. The proxy supports both: a message
   addressed to our engine is handled authoritatively, anything else is
   verified sender-authoritatively.
+- **node `net-snmp` units.** Its `timeout` option is milliseconds while the
+  peer contract is seconds; the adapter previously passed the contract value
+  through, giving every node call a 3 ms budget. Loopback answers beat it,
+  so only a round trip through a proxy (an inform confirmation) exposed it.
+  That was an **adapter** bug, not a vendor behaviour: fixed in
+  `peer_node.js`, not worked around in a scenario.
 - **node `net-snmp` shapes.** GETBULK answers repeaters as one array per
   column (must be flattened); a PDU error-status arrives as
   `RequestFailedError` with `.status` set and an uppercase message
@@ -166,11 +215,23 @@ Recorded so nobody "fixes" the proxy to match one vendor. Adapters normalize
   skip. `scripts/interop-gateway-tsm.sh` remains the shell-level equivalent
   for hosts that have a TLS-enabled net-snmp installed directly (rc 77 when
   they do not).
-- **No vendor v3 trap *receiver*.** No peer here offers a configurable USM
-  trap receiver with a known engine, so notification *content* is verified
-  by `testkit.V3Sink` (gosnmp `TrapListener`). The sending side of every
-  notification test is a real vendor stack, which is where the format
-  surprises live.
+- **The vendor v3 receiver still cannot be a *peer*.** `snmptrapd` is not
+  driven through the peer contract (it is a receiver, not a client, and it
+  needs to be told our engineID before we start). `trapd_test.go` starts it
+  directly and reads its log, which is enough: the log is emitted only after
+  USM verification and decryption succeed.
+- **`snmptrapd` needs the sender's engine registered for traps and its own
+  for informs.** `createUser -e 0x<engineID>` localizes the user's keys to
+  that engine, `createUser` without `-e` localizes them to the receiver's
+  own engine. A fixture that registers only one of the two forms looks like
+  a proxy bug: traps become invisible, or informs stop being answered. Both
+  lines are in the fixture's config, and the two tests exercise them
+  separately.
+- **No TSM notification receiver.** net-snmp 5.9's `snmptrapd` in `dtls:`
+  mode never reads its socket, so it cannot receive our TSM notifications
+  even though it works fine over UDP (that is how the USM receiver above
+  runs). TSM notification wrapping stays verified by `internal/tsm` and
+  `scripts/tsm-sink`.
 - **No syslog/SNMPv1 trap receiver matrix.** v1 trap *sending* is covered
   (translated and relayed); a vendor v1 receiver adds nothing the parser
   tests do not already pin.

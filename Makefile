@@ -36,15 +36,17 @@ race: test
 
 # peers provisions the independent SNMP stacks used by the conformance
 # suite (net-snmp CLI, pysnmp in a venv, node net-snmp in node_modules, and
-# a net-snmp 5.9 container for the RFC 6353 TSM client). Exit 77 when no
-# third-party stack is available — the in-process gosnmp peer always runs,
-# so the suite itself is never skipped.
+# a net-snmp 5.9 container that serves as the current-release clear-leg peer,
+# the RFC 6353 TSM client and the snmptrapd v3 notification receiver). Exit
+# 77 when no third-party stack is available — the in-process gosnmp peer
+# always runs, so the suite itself is never skipped.
 peers:
 	sh scripts/peers-setup.sh
 
 # conformance runs the cross-vendor matrix against the built binary. This
-# is the slow, high-signal suite: four independent implementations drive the
-# real CLI through the real wire. Requires `make peers` for the full matrix.
+# is the slow, high-signal suite: five independent implementations drive the
+# real CLI through the real wire, and snmptrapd judges what we send them.
+# Requires `make peers` for the full matrix.
 conformance:
 	$(GO) test ./internal/conformance -count=1 -timeout 900s
 

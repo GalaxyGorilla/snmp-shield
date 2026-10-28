@@ -10,7 +10,7 @@ the less it can be fooled by our own encoders.
 |---|---|---|---|---|
 | Unit | `internal/*/..._test.go` | hand-built vectors, RFC examples | ms | yes |
 | Wire e2e (Go) | `internal/usm`, `internal/tsm`, `internal/tunnel`, `internal/proxy`, `internal/access`, `internal/snmpmetrics` | gosnmp, raw datagrams, real UDP/DTLS loopback | seconds | yes |
-| Conformance | `internal/conformance` | four independent vendor stacks driving the real binary, plus net-snmp 5.9 over DTLS (TSM) in Docker | ~45s | yes |
+| Conformance | `internal/conformance` | five independent vendor stacks driving the real binary, a vendor v3 notification **receiver** (`snmptrapd` 5.9), plus net-snmp 5.9 over DTLS (TSM), all in Docker | ~70s | yes |
 | Interop scripts | `scripts/interop-*.sh` | net-snmp CLI / snmpd as the peer | minutes | no (`make interop ...`) |
 | Smoke | `scripts/smoke-cli.sh` | a hand-written Python v2c agent | seconds | no |
 | Fuzz | `internal/{msg,access,config,cache,notifyfilter}` | the Go fuzzer | bounded | corpus only |
@@ -52,9 +52,19 @@ make vulnscan        # SBOM + grype, fails on HIGH+
   **`KindUnsupported` means the vendor cannot express the operation** —
   `skipUnsupported` skips it, so the gap stays visible without failing.
 - **Missing toolchain = skip with a reason.** `make peers` provisions the
-  managed ones; `gosnmp` is always present. The two TSM scenarios need a
-  Docker daemon and skip without one: their peer is net-snmp 5.9 in a
-  container, because a host net-snmp may have no TLS transport at all.
+  managed ones; `gosnmp` is always present. The TSM scenarios, the 5.9
+  clear-leg peer and the `snmptrapd` receiver need a Docker daemon and skip
+  without one: the container carries the current net-snmp (5.9.3), while a
+  host net-snmp may be Apple's 5.6.2.1 with no TLS transport at all.
+- **The notification receiver is a vendor too.** `TestUSMGatewayVendor*Receiver`
+  read `snmptrapd`'s log, which it emits only after USM verification and
+  decryption succeed. Nothing in that path uses our own sink: without it,
+  "the manager accepted our v3 trap" was asserted by `testkit.V3Sink`, which
+  is built on our own encoder (see CONFORMANCE.md, finding 6).
+- **A container peer needs a routable bind.** `peerFront(t, p)` returns
+  `{bind, dial}`: for a Docker peer the proxy binds `[::]` and the adapter
+  rewrites the target to `host.docker.internal` (a container cannot reach
+  host loopback). Native peers get one loopback address for both.
 - **A vendor cannot be pointed at an IP in TSM.** net-snmp compares the
   server certificate against the *name* dialed, so the container dials
   `dtls:host.docker.internal:port`, the proxy listens on `[::]` (a container

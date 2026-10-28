@@ -242,9 +242,7 @@ func (a *Agent) handle(dg []byte, from net.Addr) {
 		}
 		// Echo the requested objects back; the proxy relays the answer
 		// verbatim, so the shape is what matters here.
-		for _, vb := range vbs {
-			answer = append(answer, vb)
-		}
+		answer = append(answer, vbs...)
 	default:
 		return
 	}

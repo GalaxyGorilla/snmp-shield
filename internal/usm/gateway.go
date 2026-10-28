@@ -17,6 +17,7 @@
 package usm
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net"
@@ -64,6 +65,11 @@ type GatewayTranslator struct {
 	// pending informs keyed on the v3 msgID sent to the sink
 	informMu   sync.Mutex
 	informPend map[int32]*gwInformPend
+
+	// sinkEng is the trap receiver's authoritative engine state, used for
+	// INFORM wrapping only (see ensureSinkEngine).
+	sinkEngMu sync.Mutex
+	sinkEng   *remoteEngine
 
 	// front leg (SNMPv3 USM listener), clear agent socket, trap listener
 	conn      net.PacketConn
@@ -616,7 +622,14 @@ func (g *GatewayTranslator) dropOrReport(hdr msg.V3Header, m *msg.V3Message, add
 			return
 		}
 	}
-	_, _ = g.conn.WriteTo(out, addr)
+	if _, werr := g.conn.WriteTo(out, addr); werr != nil && g.log != nil {
+		// A silent write failure on the front leg looks exactly like a
+		// vanished manager (it retransmits into a timeout), so it must be
+		// visible. Seen when the front leg is bound to a wildcard address
+		// that the kernel refuses as a reply source.
+		g.log.Warn("usm gateway: front-leg reply failed",
+			zap.Error(werr), zap.String("peer", addr.String()))
+	}
 }
 
 // readTraps reads datagrams from the trap listener socket. Both
@@ -706,7 +719,37 @@ func (g *GatewayTranslator) handleClearTrap(addr net.Addr, dg []byte) {
 		pdu = pduTLV
 	}
 
-	out, msgID, err := g.buildTrapNotif(pdu, msg.IsInform(info.PDUType))
+	isInform := msg.IsInform(info.PDUType)
+	// RFC 3414 §2.2: the RECEIVER is the authoritative engine for the
+	// confirmed class (informs), so the wrap must name the sink's engine
+	// and localize keys to it — discovery first. Traps are the opposite
+	// (sender-authoritative) and use our own engine.
+	//
+	// This is not cosmetic. net-snmp's snmptrapd (5.9) is strict: an
+	// inform signed against our own engine is accepted only if the sink
+	// learned that engine from an earlier unconfirmed notification;
+	// otherwise it silently drops it and the device times out. gosnmp and
+	// our own testkit sink are lenient (they derive keys from the wire
+	// engineID), which is why only a vendor receiver could expose this.
+	var sinkEng *remoteEngine
+	if isInform {
+		eng, derr := g.ensureSinkEngine()
+		if derr != nil {
+			// A receiver that does not answer discovery (or a firewall
+			// eating the probe) leaves the conformant wrap impossible.
+			// Fall back to the sender-authoritative form: lenient
+			// receivers (gosnmp, our testkit sink) still accept it, and
+			// a strict one drops the notification exactly as it would
+			// have without the attempt. Loud, because the operator needs
+			// to know the inform path is degraded.
+			g.log.Warn("usm gateway: sink engine discovery failed; inform wrapped sender-authoritatively",
+				zap.String("sink", g.cfg.TrapSinkAddr), zap.Error(derr))
+		} else {
+			sinkEng = eng
+		}
+	}
+
+	out, msgID, err := g.buildNotif(pdu, isInform, sinkEng)
 	if err != nil {
 		g.log.Warn("usm gateway: trap wrap failed", zap.Error(err))
 		return
@@ -811,6 +854,26 @@ func (g *GatewayTranslator) handleSinkResponse(dg []byte) {
 		return
 	}
 	_ = c
+
+	// A VERIFIED message from the sink is authoritative state from the wire,
+	// so follow it: the next inform signs against these boots/time instead
+	// of waiting out the 60s discovery TTL after a sink restart. A Report
+	// reaches this path too (a strict receiver answers a stale inform with
+	// usmStatsNotInTimeWindows), which is exactly the recovery signal.
+	//
+	// Only a FOREIGN engine is adopted. A response naming our own engine
+	// means a lenient receiver answered a sender-authoritative wrap; caching
+	// that as "the sink's engine" would silently pin every later inform to
+	// our own identity and lose the conformant wrap for good.
+	if len(m2.USM.EngineID) > 0 && !bytes.Equal(m2.USM.EngineID, g.clock.EngineID()) {
+		g.adoptSinkEngine(&remoteEngine{
+			id:           append([]byte{}, m2.USM.EngineID...),
+			boots:        m2.USM.Boots,
+			time:         m2.USM.Time,
+			discoveredAt: time.Now(),
+		})
+	}
+
 	fields, fieldsOK := pduCommon(pdu)
 	if !fieldsOK || !msg.IsGetResponse(pdu[0]) {
 		return
@@ -846,15 +909,117 @@ func (g *GatewayTranslator) handleSinkResponse(dg []byte) {
 	}
 }
 
-// buildTrapNotif builds a signed+encrypted v3 USM notification for the
-// manager's trap receiver using the first configured user and this
-// gateway's own engine state (no discovery: we are the engine). Returns
-// the marshalled message and the v3 msgID used (for inform matching).
-func (g *GatewayTranslator) buildTrapNotif(pdu []byte, reportable bool) ([]byte, int32, error) {
+// ensureSinkEngine returns the trap receiver's authoritative engine state,
+// discovering it if absent or older than 60s.
+//
+// Discovery is the RFC 3414 §4 probe: a Reportable, NoAuthNoPriv GetRequest
+// with an empty securityName and an empty authoritative engineID. The sink
+// answers with a Report carrying its own engineID/boots/time. It runs on a
+// dedicated ephemeral socket so it never competes with the trap socket's
+// single reader (two ReadFrom loops would steal each other's datagrams).
+func (g *GatewayTranslator) ensureSinkEngine() (*remoteEngine, error) {
+	g.sinkEngMu.Lock()
+	if g.sinkEng != nil && time.Since(g.sinkEng.discoveredAt) < 60*time.Second {
+		eng := g.sinkEng
+		g.sinkEngMu.Unlock()
+		return eng, nil
+	}
+	g.sinkEngMu.Unlock()
+
+	sink, err := net.ResolveUDPAddr("udp", g.cfg.TrapSinkAddr)
+	if err != nil {
+		return nil, fmt.Errorf("resolve trap_sink_addr: %w", err)
+	}
+	pdu := msg.BuildPDU(msg.PDUGetRequest, int32(g.msgID.Add(1)), 0, 0, []byte{0})
+	scoped := msg.BuildScoped(nil, []byte{}, pdu)
+	probe, err := msg.BuildV3(msg.V3Header{
+		MsgID:      int32(g.msgID.Add(1)),
+		MsgMaxSize: msg.DefaultMsgMaxSize,
+		MsgFlags:   msg.MsgFlagReportable,
+		SecModel:   msg.SecurityModelUSM,
+	}, msg.USMParams{}, scoped, nil)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero})
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	if _, err := conn.WriteTo(probe, sink); err != nil {
+		return nil, err
+	}
+
+	// One round trip on a LAN; the caller runs inside the trap read loop,
+	// so a long wait here would stall every other notification behind it.
+	// The result is cached for 60s, so the cost is paid once per sink.
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		return nil, err
+	}
+	buf := make([]byte, 65536)
+	for {
+		n, _, rerr := conn.ReadFrom(buf)
+		if rerr != nil {
+			return nil, fmt.Errorf("sink discovery timed out: %w", rerr)
+		}
+		m2, perr := msg.ParseV3(append([]byte{}, buf[:n]...))
+		if perr != nil || len(m2.USM.EngineID) == 0 {
+			continue // stray datagram or a reply that is not a Report
+		}
+		eng := &remoteEngine{
+			id:           append([]byte{}, m2.USM.EngineID...),
+			boots:        m2.USM.Boots,
+			time:         m2.USM.Time,
+			discoveredAt: time.Now(),
+		}
+		g.adoptSinkEngine(eng)
+		g.log.Info("usm gateway: sink engine discovered",
+			zap.String("engine_id", fmt.Sprintf("%x", eng.id)),
+			zap.Uint32("boots", eng.boots), zap.Uint32("time", eng.time))
+		return eng, nil
+	}
+}
+
+// adoptSinkEngine records the sink's engine state learned from the wire
+// (discovery Report or an inform response). A change means the sink
+// restarted or its clock moved; the next inform signs against the new
+// state instead of being rejected as not-in-time.
+func (g *GatewayTranslator) adoptSinkEngine(eng *remoteEngine) {
+	if eng == nil || len(eng.id) == 0 {
+		return
+	}
+	g.sinkEngMu.Lock()
+	g.sinkEng = eng
+	g.sinkEngMu.Unlock()
+}
+
+// buildNotif wraps a notification PDU into an authenticated v3 USM
+// message. eng selects the authoritative engine: nil means this proxy's own
+// engine (correct for TRAPS, sender-authoritative per RFC 3414 §2.2), while
+// a discovered *remoteEngine targets the sink's engine (correct for INFORMS,
+// receiver-authoritative). The keys must be localized to whichever engine is
+// authoritative, so the profile is looked up per engine rather than reusing
+// the front-leg profile table.
+func (g *GatewayTranslator) buildNotif(pdu []byte, reportable bool, eng *remoteEngine) ([]byte, int32, error) {
 	if len(g.users) == 0 {
 		return nil, 0, errors.New("usm gateway: no users configured")
 	}
-	c, ok := g.prof.Lookup(g.users[0].Name)
+	var engineID []byte
+	var boots, etime uint32
+	prof := g.prof
+	if eng != nil {
+		engineID, boots, etime = eng.id, eng.boots, eng.time
+		p, perr := g.keys.profilesFor(eng.id)
+		if perr != nil {
+			return nil, 0, perr
+		}
+		prof = p
+	} else {
+		engineID = g.clock.EngineID()
+		boots = g.clock.Boots()
+		etime = g.clock.Time()
+	}
+	c, ok := prof.Lookup(g.users[0].Name)
 	if !ok {
 		return nil, 0, fmt.Errorf("usm gateway: user %s not found", g.users[0].Name)
 	}
@@ -873,9 +1038,6 @@ func (g *GatewayTranslator) buildTrapNotif(pdu []byte, reportable bool) ([]byte,
 		flags |= msg.MsgFlagReportable
 	}
 	msgID := int32(g.msgID.Add(1))
-	engineID := g.clock.EngineID()
-	boots := g.clock.Boots()
-	etime := g.clock.Time()
 	privParams := g.privParamsFor(flags, c, boots)
 	var authParams []byte
 	if flags&msg.MsgFlagAuth != 0 {

@@ -120,7 +120,15 @@ func (p *execPeer) Run(ctx context.Context, req Request) (Result, error) {
 }
 
 func (p *execPeer) args(req Request) []string {
-	args := []string{string(req.Verb)}
+	return append([]string{string(req.Verb)}, adapterArgs(req)...)
+}
+
+// adapterArgs renders a Request as adapter flags. Both the native and the
+// container peer use it, so the two can never drift into different
+// contracts (which would turn a peer disagreement into an adapter
+// disagreement).
+func adapterArgs(req Request) []string {
+	args := []string{}
 	add := func(flag, value string) {
 		if value != "" {
 			args = append(args, flag, value)

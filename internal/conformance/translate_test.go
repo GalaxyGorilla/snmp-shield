@@ -19,9 +19,13 @@ import (
 // This is the axis the gateway tests cannot cover: v1/v2c parsing on the
 // clear leg, the tunnel envelope, and the agent-side write policy.
 type chainFixture struct {
-	Front    string
-	TrapAddr string
-	Device   *testkit.Agent
+	// Front / TrapAddr are dial targets; BindFront / BindTrap are the
+	// addresses the proxies listen on (they differ for a container peer).
+	Front     string
+	TrapAddr  string
+	BindFront string
+	BindTrap  string
+	Device    *testkit.Agent
 	// Sink is the real manager's trap receiver behind the agent proxy. It
 	// answers informs, so the confirmation has to travel the whole chain.
 	Sink *testkit.TrapSink
@@ -35,12 +39,12 @@ func withAgentPolicy(args ...string) chainOption {
 	return func(agentArgs *[]string) { *agentArgs = append(*agentArgs, args...) }
 }
 
-func startChain(t *testing.T, device testkit.AgentOptions, opts ...chainOption) *chainFixture {
+func startChain(t *testing.T, p Peer, device testkit.AgentOptions, opts ...chainOption) *chainFixture {
 	t.Helper()
 	dev := newDevice(t, device)
 	sink := testkit.NewAnsweringTrapSink(t)
-	front := testkit.FreeUDPPort(t, "")
-	trapAddr := testkit.FreeUDPPort(t, "")
+	bindFront, front := peerFront(t, p)
+	bindTrap, trapAddr := peerFront(t, p)
 	tunnelAddr := testkit.FreeUDPPort(t, "")
 	psk := randomPSK(t)
 
@@ -65,9 +69,9 @@ func startChain(t *testing.T, device testkit.AgentOptions, opts ...chainOption) 
 		"manager",
 		"--tunnel-addr", tunnelAddr, "--psk", psk,
 		"--auth-pass", authPass, "--priv-pass", privPass,
-		"--listen", front, "--community", community,
+		"--listen", bindFront, "--community", community,
 		"--log-level", "debug",
-		"--trap-listen", trapAddr,
+		"--trap-listen", bindTrap,
 		"--engine-store", filepath.Join(t.TempDir(), "manager-engine.json"),
 	)
 	waitFront(t, front)
@@ -75,7 +79,10 @@ func startChain(t *testing.T, device testkit.AgentOptions, opts ...chainOption) 
 	// A bound port is not a working tunnel: wait for an answer end to end.
 	waitV2cReady(t, front)
 
-	return &chainFixture{Front: front, TrapAddr: trapAddr, Device: dev, Sink: sink}
+	return &chainFixture{
+		Front: front, TrapAddr: trapAddr, BindFront: bindFront, BindTrap: bindTrap,
+		Device: dev, Sink: sink,
+	}
 }
 
 func randomPSK(t *testing.T) string {
@@ -91,7 +98,7 @@ func randomPSK(t *testing.T) string {
 // legacy manager keeps working, in v1 and v2c, across a secured segment.
 func TestTranslateChainRequests(t *testing.T) {
 	eachPeer(t, func(t *testing.T, p Peer) {
-		f := startChain(t, testkit.AgentOptions{})
+		f := startChain(t, p, testkit.AgentOptions{})
 
 		req := func(version string, verb Verb, oids ...string) Request {
 			return Request{
@@ -193,7 +200,7 @@ func TestTranslateChainRequests(t *testing.T) {
 // notWritable instead of retransmitting into a timeout.
 func TestTranslateChainAgentWritePolicy(t *testing.T) {
 	eachPeer(t, func(t *testing.T, p Peer) {
-		f := startChain(t, testkit.AgentOptions{}, withAgentPolicy("--read-only"))
+		f := startChain(t, p, testkit.AgentOptions{}, withAgentPolicy("--read-only"))
 
 		t.Run("set-refused-at-the-device-side", func(t *testing.T) {
 			start := time.Now()

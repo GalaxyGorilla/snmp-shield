@@ -101,7 +101,11 @@ function buildSession(opts) {
   // net-snmp sends traps and informs to trapPort (default 162), while
   // requests go to port. Point both at the target or the trap silently
   // leaves for the local agent instead of the proxy.
-  const base = { port, trapPort: port, timeout: opts.timeout, retries: opts.retries };
+  // The contract expresses timeouts in SECONDS; node net-snmp wants
+  // milliseconds. Passing seconds straight through gave every node call a
+  // 3 ms budget, which passed only because a loopback answer beat it and
+  // failed as soon as a confirmation had to come back through the proxy.
+  const base = { port, trapPort: port, timeout: opts.timeout * 1000, retries: opts.retries };
   if (opts.version !== '3') {
     const version = opts.version === '1' ? snmp.Version1 : snmp.Version2c;
     return snmp.createSession(host, opts.community, Object.assign({ version }, base));

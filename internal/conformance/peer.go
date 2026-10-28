@@ -135,5 +135,9 @@ func AllPeers() []Peer {
 			[]string{"peer_pysnmp.py"}, ""),
 		newExecPeer("node", "node net-snmp (JavaScript)", "node",
 			[]string{"peer_node.js"}, ""),
+		// Same adapter, current net-snmp: the host CLI is Apple's 5.6.2.1.
+		// A container peer needs the fixture to bind a routable address,
+		// which the scenarios handle through peerFront.
+		newDockerNetSNMPPeer(),
 	}
 }

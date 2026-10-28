@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"sync"
 	"testing"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/gosnmp/gosnmp"
 
-	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/testkit"
 )
 
@@ -57,13 +55,30 @@ func TestMain(m *testing.M) {
 
 // goTool finds the go command even in a non-login shell where PATH may not
 // include the toolchain (a documented trap in this repository).
+//
+// runtime.GOROOT() is deliberately NOT used: it records the root the binary
+// was BUILT against, which says nothing about this host (deprecated since Go
+// 1.24 for exactly that reason). Probe the environment and the usual install
+// roots instead.
 func goTool() string {
 	if p, err := exec.LookPath("go"); err == nil {
 		return p
 	}
-	candidate := filepath.Join(runtime.GOROOT(), "bin", "go")
-	if _, err := os.Stat(candidate); err == nil {
-		return candidate
+	var roots []string
+	if root := os.Getenv("GOROOT"); root != "" {
+		roots = append(roots, root)
+	}
+	roots = append(roots,
+		"/usr/local/go",
+		"/usr/lib/go",
+		"/usr/local/opt/go/libexec",
+		"/opt/homebrew/opt/go/libexec",
+	)
+	for _, root := range roots {
+		candidate := filepath.Join(root, "bin", "go")
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
 	}
 	return "go"
 }
@@ -274,26 +289,6 @@ func trimDot(s string) string {
 
 func contains(haystack, needle string) bool {
 	return len(needle) == 0 || bytes.Contains([]byte(haystack), []byte(needle))
-}
-
-// requireV3Notification checks that a datagram the proxy sent to a trap sink
-// is a v3 USM message with authPriv, i.e. the wrapping actually happened.
-func requireV3Notification(t *testing.T, dg []byte) *msg.V3Message {
-	t.Helper()
-	m, err := msg.ParseV3(dg)
-	if err != nil {
-		t.Fatalf("notification is not a v3 message: %v", err)
-	}
-	if m.Header.MsgFlags&0x03 != 0x03 {
-		t.Fatalf("notification msgFlags = 0x%02x, want auth+priv", m.Header.MsgFlags)
-	}
-	if len(m.USM.AuthParams) == 0 || len(m.USM.PrivParams) == 0 {
-		t.Fatalf("notification lacks USM auth/priv parameters: %+v", m.USM)
-	}
-	if m.USM.UserName != gatewayUsr {
-		t.Fatalf("notification user = %q, want %q", m.USM.UserName, gatewayUsr)
-	}
-	return m
 }
 
 // engineStore is the JSON the proxy persists anti-rollback state in.

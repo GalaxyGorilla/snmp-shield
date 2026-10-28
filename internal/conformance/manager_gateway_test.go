@@ -119,19 +119,19 @@ func startV3Snmpd(t *testing.T) *snmpdAgent {
 // startManagerGateway runs the real binary in usm-manager-gateway mode
 // against the given v3 agent and returns the clear front leg, its trap
 // listener and the legacy manager's clear trap sink.
-func startManagerGateway(t *testing.T, agentAddr string) (front, trapListen string, sink *testkit.TrapSink) {
+func startManagerGateway(t *testing.T, p Peer, agentAddr string) (front, trapListen string, sink *testkit.TrapSink) {
 	t.Helper()
-	front = testkit.FreeUDPPort(t, "")
-	trapListen = testkit.FreeUDPPort(t, "")
+	bindFront, front := peerFront(t, p)
+	bindTrap, trapListen := peerFront(t, p)
 	sink = testkit.NewAnsweringTrapSink(t)
 	startProxy(t, "manager-gateway", "gateway",
 		"--security", "usm-manager-gateway",
-		"--listen", front,
+		"--listen", bindFront,
 		"--agent", agentAddr,
 		"--user", mgwUser,
 		"--auth-pass", authPass,
 		"--priv-pass", privPass,
-		"--trap-listen", trapListen,
+		"--trap-listen", bindTrap,
 		"--trap-sink", sink.Addr(),
 		"--log-level", "debug",
 	)
@@ -147,7 +147,7 @@ func TestManagerGatewayRealAgent(t *testing.T) {
 	agent := startV3Snmpd(t)
 
 	eachPeer(t, func(t *testing.T, p Peer) {
-		front, trapListen, sink := startManagerGateway(t, agent.addr)
+		front, trapListen, sink := startManagerGateway(t, p, agent.addr)
 
 		req := func(verb Verb, oids ...string) Request {
 			return Request{

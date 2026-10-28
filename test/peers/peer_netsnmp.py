@@ -130,15 +130,24 @@ NOISE = (
 )
 
 
+def scrub(text):
+    """Drop net-snmp's MIB/persistent-store noise, keep every real line."""
+    return "\n".join(ln for ln in (text or "").splitlines()
+                     if ln.strip() and not any(n in ln.lower() for n in NOISE))
+
+
 def useful(text):
     """Drop net-snmp's MIB/persistent-store noise, keep the real message."""
-    lines = [ln for ln in text.splitlines()
-             if ln.strip() and not any(n in ln.lower() for n in NOISE)]
-    return "\n".join(lines).strip() or text.strip()
+    return scrub(text).strip() or (text or "").strip()
 
 
 def classify(stderr, stdout, rc):
-    text = f"{stderr}\n{stdout}".lower()
+    # Classify the SCRUBBED text, never the raw output. net-snmp 5.9 ships
+    # MIBs whose "Cannot adopt OID ... nsCacheTimeout" warnings contain the
+    # token "timeout"; classifying raw stderr therefore turned every
+    # successful 5.9 GET into a fabricated timeout (found by running the
+    # same adapter against the 5.9 container peer).
+    text = f"{scrub(stderr)}\n{scrub(stdout)}".lower()
     if "timeout" in text or "no response from" in text:
         return "timeout"
     if ("unknown user name" in text or "authentication failure" in text

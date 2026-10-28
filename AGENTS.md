@@ -128,6 +128,7 @@ plus the short `/tmp` prefix hides it).
 | README decision guidance (native SNMPv3, WireGuard/IPsec, and `snmpfwd` alternatives; snmp-shield's DTLS/TSM and appliance-operations fit) | done |
 | Goroutine-leak regression test (`internal/tunnel/leak_test.go`: 30 connect/exchange/close cycles over real PSK-DTLS loopback, goroutine count must return to baseline; server side keyed on `Session.Done()` + production `SetTuning` so there is no test-end accounting noise) | done (tested, -race -count 8 stable: before=after=5) |
 | Cross-vendor conformance matrix (`internal/conformance`: peer contract `peer.go`, subprocess adapters `peers_exec.go`, in-process gosnmp peer, Docker clear-leg peer `peer_docker.go`, `harness_test.go` builds the CLI in TestMain; scenarios: usm-gateway requests/rejections/engine persistence/notification ingress/filter/access policy, two-proxy translate chain incl. device-side write policy, usm-manager-gateway against REAL snmpd incl. v3 traps and v3 informs, TSM gateway driven by net-snmp 5.9 over DTLS in Docker incl. a read-only refusal and a foreign-CA client, **vendor v3 notification receiver** (`trapd_test.go`, `snmptrapd` in Docker): trap content and inform confirmation judged by `snmptrapd` 5.9) + `internal/testkit` (fake device, PKI with extra SANs, trap sinks, V3 sink, frame-sink pipe, ports) + `test/peers/` adapters + `test/peers/netsnmp-docker/` image (net-snmp 5.9.3 CLI + `snmptrapd` + python3) + `scripts/peers-setup.sh` + `make peers`/`make conformance` | done (tested: all five stacks green, `go test -race ./...` green; six real bugs found and fixed — see §7 and CONFORMANCE.md) |
+| Second real v3 agent (`internal/conformance/agent_docker_test.go`): the manager-gateway matrix runs against the host `snmpd` (Apple 5.6.2.1) **and** net-snmp 5.9.3 in the Debian peer image (published on `127.0.0.1` only, random container name, force-removed at cleanup; `requireDockerSnmpd` capability check so a stale image says "rebuild" instead of timing out). 5.9 needs an explicit `rouser` access-control directive — without it every request is `AuthorizationError` — while 5.6 rejects `rouser` as an unknown token; the agent fixture's readiness probe now also requires `pkt.Error == NoError` because gosnmp returns `err == nil` for an error-status answer | done (tested: both fixtures × five peers × request/trap/inform scenarios green; readiness check verified by removing `rouser`, which now fails as "agent answered with error status AuthorizationError" instead of blaming the proxy) |
 | Release gate + flags wiring sweep: `make conformance-required` (`CONFORMANCE_REQUIRED=1`) turns every environment skip in the matrix into a failure, so "all peers green" cannot mean gosnmp alone; `skipOrFail` is the only sanctioned route (`TestNoSkipBypassesRequiredGate` source-scans for bypassing `t.Skip`, `KindUnsupported` still skips), and `Unavailable()` now probes the peer runtime through PATH as well (`TestMissingRuntimeSkipsInsteadOfFailing` — a removed `node` used to look available because `node_modules` survived, then failed as an adapter error). `cmd/snmp-shield/flags_sweep_test.go` walks all eight role × mode paths with every flag set, twice (read-only + write policy), with completeness tripwires (`fullOpts` non-zero per field, `TestOptsWiresEveryFlag` parses `register()` and diffs `opts()`); reintroducing conformance finding 1 makes it fail (verified by mutation) | done (tested: sweep + gate unit tests green; gate proven both directions on a trimmed PATH; full race suite green) |
 | Front-door observability + idle bound (found while chasing a `TestTSMGatewaySessionCap` flake under full-suite load): `snmp_shield_sessions_active` gauge set at slot acquire/release in both capped accept loops, and a per-read idle deadline on every TSM front session — DTLS carries no keepalive, so a peer that crashes or loses its route pinned its cap slot until process restart. The cap tests now wait on the gauge instead of sleeping (`waitActive` / `waitSessionsActive`), which is deterministic under load and asserts the recovery property directly | done (tested: `TestTSMGatewaySessionCap`, `TestRunAgentSessionCap` on the gauge; `internal/tsm/front_idle_test.go` pins the idle bound over an in-memory conn — idle session ends, traffic re-arms the deadline; full race suite green ×3 after the fix) |
 | Border hardening (`internal/safego`: `Dispatch` for per-datagram/frame handlers, `Go` for per-session goroutines; wired into the tunnel read loop, all six translator/trap read loops, both accept loops, the metrics MIB agent, the tunnel event callback) + front-door session cap (`tunnel.max_sessions`/`--max-sessions`, default 64, fail-fast close + `snmp_shield_sessions_denied_total`; agent tunnel listener + TSM gateway front leg) + `--engine-id` flags-mode support (HA replicas share one engine; also lets a receiver pre-register our engine) | done (tested: `safego` unit tests; `internal/tunnel/panic_test.go` (panicking TunnelUp keeps Connect+session usable, panicking TunnelDown still fires `Done()` so translators cannot leak); `TestRunAgentSessionCap` + `TestTSMGatewaySessionCap` (burst refused, counter moves, slot reusable); config + flags pins; hunting found nothing to fix — the panics were theoretical, the caps were not) |
@@ -417,7 +418,7 @@ disabled = cross-compiling is exact; verified: all three build).
 `make peers` provisions the managed third-party stacks for the conformance
 matrix (Python venv + npm + the net-snmp 5.9 Docker image for the TSM
 client; exit 77 when nothing can be installed), and
-`make conformance` runs that matrix alone (~70s, builds the CLI once; peers
+`make conformance` runs that matrix alone (~110s, builds the CLI once; peers
 without a toolchain skip, gosnmp always runs); `make conformance-required`
 runs the same matrix with `CONFORMANCE_REQUIRED=1`, where any environment
 skip is a failure — the release gate, because a bare host otherwise reports
@@ -1171,6 +1172,21 @@ wire behaviour. Findings live in `CONFORMANCE.md`, layering in `TESTING.md`.
   a container peer, dial `127.0.0.1` natively or `host.docker.internal` from
   inside the container (`dockerTarget`). Every fixture that used to take one
   address now takes the pair.
+- **Two REAL v3 AGENTS** (`manager_gateway_test.go` + `agent_docker_test.go`):
+  the usm-manager-gateway leg is the only place the proxy is a v3 command
+  GENERATOR, so its agent matters. The host `snmpd` (Apple 5.6.2.1) and the
+  image's 5.9.3 both run the suite via a `v3AgentFixture` interface; a
+  release-only divergence is then a finding, not an assumption. Fixture rules
+  learned the hard way: 5.9 answers every request with `AuthorizationError`
+  ("no access control information configured") until a `rouser` directive
+  exists, while 5.6 rejects `rouser` as an unknown token and serves a
+  `createUser`-only agent — the two configs must stay different. And a
+  readiness probe must judge the **PDU**: gosnmp returns `err == nil` with
+  `pkt.Error != NoError`, so a transport-only probe declared a broken agent
+  ready and pushed the failure into the proxy assertions. The docker fixture
+  publishes on `127.0.0.1` only, uses a random container name and is
+  force-removed at cleanup; its `SNMP_PERSISTENT_DIR` stays inside the
+  container (a throwaway engineID is correct for a fixture).
 - **Vendor v3 notification RECEIVER** (`trapd_test.go`): `snmptrapd` 5.9.3
   in the same image. Its log is the oracle and is only written after USM
   verification and decryption succeed, so a rejected trap leaves no line and

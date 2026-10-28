@@ -18,11 +18,20 @@ about, and what cannot be verified on this host.
 | `pysnmp` | pure Python | 7.1.30 | `make peers` (venv) |
 | `node` | node `net-snmp` | 3.29.2 | `make peers` (npm) |
 | `snmpd` | net-snmp agent | 5.6.2.1 (Apple) | system `snmpd` (agent-leg scenario) |
+| `snmpd59` | net-snmp agent (Docker) | 5.9.3 (Debian) | Docker daemon (`make peers` builds the image) |
 | `netsnmp59` | net-snmp CLI (clear legs) | 5.9.3 (Debian, Docker) | Docker daemon (`make peers` builds the image) |
 | `netsnmp-docker` | net-snmp CLI over **DTLS/TSM** | 5.9.3 (Debian) | Docker daemon (`make peers` builds the image) |
 | `snmptrapd` | net-snmp v3 notification **receiver** | 5.9.3 (Debian, Docker) | Docker daemon (`make peers` builds the image) |
 
-Two net-snmp peers run the *same* adapter (`test/peers/peer_netsnmp.py`):
+Two net-snmp **agents** back the manager-gateway scenarios: the host's
+`snmpd` (Apple 5.6.2.1) and the `snmpd` in the Debian image (5.9.3). Both run
+the same suite, so a proxy behaviour that only one release accepts is a
+finding rather than an assumption. They are not interchangeable fixtures:
+5.9 refuses every request with `AuthorizationError` until an access-control
+directive (`rouser`) exists, while 5.6 rejects `rouser` as an unknown token
+and grants the created user access implicitly — see the divergences below.
+
+Two net-snmp **CLI** peers run the *same* adapter (`test/peers/peer_netsnmp.py`):
 the host CLI is Apple's 5.6.2.1 (2010) and the container is a current 5.9.3.
 A disagreement between them is a finding about net-snmp or about us, never an
 adapter difference. The container peer needs the fixture to bind a routable
@@ -53,14 +62,14 @@ express the operation) still skips, and a source-scan test fails if a new
 | `TestUSMGatewayAccessPolicyWire` | `--read-only` refuses a SET on the wire while reads pass |
 | `TestTranslateChainRequests` (v1 + v2c × get/getnext/set/trap, getbulk, inform) | Two-proxy chain: an untouched legacy manager keeps working across the PSK-DTLS tunnel; traps come out clear v2c on the far side; inform confirmation survives four hops |
 | `TestTranslateChainAgentWritePolicy` | Device-side policy refuses a write and the refusal travels back through the tunnel instead of timing out; the device sees no SET |
-| `TestManagerGatewayRealAgent` (real snmpd) | v3 **request generation**: RFC 3414 discovery, signed+encrypted requests, and parsing a real agent's answer; v3 trap and v3 inform reception, including the authoritative-inform handshake |
+| `TestManagerGatewayRealAgent` (real snmpd, 5.6.2.1 and 5.9.3) | v3 **request generation**: RFC 3414 discovery, signed+encrypted requests, and parsing a real agent's answer — against both a 2010 host build and a current release; v3 trap and v3 inform reception, including the authoritative-inform handshake |
 | `TestTSMGatewayVendorClient` (net-snmp 5.9 in Docker) | RFC 6353 **TSM**: a third-party client completes the DTLS handshake, presents a client certificate, and accepts our responses over `dtls:` — GET, GETNEXT, WALK, SET, plus a foreign-CA client being refused before anything reaches the device |
 | `TestTSMGatewayVendorClientReadOnly` | A locally generated `notWritable` reaches the vendor client as an answer, not a timeout, and the device sees no SET |
 | `TestUSMGatewayVendorTrapReceiver` | A **vendor** v3 trap receiver (`snmptrapd` 5.9) verifies and decrypts our wrapped trap and logs the payload varbind — every vendor stack as the sending side |
 | `TestUSMGatewayVendorInformReceiver` | The wrapped inform is **confirmed by a vendor receiver** and the confirmation travels back to the device: the sender's own `snmpinform`/`inform` exits successfully |
 
-Docker scenarios: the TSM client, the 5.9 clear-leg peer and the
-`snmptrapd` receiver. A host whose net-snmp has no TLS (Apple's does not)
+Docker scenarios: the TSM client, the 5.9 clear-leg peer, the 5.9 **agent**
+and the `snmptrapd` receiver. A host whose net-snmp has no TLS (Apple's does not)
 would otherwise leave RFC 6353 verified only against our own DTLS stack —
 which is exactly the self-consistency trap this layer exists to avoid. The
 same trap applies to notifications: without `snmptrapd`, every "did the
@@ -205,10 +214,20 @@ Recorded so nobody "fixes" the proxy to match one vendor. Adapters normalize
   stderr are harmless and are filtered before classification. v1 traps use
   `AGENT ENTERPRISE AGENT-ADDR GENERIC SPECIFIC TIMETICKS`; v2c traps need an
   empty agent argument.
-- **Apple net-snmp 5.6.2.1 `snmpd`.** `rouser` and `rwuser` are unknown
-  tokens, and `createUser` only takes effect when `SNMP_PERSISTENT_DIR`
-  points at a writable directory (otherwise the user silently never
-  exists). The conformance fixture does both; the created user can read.
+- **net-snmp `snmpd` access control differs by release.** Apple's 5.6.2.1
+  rejects `rouser`/`rwuser` as unknown tokens and a `createUser`-only agent
+  serves the user; 5.9.3 answers `AuthorizationError` for every request and
+  logs "no access control information configured" until an access-control
+  directive is present (the fixture uses `rouser`, i.e. read-only, so the
+  SET scenario still expects a refusal). Both also require a writable
+  `SNMP_PERSISTENT_DIR`, otherwise `createUser` silently never exists. This
+  is a fixture portability rule, not a proxy difference — a 5.9 agent
+  without `rouser` makes every request look like our bug.
+- **`snmpd` readiness must be judged on the PDU, not the socket.** gosnmp
+  returns a packet with `err == nil` for an error-status answer, so a
+  transport-only readiness probe declared an `AuthorizationError` agent
+  ready and pushed the failure into the proxy assertions. The fixture now
+  requires `pkt.Error == NoError`.
 
 ## Deliberate limits
 
@@ -218,10 +237,12 @@ Recorded so nobody "fixes" the proxy to match one vendor. Adapters normalize
   `internal/tsm` and `scripts/tsm-sink` (our own sink). The request direction
   — where the echo rules, the certificate gate and the response format are
   judged by a vendor — is covered.
-- **Docker required for the TSM scenarios.** Without a running daemon they
-  skip. `scripts/interop-gateway-tsm.sh` remains the shell-level equivalent
-  for hosts that have a TLS-enabled net-snmp installed directly (rc 77 when
-  they do not).
+- **Docker required for the TSM scenarios and the current agent.** Without a
+  running daemon they skip; the *host* `snmpd` scenarios still run, so the
+  agent leg degrades to the OS release rather than disappearing.
+  `scripts/interop-gateway-tsm.sh` remains the shell-level equivalent for
+  hosts that have a TLS-enabled net-snmp installed directly (rc 77 when they
+  do not).
 - **The vendor v3 receiver still cannot be a *peer*.** `snmptrapd` is not
   driven through the peer contract (it is a receiver, not a client, and it
   needs to be told our engineID before we start). `trapd_test.go` starts it

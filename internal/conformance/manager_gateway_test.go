@@ -11,6 +11,7 @@
 package conformance
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,7 +29,18 @@ import (
 // authenticates as this user; the v2c manager never sees the credentials.
 const mgwUser = "authPrivUser"
 
-// snmpdAgent is a real net-snmp agent process with a v3 authPriv user.
+// v3AgentFixture is a REAL net-snmp agent with a v3 authPriv user. Two
+// implementations exist: the host's own snmpd (whatever release the OS
+// ships — Apple's is 5.6.2.1, a 2010 build) and the 5.9.3 in the Debian peer
+// image. Both run the same scenarios, because a behaviour that only one
+// release exhibits is a finding about net-snmp or about us, and testing just
+// the host build would hide it.
+type v3AgentFixture interface {
+	Addr() string
+	Stop(t *testing.T)
+}
+
+// snmpdAgent is a native net-snmp agent process with a v3 authPriv user.
 type snmpdAgent struct {
 	addr string
 	cmd  *exec.Cmd
@@ -37,7 +49,9 @@ type snmpdAgent struct {
 	once sync.Once
 }
 
-func (a *snmpdAgent) stop(t *testing.T) {
+func (a *snmpdAgent) Addr() string { return a.addr }
+
+func (a *snmpdAgent) Stop(t *testing.T) {
 	t.Helper()
 	a.once.Do(func() {
 		_ = a.cmd.Process.Kill()
@@ -57,7 +71,7 @@ func (a *snmpdAgent) stop(t *testing.T) {
 // exists), and the stock build logs "no log handling" noise to stderr. The
 // agent still reads with the created user, which is all a v3 command
 // generator needs.
-func startV3Snmpd(t *testing.T) *snmpdAgent {
+func startV3Snmpd(t *testing.T) v3AgentFixture {
 	t.Helper()
 	path := "/usr/sbin/snmpd"
 	if p, err := exec.LookPath("snmpd"); err == nil {
@@ -89,13 +103,19 @@ func startV3Snmpd(t *testing.T) *snmpdAgent {
 		_ = cmd.Wait()
 		close(agent.done)
 	}()
-	t.Cleanup(func() { agent.stop(t) })
+	t.Cleanup(func() { agent.Stop(t) })
 
+	waitV3Agent(t, addr)
+	return agent
+}
+
+// waitV3Agent proves the credentials work before blaming the proxy: a v3 GET
+// straight at the agent must answer. If this fails the fixture is broken, not
+// the code under test.
+func waitV3Agent(t *testing.T, addr string) {
+	t.Helper()
 	testkit.WaitUDPBound(t, addr, 10*time.Second)
 
-	// Prove the credentials work before blaming the proxy: a v3 GET straight
-	// at snmpd must answer. If this fails the fixture is broken, not the
-	// code under test.
 	deadline := time.Now().Add(10 * time.Second)
 	var last error
 	for time.Now().Before(deadline) {
@@ -103,17 +123,24 @@ func startV3Snmpd(t *testing.T) *snmpdAgent {
 		g.SecurityParameters.(*gosnmp.UsmSecurityParameters).UserName = mgwUser
 		err := g.Connect()
 		if err == nil {
-			_, err = g.Get([]string{sysDescr})
+			var pkt *gosnmp.SnmpPacket
+			pkt, err = g.Get([]string{sysDescr})
 			_ = g.Conn.Close()
+			// A PDU error status is not a transport error: gosnmp hands
+			// back the packet with err == nil. Without this check a fixture
+			// with no access control ("AuthorizationError" forever) looked
+			// ready and every proxy assertion failed instead.
+			if err == nil && pkt != nil && pkt.Error != gosnmp.NoError {
+				err = fmt.Errorf("agent answered with error status %s", pkt.Error)
+			}
 		}
 		if err == nil {
-			return agent
+			return
 		}
 		last = err
 		time.Sleep(200 * time.Millisecond)
 	}
-	t.Fatalf("snmpd never answered a direct v3 GET at %s: %v", addr, last)
-	return nil
+	t.Fatalf("v3 agent at %s never answered a direct v3 GET: %v", addr, last)
 }
 
 // startManagerGateway runs the real binary in usm-manager-gateway mode
@@ -143,11 +170,31 @@ func startManagerGateway(t *testing.T, p Peer, agentAddr string) (front, trapLis
 // TestManagerGatewayRealAgent drives the v3 generator leg with each vendor
 // on the clear leg. The proxy has to speak standard USM toward a stack it
 // does not control and hand the manager plain v2c.
+//
+// The scenarios run against every available REAL agent, not just the host's:
+// a proxy bug that only surfaces on a current release would otherwise look
+// green forever on a 2010 build. A missing agent is an environment skip (a
+// failure under `make conformance-required`), never a silent reduction.
 func TestManagerGatewayRealAgent(t *testing.T) {
-	agent := startV3Snmpd(t)
+	fixtures := []struct {
+		name  string
+		start func(*testing.T) v3AgentFixture
+	}{
+		{"host-snmpd", startV3Snmpd},
+		{"docker-snmpd-5.9", startDockerV3Snmpd},
+	}
+	for _, fx := range fixtures {
+		t.Run(fx.name, func(t *testing.T) {
+			agent := fx.start(t)
+			testManagerGatewayAgent(t, agent)
+		})
+	}
+}
 
+func testManagerGatewayAgent(t *testing.T, agent v3AgentFixture) {
+	t.Helper()
 	eachPeer(t, func(t *testing.T, p Peer) {
-		front, trapListen, sink := startManagerGateway(t, p, agent.addr)
+		front, trapListen, sink := startManagerGateway(t, p, agent.Addr())
 
 		req := func(verb Verb, oids ...string) Request {
 			return Request{

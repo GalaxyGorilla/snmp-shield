@@ -10,7 +10,7 @@ the less it can be fooled by our own encoders.
 |---|---|---|---|---|
 | Unit | `internal/*/..._test.go` | hand-built vectors, RFC examples | ms | yes |
 | Wire e2e (Go) | `internal/usm`, `internal/tsm`, `internal/tunnel`, `internal/proxy`, `internal/access`, `internal/snmpmetrics` | gosnmp, raw datagrams, real UDP/DTLS loopback | seconds | yes |
-| Conformance | `internal/conformance` | five independent vendor stacks driving the real binary, a vendor v3 notification **receiver** (`snmptrapd` 5.9), plus net-snmp 5.9 over DTLS (TSM), all in Docker | ~70s | yes |
+| Conformance | `internal/conformance` | five independent vendor stacks driving the real binary, a vendor v3 notification **receiver** (`snmptrapd` 5.9), net-snmp 5.9 over DTLS (TSM), and two real v3 agents (host `snmpd` 5.6.2.1 + image `snmpd` 5.9.3), Docker for the container peers | ~110s | yes |
 | Interop scripts | `scripts/interop-*.sh` | net-snmp CLI / snmpd as the peer | minutes | no (`make interop ...`) |
 | Smoke | `scripts/smoke-cli.sh` | a hand-written Python v2c agent | seconds | no |
 | Fuzz | `internal/{msg,access,config,cache,notifyfilter}` | the Go fuzzer | bounded | corpus only |
@@ -68,10 +68,11 @@ the early return is reintroduced — both halves were verified by mutation.
   `skipUnsupported` skips it, so the gap stays visible without failing.
 - **Missing toolchain = skip with a reason — unless the run claims to be
   complete.** `make peers` provisions the managed ones; `gosnmp` is always
-  present. The TSM scenarios, the 5.9 clear-leg peer and the `snmptrapd`
-  receiver need a Docker daemon and skip without one: the container carries
-  the current net-snmp (5.9.3), while a host net-snmp may be Apple's 5.6.2.1
-  with no TLS transport at all. Skips route through `skipOrFail`, so
+  present. The TSM scenarios, the 5.9 clear-leg peer, the 5.9 v3 **agent**
+  and the `snmptrapd` receiver need a Docker daemon and skip without one: the
+  container carries the current net-snmp (5.9.3), while a host net-snmp may
+  be Apple's 5.6.2.1 (no TLS transport, and a 2010 agent). Skips route
+  through `skipOrFail`, so
   `make conformance-required` (`CONFORMANCE_REQUIRED=1`) turns every one of
   them into a failure: a release run cannot pass on a host that only ran
   gosnmp. `TestNoSkipBypassesRequiredGate` source-scans the package and fails
@@ -207,10 +208,11 @@ names what would close it.
   mid-request under continuous polling.
 - **Vendor coverage means "the stacks on this host".** v1 traffic IS
   vendor-generated (`snmptrap -v 1`, `snmpget -v 1`, so v1 *translation* is
-  judged by a real encoder), but no physical device is in the loop and the
-  v3 agent is Apple's `snmpd` 5.6.2.1 — the Debian image ships a 5.9.3
-  `snmpd` that nothing starts, so "current agent" is untested and cheap to
-  add. TSM notifications have no vendor receiver at all (`CONFORMANCE.md`,
+  judged by a real encoder), but no physical device is in the loop. The v3
+  agent leg runs against two real agents — Apple's `snmpd` 5.6.2.1 and the
+  5.9.3 in the Debian image — so a current-release divergence is visible; a
+  third release (or an appliance vendor's build) is still not. TSM
+  notifications have no vendor receiver at all (`CONFORMANCE.md`,
   "Deliberate limits").
 - **No CI.** Regressions are caught when someone runs the suite. The
   acceptance rule in `AGENTS.md` §5 only works because it is run manually,

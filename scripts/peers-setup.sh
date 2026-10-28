@@ -82,15 +82,15 @@ fi
 # cannot be exercised without a `dtls:` transport. A small Debian image with
 # a current net-snmp gives the TSM scenarios a real third-party client.
 #
-# Three capabilities are required, and an image left over from an earlier
-# revision can be missing two of them (snmptrapd for the receiver scenarios,
-# python3 for the net-snmp adapter that runs INSIDE the container). Checking
-# `docker image inspect` alone is not enough: a stale image then surfaces as a
-# failing test instead of a rebuild.
+# Four capabilities are required, and an image left over from an earlier
+# revision can be missing several (snmptrapd for the receiver scenarios,
+# python3 for the net-snmp adapter that runs INSIDE the container, snmpd for
+# the real-v3-agent scenarios). Checking `docker image inspect` alone is not
+# enough: a stale image then surfaces as a failing test instead of a rebuild.
 image_ok() {
     docker image inspect "$1" >/dev/null 2>&1 || return 1
     docker run --rm --entrypoint sh "$1" -c \
-        'command -v snmpget && command -v snmptrapd && command -v python3' >/dev/null 2>&1
+        'command -v snmpget && command -v snmpd && command -v snmptrapd && command -v python3' >/dev/null 2>&1
 }
 if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
     if image_ok snmp-shield-net-snmp:peer; then

@@ -326,7 +326,17 @@ usm-gateway — **IMPLEMENTED (see below)**:
   with real net-snmp TSM clients over `dtls:` (snmpget/getnext/
   bulkwalk/set, untrusted-client rejection, trap direction via
   `scripts/tsm-sink` raw-DTLS receiver; skips rc 77 without
-  snmpget/openssl).
+  snmpget/openssl, and ALSO skips rc 77 when the net-snmp build has no TLS
+  transport — probed with `snmpget -H | grep tlsAlgorithms`, because distro
+  builds of 5.9 exist without TLS and version numbers lie. Apple's 5.6.2.1
+  fails with "Unknown host (dtls:...)" and no amount of retrying helps, so
+  on such a host RFC 6353 rests on the Docker scenarios in
+  `internal/conformance`. The script also cannot rely on GNU `timeout`
+  (macOS: only `gtimeout` from coreutils, otherwise nothing), so bounded
+  calls go through `run_bounded`, which falls back to
+  `perl -e 'alarm shift; exec @ARGV'`; without that fallback every call
+  "fails" with `timeout: command not found` and the suite looks broken
+  instead of skipping.
 
 ### TSM design (RFC 5591, as implemented)
 

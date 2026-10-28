@@ -11,8 +11,12 @@
 # notification's crypto validation is covered by internal/tsm/gateway_test.go
 # (a gosnmp TrapListener cannot do raw DTLS).
 #
-# Requires: net-snmp CLI tools (apt-get install snmp) and openssl.
-# Exit 0 = green; exit 77 = tools missing (skip).
+# Requires: net-snmp CLI tools (apt-get install snmp) and openssl, AND a
+# net-snmp built with TLS. Apple's 5.6.2.1 has no `dtls:` transport at all
+# ("Unknown host (dtls:...)"), so this exits 77 there — the RFC 6353 coverage
+# then comes from the Docker-based scenarios in internal/conformance
+# (net-snmp 5.9.3), which is the only vendor TSM client that exists here.
+# Exit 0 = green; exit 77 = prerequisite missing (skip).
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -24,6 +28,14 @@ for tool in snmpget snmpgetnext snmpbulkwalk snmpset snmptrap openssl; do
         exit 77
     fi
 done
+
+# A TLS-enabled build exposes the tlsAlgorithms/tlsCipher config directives.
+# Feature-probing beats version numbers: distro builds of 5.9 exist without TLS.
+if ! snmpget -H 2>/dev/null | grep -q "tlsAlgorithms"; then
+    echo "SKIP: this net-snmp has no TLS/DTLS transport ($(snmpget --version 2>&1 | head -1))"
+    echo "      RFC 6353 is covered by internal/conformance with net-snmp 5.9 in Docker"
+    exit 77
+fi
 
 fail=0
 BIN=./bin/snmp-shield
@@ -88,6 +100,18 @@ export SNMPCONFPATH="$SNMPHOME/.snmp"
 
 # MIB loading noise is harmless.
 unnoisy() { grep -vE "Cannot find module|Cannot adopt|Undefined identifier|Did not find|Unlinked OID|MIB search|LINKED|Using 1 |currently unknown|deprecat|was requested with" || true; }
+
+# GNU timeout is a coreutils binary; macOS only has it as gtimeout (brew), and
+# plain sh hosts have neither. Every bounded call below needs SOME bound — a
+# wedged net-snmp DTLS call would otherwise hang the suite — so fall back to
+# perl's alarm (present on any POSIX host) instead of dropping the guard.
+if command -v timeout >/dev/null 2>&1; then
+    run_bounded() { timeout "$@"; }
+elif command -v gtimeout >/dev/null 2>&1; then
+    run_bounded() { gtimeout "$@"; }
+else
+    run_bounded() { _secs=$1; shift; perl -e 'alarm shift; exec @ARGV' "$_secs" "$@"; }
+fi
 
 # TSM client: OIDs come BEFORE the -v3 flags (net-snmp arg-order quirk).
 
@@ -255,22 +279,22 @@ echo "== TSM gateway interop (dtls:$D) =="
 V3T="-v3 -On -t 3 -r 2 --defSecurityModel=tsm"
 
 # 1. GET
-out=$(timeout 20 snmpget "dtls:$D" .1.3.6.1.2.1.1.1.0 $V3T 2>&1 | unnoisy) \
+out=$(run_bounded 20 snmpget "dtls:$D" .1.3.6.1.2.1.1.1.0 $V3T 2>&1 | unnoisy) \
     && echo "$out" | grep -q "tsm-gateway interop agent" \
     && echo "PASS: snmpget" || { echo "FAIL: snmpget: $out"; fail=1; }
 
 # 2. GETNEXT
-out=$(timeout 20 snmpgetnext "dtls:$D" .1.3.6.1.2.1.1.1.0 $V3T 2>&1 | unnoisy) \
+out=$(run_bounded 20 snmpgetnext "dtls:$D" .1.3.6.1.2.1.1.1.0 $V3T 2>&1 | unnoisy) \
     && echo "$out" | grep -q "1.3.6.1.2.1.1.2.0" \
     && echo "PASS: snmpgetnext" || { echo "FAIL: snmpgetnext: $out"; fail=1; }
 
 # 3. GETBULK walk
-out=$(timeout 25 snmpbulkwalk -v3 -On -t 3 -r 2 --defSecurityModel=tsm "dtls:$D" .1.3.6.1.2.1.1 2>&1 | unnoisy) \
+out=$(run_bounded 25 snmpbulkwalk -v3 -On -t 3 -r 2 --defSecurityModel=tsm "dtls:$D" .1.3.6.1.2.1.1 2>&1 | unnoisy) \
     && echo "$out" | grep -q "tsm-gateway interop agent" \
     && echo "PASS: snmpbulkwalk" || { echo "FAIL: snmpbulkwalk: $out"; fail=1; }
 
 # 4. SET (relayed as clear v2c SET)
-out=$(timeout 20 snmpset -v 3 "dtls:$D" .1.3.6.1.2.1.1.6.0 i 42 2>&1 | unnoisy) \
+out=$(run_bounded 20 snmpset -v 3 "dtls:$D" .1.3.6.1.2.1.1.6.0 i 42 2>&1 | unnoisy) \
     && echo "PASS: snmpset" || { echo "FAIL: snmpset: $out"; fail=1; }
 
 # 5. untrusted client (cert from another CA) must be rejected
@@ -286,7 +310,7 @@ cp "$REJDIR/other.crt" "$REJHOME/.snmp/tls/ca-certs/"   # self-signed: its own a
 rej_fp=$(openssl x509 -in "$REJDIR/other.crt" -noout -fingerprint -sha256 | cut -d= -f2)
 sed "s|clientCert .*|clientCert ${rej_fp}|" "$SNMPHOME/.snmp/snmp.conf" > "$REJHOME/.snmp/snmp.conf"
 
-out=$(HOME="$REJHOME" SNMPCONFPATH="$REJHOME/.snmp" timeout 20 snmpget "dtls:$D" .1.3.6.1.2.1.1.1.0 $V3T 2>&1 | unnoisy) \
+out=$(HOME="$REJHOME" SNMPCONFPATH="$REJHOME/.snmp" run_bounded 20 snmpget "dtls:$D" .1.3.6.1.2.1.1.1.0 $V3T 2>&1 | unnoisy) \
     && { echo "FAIL: untrusted client was NOT rejected: $out"; fail=1; } \
     || echo "PASS: untrusted client rejected"
 
@@ -325,7 +349,7 @@ else
 fi
 
 # 7. chain alive after trap
-out=$(timeout 20 snmpget "dtls:$D" .1.3.6.1.2.1.1.1.0 $V3T 2>&1 | unnoisy) \
+out=$(run_bounded 20 snmpget "dtls:$D" .1.3.6.1.2.1.1.1.0 $V3T 2>&1 | unnoisy) \
     && echo "$out" | grep -q "tsm-gateway interop agent" \
     && echo "PASS: chain alive after trap" || { echo "FAIL: chain dead after trap: $out"; fail=1; }
 

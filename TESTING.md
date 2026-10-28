@@ -9,7 +9,7 @@ the less it can be fooled by our own encoders.
 | Layer | Where | Oracle | Cost | Runs in `make test` |
 |---|---|---|---|---|
 | Unit | `internal/*/..._test.go` | hand-built vectors, RFC examples | ms | yes |
-| Wire e2e (Go) | `internal/usm`, `internal/tsm`, `internal/tunnel`, `internal/proxy`, `internal/access`, `internal/snmpmetrics` | gosnmp, raw datagrams, real UDP/DTLS loopback | seconds | yes |
+| Wire e2e (Go) | `internal/usm`, `internal/tsm`, `internal/tunnel`, `internal/proxy`, `internal/access`, `internal/snmpmetrics` | gosnmp, raw datagrams, real UDP/DTLS loopback (IPv4 and `[::1]`) | seconds | yes |
 | Conformance | `internal/conformance` | five independent vendor stacks driving the real binary, a vendor v3 notification **receiver** (`snmptrapd` 5.9), net-snmp 5.9 over DTLS (TSM), and two real v3 agents (host `snmpd` 5.6.2.1 + image `snmpd` 5.9.3), Docker for the container peers | ~110s | yes |
 | Interop scripts | `scripts/interop-*.sh` | net-snmp CLI / snmpd as the peer | minutes | no (`make interop ...`) |
 | Smoke | `scripts/smoke-cli.sh` | a hand-written Python v2c agent | seconds | no |
@@ -190,9 +190,21 @@ names what would close it.
   `runRole`/`Run`, signal handling, reload, logger errors — not configuration
   assembly. *Closer with:* a harness that starts the built binary per role,
   sends SIGHUP, and asserts the reload/restart-required behaviour.
-- **IPv4 is assumed; IPv6 is unproven.** Engine discovery binds the IPv4
-  wildcard, the container reaches the host by IPv4 name, and no test binds a
-  `[::1]` front leg. *Closer with:* one scenario per mode on `[::1]`.
+- **IPv6 is covered at the socket level, not by a vendor.** One scenario per
+  mode now binds `[::1]`: the USM gateway's request leg, its inform round trip
+  (including the sink-discovery socket, which is separate from the request
+  sockets), the manager-gateway's discovery and request sockets, the TSM
+  gateway's raw DTLS front leg, and the complete two-proxy passthrough chain
+  (`internal/usm/ipv6_e2e_test.go`,
+  `internal/usm/gateway_inform_engine_ipv6_test.go`,
+  `internal/tsm/gateway_ipv6_test.go`, `internal/proxy` IPv6 scenario). No
+  peer in the matrix can be pointed at a v6 port through the peer contract —
+  net-snmp wants `udp6:`/`dtls:` URLs of its own construction, and the Docker
+  peers reach the host only over the IPv4 bridge name — so the family is
+  judged by real sockets. Still untested: a **mixed-family** deployment (v6
+  front, v4 device or the reverse), an **IPv6-only host** (where the
+  `0.0.0.0`/`IPv4zero` binds rely on Go's dual-stack wildcard and would have
+  to change), and scoped link-local addresses (`fe80::%en0`).
 - **No soak or load run.** The rate limiter's 4096-entry cap fails closed by
   design, but nothing drives it with spoofed sources; goroutine stability is
   proven over 30 connect/close cycles, not over hours; memory is never

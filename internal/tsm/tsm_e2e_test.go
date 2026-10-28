@@ -265,15 +265,22 @@ func startTSMManager(t *testing.T, mtr *tsm.ManagerTranslator, done <-chan struc
 // short re-bind check to reduce the probe-close race window.
 func freeUDPPort(t *testing.T) string {
 	t.Helper()
+	return freeUDPPortOn(t, "127.0.0.1")
+}
+
+// freeUDPPortOn is freeUDPPort for an explicit host, so a scenario can put a
+// leg on ::1.
+func freeUDPPortOn(t *testing.T, host string) string {
+	t.Helper()
 	for i := 0; i < 10; i++ {
-		conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(host)})
 		if err != nil {
 			t.Fatal(err)
 		}
 		addr := conn.LocalAddr().String()
 		conn.Close()
 		// re-bind check: if another process took it, try again
-		if c2, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: conn.LocalAddr().(*net.UDPAddr).Port}); err == nil {
+		if c2, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP(host), Port: conn.LocalAddr().(*net.UDPAddr).Port}); err == nil {
 			c2.Close()
 			return addr
 		}

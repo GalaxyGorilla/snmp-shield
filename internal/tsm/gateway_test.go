@@ -121,8 +121,15 @@ func certFiles(t *testing.T) (ca, serverCrt, serverKey, clientCrt, clientKey str
 // front address and a stop func.
 func buildTSMGateway(t *testing.T, ca, serverCrt, serverKey string, agentAddr string, identities []string, trapListen, trapSink string) (front string, stop func()) {
 	t.Helper()
+	return buildTSMGatewayOn(t, "127.0.0.1", ca, serverCrt, serverKey, agentAddr, identities, trapListen, trapSink)
+}
 
-	front = freeUDPPort(t)
+// buildTSMGatewayOn is buildTSMGateway with an explicit front-leg host, so an
+// IPv6 deployment is one parameter rather than a second harness.
+func buildTSMGatewayOn(t *testing.T, host, ca, serverCrt, serverKey string, agentAddr string, identities []string, trapListen, trapSink string) (front string, stop func()) {
+	t.Helper()
+
+	front = freeUDPPortOn(t, host)
 	cfg := config.GatewayRole{
 		ListenAddr:     front,
 		AgentAddr:      agentAddr,

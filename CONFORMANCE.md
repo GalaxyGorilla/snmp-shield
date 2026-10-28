@@ -229,6 +229,14 @@ Recorded so nobody "fixes" the proxy to match one vendor. Adapters normalize
   ready and pushed the failure into the proxy assertions. The fixture now
   requires `pkt.Error == NoError`.
 
+- **Address family is not vendor-driven.** No peer in the matrix can be
+  pointed at an IPv6 port through the peer contract: net-snmp builds its own
+  `udp6:`/`dtls:` URLs and the Docker peers reach the host only by the IPv4
+  bridge name. IPv6 deployments are pinned by real sockets on `[::1]` per mode
+  (`internal/usm/ipv6_e2e_test.go`, `internal/tsm/gateway_ipv6_test.go`,
+  `internal/proxy`), which is the right oracle for transport — but a
+  vendor-specific v6 quirk would not be caught here.
+
 ## Deliberate limits
 
 - **No third-party TSM *receiver*.** The Docker peer is a client: net-snmp

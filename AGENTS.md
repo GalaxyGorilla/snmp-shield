@@ -129,6 +129,7 @@ plus the short `/tmp` prefix hides it).
 | Goroutine-leak regression test (`internal/tunnel/leak_test.go`: 30 connect/exchange/close cycles over real PSK-DTLS loopback, goroutine count must return to baseline; server side keyed on `Session.Done()` + production `SetTuning` so there is no test-end accounting noise) | done (tested, -race -count 8 stable: before=after=5) |
 | Cross-vendor conformance matrix (`internal/conformance`: peer contract `peer.go`, subprocess adapters `peers_exec.go`, in-process gosnmp peer, Docker clear-leg peer `peer_docker.go`, `harness_test.go` builds the CLI in TestMain; scenarios: usm-gateway requests/rejections/engine persistence/notification ingress/filter/access policy, two-proxy translate chain incl. device-side write policy, usm-manager-gateway against REAL snmpd incl. v3 traps and v3 informs, TSM gateway driven by net-snmp 5.9 over DTLS in Docker incl. a read-only refusal and a foreign-CA client, **vendor v3 notification receiver** (`trapd_test.go`, `snmptrapd` in Docker): trap content and inform confirmation judged by `snmptrapd` 5.9) + `internal/testkit` (fake device, PKI with extra SANs, trap sinks, V3 sink, frame-sink pipe, ports) + `test/peers/` adapters + `test/peers/netsnmp-docker/` image (net-snmp 5.9.3 CLI + `snmptrapd` + python3) + `scripts/peers-setup.sh` + `make peers`/`make conformance` | done (tested: all five stacks green, `go test -race ./...` green; six real bugs found and fixed — see §7 and CONFORMANCE.md) |
 | Second real v3 agent (`internal/conformance/agent_docker_test.go`): the manager-gateway matrix runs against the host `snmpd` (Apple 5.6.2.1) **and** net-snmp 5.9.3 in the Debian peer image (published on `127.0.0.1` only, random container name, force-removed at cleanup; `requireDockerSnmpd` capability check so a stale image says "rebuild" instead of timing out). 5.9 needs an explicit `rouser` access-control directive — without it every request is `AuthorizationError` — while 5.6 rejects `rouser` as an unknown token; the agent fixture's readiness probe now also requires `pkt.Error == NoError` because gosnmp returns `err == nil` for an error-status answer | done (tested: both fixtures × five peers × request/trap/inform scenarios green; readiness check verified by removing `rouser`, which now fails as "agent answered with error status AuthorizationError" instead of blaming the proxy) |
+| Address family (IPv6): every mode's ingress is pinned on `[::1]` — USM gateway request leg (`internal/usm/ipv6_e2e_test.go`), USM gateway inform round trip incl. the sink-discovery socket (`gateway_inform_engine_ipv6_test.go`), manager-gateway discovery+request sockets and the full two-proxy passthrough chain, TSM gateway raw-DTLS front leg (`internal/tsm/gateway_ipv6_test.go`). Harnesses gained an explicit-host variant (`buildGatewayOn`, `buildManagerGatewayAt`, `startFakeV3AgentOn`, `buildTSMGatewayOn`, `freeUDPPortOn`) instead of duplicated fixtures. The IPv6 inform pin is mutation-verified: forcing the sink-discovery probe to `udp4` makes discovery fail silently and the fallback wrap names our own engine, which the test names verbatim | done (tested, -race green; IPv6 is socket-level, not vendor-driven — no peer can be pointed at a v6 port through the contract) |
 | Release gate + flags wiring sweep: `make conformance-required` (`CONFORMANCE_REQUIRED=1`) turns every environment skip in the matrix into a failure, so "all peers green" cannot mean gosnmp alone; `skipOrFail` is the only sanctioned route (`TestNoSkipBypassesRequiredGate` source-scans for bypassing `t.Skip`, `KindUnsupported` still skips), and `Unavailable()` now probes the peer runtime through PATH as well (`TestMissingRuntimeSkipsInsteadOfFailing` — a removed `node` used to look available because `node_modules` survived, then failed as an adapter error). `cmd/snmp-shield/flags_sweep_test.go` walks all eight role × mode paths with every flag set, twice (read-only + write policy), with completeness tripwires (`fullOpts` non-zero per field, `TestOptsWiresEveryFlag` parses `register()` and diffs `opts()`); reintroducing conformance finding 1 makes it fail (verified by mutation) | done (tested: sweep + gate unit tests green; gate proven both directions on a trimmed PATH; full race suite green) |
 | Front-door observability + idle bound (found while chasing a `TestTSMGatewaySessionCap` flake under full-suite load): `snmp_shield_sessions_active` gauge set at slot acquire/release in both capped accept loops, and a per-read idle deadline on every TSM front session — DTLS carries no keepalive, so a peer that crashes or loses its route pinned its cap slot until process restart. The cap tests now wait on the gauge instead of sleeping (`waitActive` / `waitSessionsActive`), which is deterministic under load and asserts the recovery property directly | done (tested: `TestTSMGatewaySessionCap`, `TestRunAgentSessionCap` on the gauge; `internal/tsm/front_idle_test.go` pins the idle bound over an in-memory conn — idle session ends, traffic re-arms the deadline; full race suite green ×3 after the fix) |
 | Border hardening (`internal/safego`: `Dispatch` for per-datagram/frame handlers, `Go` for per-session goroutines; wired into the tunnel read loop, all six translator/trap read loops, both accept loops, the metrics MIB agent, the tunnel event callback) + front-door session cap (`tunnel.max_sessions`/`--max-sessions`, default 64, fail-fast close + `snmp_shield_sessions_denied_total`; agent tunnel listener + TSM gateway front leg) + `--engine-id` flags-mode support (HA replicas share one engine; also lets a receiver pre-register our engine) | done (tested: `safego` unit tests; `internal/tunnel/panic_test.go` (panicking TunnelUp keeps Connect+session usable, panicking TunnelDown still fires `Done()` so translators cannot leak); `TestRunAgentSessionCap` + `TestTSMGatewaySessionCap` (burst refused, counter moves, slot reusable); config + flags pins; hunting found nothing to fix — the panics were theoretical, the caps were not) |
@@ -462,10 +463,12 @@ Note: non-login shells may not have `go` on PATH — use `/usr/local/go/bin/go`
 or set `-timeout` on `go test` (DTLS tests would hang without one).
 **What a green run does NOT prove** is inventoried explicitly in
 `TESTING.md` ("What a green run does not prove"): peers skip silently when
-their toolchain is absent, IPv6 is unproven, there is no soak/load run,
-`cmd`/`observ` are the least-covered code, HA is pinned as a state machine
-rather than as a mid-request outage, and TSM notifications still have no
-vendor receiver. Read it before treating a green suite as a release gate.
+their toolchain is absent, IPv6 is pinned per mode at the socket level but
+not by a vendor and not for mixed-family or IPv6-only hosts, there is no
+soak/load run, `cmd`/`observ` are the least-covered code, HA is pinned as a
+state machine rather than as a mid-request outage, and TSM notifications
+still have no vendor receiver. Read it before treating a green suite as a
+release gate.
 
 ### No-YAML CLI mode (plug-and-play deployment)
 
@@ -1319,6 +1322,39 @@ wire behaviour. Findings live in `CONFORMANCE.md`, layering in `TESTING.md`.
   "Cannot adopt OID" lines. Readiness = "NET-SNMP version" in the log; an
   exited container means the config was rejected, which must fail loudly
   rather than skip.
+
+### Address family (IPv6)
+
+The proxy has no address-family logic of its own: every leg is a string from
+config handed to `net`. That is exactly why it needs a pin — the wildcard
+binds (`0.0.0.0:0`, `&net.UDPAddr{IP: net.IPv4zero}`) are only family-neutral
+because Go opens them **dual-stack** when the platform supports IPv4-mapped
+addresses (`favoriteAddrFamily`: a wildcard listen becomes `AF_INET6` with
+v4-mapping unless `udp4`/`tcp4` is named or the host is IPv4-only). That was
+verified empirically on both macOS and the Debian peer image before relying
+on it; naming `"udp4"` anywhere in an outbound path silently breaks a v6
+deployment — the write fails, and on the notification path the failure is
+only a warning, so the message still goes out with the *wrong* engine (see
+the mutation note in §3).
+- Pinned per mode on `[::1]`: USM gateway request leg, USM gateway inform
+  round trip (the sink-discovery socket is a *separate* ephemeral socket, so
+  the request-path test proves nothing about it), manager-gateway
+  discovery/request sockets, TSM gateway raw-DTLS front leg, and the complete
+  two-proxy passthrough chain.
+- Harness shape: every fixture takes an explicit host (`buildGatewayOn`,
+  `buildManagerGatewayAt`, `startFakeV3AgentOn`, `buildTSMGatewayOn`,
+  `freeUDPPortOn`) with the v4 form delegating to it. Duplicating a fixture
+  per family is how family bugs hide.
+- Not vendor-driven, deliberately: no peer can be pointed at a v6 port
+  through the peer contract (net-snmp constructs its own `udp6:`/`dtls:`
+  URLs, and the Docker peers reach the host only by the IPv4 bridge name).
+  Address family is transport, not wire format, so sockets + gosnmp are a
+  fair oracle. Recorded as a limit in `TESTING.md`.
+- **pion skips hostname verification for an IP `ServerName`** (`conn.go`:
+  `if net.ParseIP(serverName) != nil { serverName = "" }`), so a test PKI
+  whose server cert carries DNS SANs only still works against `::1`. That is
+  a pion behaviour, not a security property to rely on in production — a
+  deployment that needs name checking must use a DNS name.
 
 ### pion/dtls v3 quirks (learned the hard way, do not regress)
 

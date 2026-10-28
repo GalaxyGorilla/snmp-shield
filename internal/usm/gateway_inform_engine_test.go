@@ -43,7 +43,17 @@ const (
 // own engine and then hands back the next datagram it receives.
 func fakeAuthoritativeSink(t *testing.T) (addr string, next func(t *testing.T) []byte, probes func() int) {
 	t.Helper()
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	return fakeAuthoritativeSinkOn(t, "127.0.0.1:0")
+}
+
+// fakeAuthoritativeSinkOn binds the receiver on an explicit address, so the
+// discovery path can be exercised in the address family an operator
+// actually deploys (the notification sockets are separate from the
+// request-path sockets, so the USM gateway's IPv6 request test proves
+// nothing about them).
+func fakeAuthoritativeSinkOn(t *testing.T, bind string) (addr string, next func(t *testing.T) []byte, probes func() int) {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", bind)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,6 +137,12 @@ func mustOID(t *testing.T, s string) []byte {
 // notifications out to sinkAddr) and returns its trap listener address.
 func notifyGateway(t *testing.T, sinkAddr string) (trapAddr string, g *GatewayTranslator) {
 	t.Helper()
+	return notifyGatewayOn(t, "127.0.0.1", sinkAddr)
+}
+
+// notifyGatewayOn is notifyGateway with an explicit trap-listener host.
+func notifyGatewayOn(t *testing.T, host, sinkAddr string) (trapAddr string, g *GatewayTranslator) {
+	t.Helper()
 	store, err := cache.Open("")
 	if err != nil {
 		t.Fatal(err)
@@ -135,7 +151,7 @@ func notifyGateway(t *testing.T, sinkAddr string) (trapAddr string, g *GatewayTr
 	if err != nil {
 		t.Fatal(err)
 	}
-	trapAddr = freeUDPPortT(t)
+	trapAddr = freeUDPPortTOn(t, host)
 	tr, err := NewGatewayTranslator(config.GatewayRole{
 		TrapListenAddr: trapAddr,
 		TrapSinkAddr:   sinkAddr,
@@ -171,10 +187,10 @@ func notifyGateway(t *testing.T, sinkAddr string) (trapAddr string, g *GatewayTr
 	return trapAddr, tr
 }
 
-// freeUDPPortT binds a free loopback UDP port and releases it.
-func freeUDPPortT(t *testing.T) string {
+// freeUDPPortTOn binds a free UDP port on an explicit host and releases it.
+func freeUDPPortTOn(t *testing.T, host string) string {
 	t.Helper()
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	conn, err := net.ListenPacket("udp", net.JoinHostPort(host, "0"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,6 +202,13 @@ func freeUDPPortT(t *testing.T) string {
 // sendClearInform sends a v2c inform from a device socket at trapAddr.
 func sendClearInform(t *testing.T, trapAddr string, pduType uint8) {
 	t.Helper()
+	sendClearInformOn(t, "127.0.0.1", trapAddr, pduType)
+}
+
+// sendClearInformOn is the device side of sendClearInform on an explicit
+// family (the device and the trap listener must share it).
+func sendClearInformOn(t *testing.T, host, trapAddr string, pduType uint8) {
+	t.Helper()
 	vbs := msg.AppendTLV(nil, 0x30,
 		msg.AppendTLV(msg.AppendTLV(nil, 0x06, mustOID(t, "1.3.6.1.2.1.1.3.0")), 0x43, []byte{0, 0, 0, 0}))
 	pdu := msg.BuildPDU(pduType, 4242, 0, 0, vbs)
@@ -193,7 +216,7 @@ func sendClearInform(t *testing.T, trapAddr string, pduType uint8) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	conn, err := net.ListenPacket("udp", net.JoinHostPort(host, "0"))
 	if err != nil {
 		t.Fatal(err)
 	}

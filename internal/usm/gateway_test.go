@@ -30,6 +30,18 @@ import (
 // Optional trailing filters are passed to the translator.
 func buildGateway(t *testing.T, front, agent int, trapListen, trapSink string, filt ...*notifyfilter.Filter) (stop func()) {
 	t.Helper()
+	frontAddr, agentAddr := "", ""
+	if front != 0 {
+		frontAddr = net.JoinHostPort("127.0.0.1", itoa(front))
+		agentAddr = net.JoinHostPort("127.0.0.1", itoa(agent))
+	}
+	return buildGatewayOn(t, frontAddr, agentAddr, trapListen, trapSink, filt...)
+}
+
+// buildGatewayOn is buildGateway with explicit host:port legs, which is what
+// makes an IPv6 scenario possible without a second harness.
+func buildGatewayOn(t *testing.T, frontAddr, agentAddr, trapListen, trapSink string, filt ...*notifyfilter.Filter) (stop func()) {
+	t.Helper()
 
 	store, err := cache.Open("")
 	if err != nil {
@@ -45,9 +57,9 @@ func buildGateway(t *testing.T, front, agent int, trapListen, trapSink string, f
 		TrapSinkAddr:   trapSink,
 		AgentCommunity: "realcomm",
 	}
-	if front != 0 {
-		cfg.ListenAddr = net.JoinHostPort("127.0.0.1", itoa(front))
-		cfg.AgentAddr = net.JoinHostPort("127.0.0.1", itoa(agent))
+	if frontAddr != "" {
+		cfg.ListenAddr = frontAddr
+		cfg.AgentAddr = agentAddr
 	}
 	users := []usm.Profile{{
 		Name:           "proxy",
@@ -157,7 +169,14 @@ func (r *recAgent) close() { r.conn.Close() }
 // freeUDPPort returns a free 127.0.0.1 UDP address (bound then released).
 func freeUDPPort(t *testing.T) string {
 	t.Helper()
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	return freeUDPPortOn(t, "127.0.0.1")
+}
+
+// freeUDPPortOn is freeUDPPort for an explicit host, so a scenario can name
+// an IPv6 leg before anything binds it.
+func freeUDPPortOn(t *testing.T, host string) string {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", net.JoinHostPort(host, "0"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -492,6 +511,12 @@ func TestGatewayTrapFiltered(t *testing.T) {
 // (GetResponse signed with its own keys) — the inform round-trip oracle.
 func startManagerSink(t *testing.T) (string, chan *gosnmp.SnmpPacket) {
 	t.Helper()
+	return startManagerSinkOn(t, "127.0.0.1")
+}
+
+// startManagerSinkOn is the v3 trap receiver fixture on an explicit host.
+func startManagerSinkOn(t *testing.T, host string) (string, chan *gosnmp.SnmpPacket) {
+	t.Helper()
 	tl := gosnmp.NewTrapListener()
 	tl.Params = &gosnmp.GoSNMP{
 		Version:       gosnmp.Version3,
@@ -509,7 +534,7 @@ func startManagerSink(t *testing.T) (string, chan *gosnmp.SnmpPacket) {
 	tl.OnNewTrap = func(s *gosnmp.SnmpPacket, u *net.UDPAddr) {
 		trapGot <- s
 	}
-	sinkAddr := freeUDPPort(t)
+	sinkAddr := freeUDPPortOn(t, host)
 	go func() { _ = tl.Listen(sinkAddr) }()
 	t.Cleanup(tl.Close)
 	select {
@@ -524,7 +549,13 @@ func startManagerSink(t *testing.T) (string, chan *gosnmp.SnmpPacket) {
 // gateway's trap listener.
 func deviceConn(t *testing.T, trapListen string) net.PacketConn {
 	t.Helper()
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	return deviceConnOn(t, "127.0.0.1")
+}
+
+// deviceConnOn is the sending device socket for an explicit host family.
+func deviceConnOn(t *testing.T, host string) net.PacketConn {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", net.JoinHostPort(host, "0"))
 	if err != nil {
 		t.Fatal(err)
 	}

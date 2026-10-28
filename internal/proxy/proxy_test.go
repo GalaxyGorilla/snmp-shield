@@ -33,9 +33,16 @@ import (
 // freeUDPPort returns a free 127.0.0.1 UDP address (bound then released).
 func freeUDPPort(t *testing.T) string {
 	t.Helper()
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	return freeUDPPortOn(t, "127.0.0.1")
+}
+
+// freeUDPPortOn is freeUDPPort for an explicit host, so a scenario can put a
+// deployment leg on ::1.
+func freeUDPPortOn(t *testing.T, host string) string {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", net.JoinHostPort(host, "0"))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("free udp port on %s: %v", host, err)
 	}
 	defer conn.Close()
 	return conn.LocalAddr().String()
@@ -405,6 +412,95 @@ func TestRunManagerPassthroughE2E(t *testing.T) {
 	n, _, err := sock.ReadFrom(buf)
 	if err != nil {
 		t.Fatalf("no response through chain: %v", err)
+	}
+	_, community, rpdu, err := msg.SplitV1V2c(buf[:n])
+	if err != nil {
+		t.Fatalf("bad response: %v", err)
+	}
+	if string(community) != "public" {
+		t.Fatalf("community = %q, want public", community)
+	}
+	typ, fields, err := msg.ParsePDU(rpdu)
+	if err != nil {
+		t.Fatalf("bad response PDU: %v", err)
+	}
+	if typ != msg.PDUGetResponse {
+		t.Fatalf("response type = %#x, want GETRESPONSE", typ)
+	}
+	if fields.ReqID != 4242 {
+		t.Fatalf("req-id = %d, want 4242 (echoed)", fields.ReqID)
+	}
+
+	stopRun(t, agCancel, agErr, "agent")
+	stopRun(t, mgCancel, mgErr, "manager")
+}
+
+// TestRunManagerPassthroughIPv6 runs the whole two-proxy deployment on ::1:
+// both clear legs and the DTLS tunnel between them. The tunnel dialer itself
+// is family-transparent, but the deployment is not proven until the config
+// addresses, the listener binds and the device socket all agree on a v6
+// loopback.
+func TestRunManagerPassthroughIPv6(t *testing.T) {
+	if _, err := net.ListenPacket("udp", "[::1]:0"); err != nil {
+		t.Skipf("no IPv6 loopback on this host: %v", err)
+	}
+	met := observ.NewMetrics()
+	agent := fakeAgent(t, "[::1]:0")
+	defer agent.Close()
+	agentAddr := agent.LocalAddr().String()
+
+	agentCfg := &config.Config{Role: config.RoleAgent}
+	agentCfg.Defaults()
+	agentCfg.Tunnel.Mode = "dtls"
+	agentCfg.Tunnel.ListenAddr = freeUDPPortOn(t, "::1")
+	agentCfg.Tunnel.PSK = "text:testpsk"
+	agentCfg.Agent.AgentAddr = agentAddr
+	agentListen := agentCfg.Tunnel.ListenAddr
+
+	agCancel, agErr := startAgent(t, agentCfg, met)
+	defer agCancel()
+
+	mgrCfg := &config.Config{Role: config.RoleManager}
+	mgrCfg.Defaults()
+	mgrCfg.Tunnel.Mode = "dtls"
+	mgrCfg.Tunnel.DialAddrs = []string{agentListen}
+	mgrCfg.Tunnel.PSK = "text:testpsk"
+	mgrCfg.Manager.ListenAddr = freeUDPPortOn(t, "::1")
+	mgrListen := mgrCfg.Manager.ListenAddr
+
+	mgCancel, mgErr := startManager(t, mgrCfg, met)
+	defer mgCancel()
+	waitBound(t, mgrListen)
+
+	sock, err := net.ListenPacket("udp", "[::1]:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sock.Close()
+	mgrUDP, err := net.ResolveUDPAddr("udp", mgrListen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oid, err := msg.EncodeOID("1.3.6.1.2.1.1.1.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pdu := msg.BuildPDU(msg.PDUGetRequest, 4242, 0, 0, msg.AppendTLV(msg.AppendTLV(nil, 0x06, oid), 0x05, nil))
+	dg, err := msg.BuildV1V2c(msg.Version2c, []byte("public"), pdu)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sock.WriteTo(dg, mgrUDP); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, 65536)
+	if err := sock.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	n, _, err := sock.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("no response through the IPv6 chain: %v", err)
 	}
 	_, community, rpdu, err := msg.SplitV1V2c(buf[:n])
 	if err != nil {

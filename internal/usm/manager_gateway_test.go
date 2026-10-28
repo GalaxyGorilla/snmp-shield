@@ -50,7 +50,14 @@ type fakeV3Agent struct {
 
 func startFakeV3Agent(t *testing.T) *fakeV3Agent {
 	t.Helper()
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	return startFakeV3AgentOn(t, "127.0.0.1:0")
+}
+
+// startFakeV3AgentOn binds the fake agent on an explicit address, so a
+// scenario can put the v3 (agent) leg on IPv6.
+func startFakeV3AgentOn(t *testing.T, bind string) *fakeV3Agent {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", bind)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,9 +202,16 @@ func securityForAgentUser() config.Security {
 // gateway and a stop func.
 func buildManagerGateway(t *testing.T, front int, agentAddr, trapListen, trapSink string) (*usm.ManagerGateway, func()) {
 	t.Helper()
+	return buildManagerGatewayAt(t, net.JoinHostPort("127.0.0.1", itoa(front)), agentAddr, trapListen, trapSink)
+}
+
+// buildManagerGatewayAt is buildManagerGateway with an explicit clear front
+// address (the v3 agent address was already a string).
+func buildManagerGatewayAt(t *testing.T, frontAddr, agentAddr, trapListen, trapSink string) (*usm.ManagerGateway, func()) {
+	t.Helper()
 
 	cfg := config.GatewayRole{
-		ListenAddr:        net.JoinHostPort("127.0.0.1", itoa(front)),
+		ListenAddr:        frontAddr,
 		AgentAddr:         agentAddr,
 		TrapListenAddr:    trapListen,
 		TrapSinkAddr:      trapSink,

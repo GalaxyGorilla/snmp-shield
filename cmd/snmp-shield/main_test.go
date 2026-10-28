@@ -196,6 +196,66 @@ func TestFlagsConfigGatewayTSM(t *testing.T) {
 	}
 }
 
+// TestFlagsConfigGatewayAccessPolicy is a regression pin: the gateway role
+// returned early from flagsConfig and silently dropped the access-policy
+// flags, so `--read-only` (and --allow/--rate-per-sec/--write-*) built a
+// policy and then threw it away for exactly the modes that face third-party
+// clients. Caught by the vendor conformance matrix, not by unit tests.
+func TestFlagsConfigGatewayAccessPolicy(t *testing.T) {
+	cases := []struct {
+		name string
+		opts flagsOpts
+	}{
+		{
+			name: "usm-gateway",
+			opts: flagsOpts{secMode: "usm-gateway", listen: ":161", agent: "127.0.0.1:161",
+				authPass: "a", privPass: "b", readOnly: true, allow: []string{"10.0.0.0/8"}},
+		},
+		{
+			name: "usm-gateway-notif-only",
+			opts: flagsOpts{secMode: "usm-gateway", trapListen: ":162", trapSink: "127.0.0.1:1162",
+				authPass: "a", privPass: "b", readOnly: true},
+		},
+		{
+			name: "usm-manager-gateway",
+			opts: flagsOpts{secMode: "usm-manager-gateway", listen: ":161", agent: "127.0.0.1:161",
+				authPass: "a", privPass: "b", writeDefault: "deny",
+				writeAllow: []string{"1.3.6.1.4.1.99"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := flagsConfig(config.RoleGateway, tc.opts)
+			if err != nil {
+				t.Fatalf("flagsConfig: %v", err)
+			}
+			if tc.opts.readOnly {
+				if !cfg.Access.ReadOnly {
+					t.Fatalf("--read-only was dropped: access = %+v", cfg.Access)
+				}
+				pol, perr := cfg.AccessPolicy()
+				if perr != nil {
+					t.Fatalf("compiling the policy: %v", perr)
+				}
+				if pol == nil {
+					t.Fatal("no policy compiled from --read-only")
+				}
+			}
+			if len(tc.opts.allow) > 0 && len(cfg.Access.Allow) != len(tc.opts.allow) {
+				t.Fatalf("--allow was dropped: access = %+v", cfg.Access)
+			}
+			if tc.opts.writeDefault != "" {
+				if cfg.Access.WritePolicy == nil {
+					t.Fatalf("--write-default was dropped: access = %+v", cfg.Access)
+				}
+				if got := cfg.Access.WritePolicy.Default; got != tc.opts.writeDefault {
+					t.Fatalf("write default = %q, want %q", got, tc.opts.writeDefault)
+				}
+			}
+		})
+	}
+}
+
 func TestFlagsConfigGatewayErrors(t *testing.T) {
 	cases := []struct {
 		name string

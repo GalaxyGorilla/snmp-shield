@@ -11,6 +11,12 @@
 *.out
 coverage.txt
 
+# External SNMP peer toolchains (scripts/peers-setup.sh) — recreated on demand
+test/peers/.venv/
+test/peers/node_modules/
+test/peers/package-lock.json
+__pycache__/
+
 # Local certs/keys and credentials — NEVER commit
 *.pem
 *.key

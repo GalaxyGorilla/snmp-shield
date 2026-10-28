@@ -5,7 +5,7 @@
 BINARY := snmp-shield
 GO     ?= go
 
-.PHONY: all build test fmt-check vet staticcheck govulncheck race interop release release-all sbom vulnscan clean
+.PHONY: all build test fmt-check vet staticcheck govulncheck race peers conformance interop release release-all sbom vulnscan clean
 
 all: build
 
@@ -33,6 +33,19 @@ govulncheck:
 	~/go/bin/govulncheck ./...
 
 race: test
+
+# peers provisions the independent SNMP stacks used by the conformance
+# suite (net-snmp CLI, pysnmp in a venv, node net-snmp in node_modules).
+# Exit 77 when no third-party stack is available — the in-process gosnmp
+# peer always runs, so the suite itself is never skipped.
+peers:
+	sh scripts/peers-setup.sh
+
+# conformance runs the cross-vendor matrix against the built binary. This
+# is the slow, high-signal suite: four independent implementations drive the
+# real CLI through the real wire. Requires `make peers` for the full matrix.
+conformance:
+	$(GO) test ./internal/conformance -count=1 -timeout 900s
 
 # release builds a stripped static binary for appliance deployment.
 release:

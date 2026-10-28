@@ -300,3 +300,45 @@ func canonicalOID(ber []byte) []byte {
 	flush()
 	return out
 }
+
+// FuzzParseVarbinds covers the single varbind decoder shared by the write
+// policy and every relaying mode. A panic here happens pre-authorization on
+// a SET, and a silently truncated list would authorize the wrong objects, so
+// the target pins both: errors only, and full round-trip fidelity.
+func FuzzParseVarbinds(f *testing.F) {
+	seeds := seedDatagrams()
+	for _, dg := range seeds {
+		// Use the PDU body's varbind content as the seed where available;
+		// the raw datagram is a useful malformed seed either way.
+		f.Add(dg)
+	}
+	f.Add(BuildVarbinds(nil))
+	f.Add(BuildVarbinds([]Varbind{
+		{OID: "1.3.6.1.2.1.1.1.0", Type: 0x04, Value: []byte("x")},
+		{OID: "1.3.6.1.6.3.1.1.5.1", Type: 0x06, Value: mustOID("1.3.6.1.4.1.99")},
+	}))
+
+	f.Fuzz(func(t *testing.T, content []byte) {
+		vbs, err := ParseVarbinds(content)
+		if err != nil {
+			return
+		}
+		// Whatever parses must re-encode to an equivalent list: same
+		// count, same OIDs, same tags and values, and the re-encoded
+		// content must parse back to the same thing (stability).
+		rebuilt := BuildVarbinds(vbs)
+		again, err := ParseVarbinds(rebuilt)
+		if err != nil {
+			t.Fatalf("re-encoded varbind list does not parse: %v (%x)", err, rebuilt)
+		}
+		if len(again) != len(vbs) {
+			t.Fatalf("varbind count changed across round trip: %d -> %d", len(vbs), len(again))
+		}
+		for i := range vbs {
+			if again[i].OID != vbs[i].OID || again[i].Type != vbs[i].Type ||
+				!bytesEqual(again[i].Value, vbs[i].Value) {
+				t.Fatalf("varbind %d changed across round trip: %+v -> %+v", i, vbs[i], again[i])
+			}
+		}
+	})
+}

@@ -152,29 +152,13 @@ func setOIDs(pdu []byte) ([]string, bool) {
 	if err != nil {
 		return nil, false
 	}
-	var oids []string
-	rest := fields.Varbinds
-	for len(rest) > 0 {
-		tag, content, next, err := msg.NextTLV(rest)
-		if err != nil {
-			return nil, false
-		}
-		rest = next
-		if tag != 0x30 {
-			// Every varbind is a SEQUENCE; anything else means the
-			// list is malformed and the write cannot be judged.
-			return nil, false
-		}
-		// varbind content = OID TLV + value TLV
-		oidTag, oidVal, _, err := msg.NextTLV(content)
-		if err != nil || oidTag != 0x06 {
-			return nil, false
-		}
-		dotted, err := msg.DecodeOID(oidVal)
-		if err != nil {
-			return nil, false
-		}
-		oids = append(oids, dotted)
+	vbs, err := msg.ParseVarbinds(fields.Varbinds)
+	if err != nil {
+		return nil, false
+	}
+	oids := make([]string, 0, len(vbs))
+	for _, vb := range vbs {
+		oids = append(oids, vb.OID)
 	}
 	return oids, true
 }

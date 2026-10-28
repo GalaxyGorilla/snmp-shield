@@ -42,6 +42,7 @@ a design property, not pending integration work.
 | HA | Manager dials a list (`tunnel.dial_addrs`, sticky last-known-good); dead peers detected via keepalive (3 misses × 3×keepalive) and per-session work is cancelled through `Session.Done()`; replicas sharing one engineID converge on the highest seen engine state: digest-verified higher boots adopted as logical reboot, manager adopts Reports from ANY engineID and follows the wire for same-engine boots/time changes |
 | Access policy | One `access` section everywhere: `allow` (client IP/CIDR allow-list), `rate_per_sec` (per-client token bucket), `read_only` XOR `write_policy {default, rules[{oid, action}]}`. Key names mirror modbus-shield so operators learn the policy once. Scope: manager clear leg + gateway front legs get all three; the **agent** role (tunnel ingress) gets the write policy only (defense in depth at the device), since tunnel frames carry no client address — `allow`/`rate_per_sec` there are warned as ignored. `passthrough` write policy sees v1/v2c only. Denials: off-list + over-rate are dropped **silently**; a write refusal is **answered** `notWritable` (v1 `noSuchName`) |
 | Write-policy semantics | Deny-overrides, allow-must-cover, evaluated as a set (order irrelevant): any matching deny rejects the whole SET; an allow wins only if one rule covers every requested OID; else `default` (deny unless configured). Undecodable/empty-varbind SET is denied; non-SET PDUs pass |
+| Testing | Independence-first: `internal/conformance` drives the **built CLI** with four third-party stacks (net-snmp, pysnmp, node net-snmp, gosnmp) and a real `snmpd`, asserting on a JSON contract (`ok`/`error_kind`, never vendor prose). Missing toolchains **skip**, never fail (no CI). Vendor disagreements are recorded in `CONFORMANCE.md`, never adapted away; adapters may only normalize presentation (type naming). Shared scaffolding lives in `internal/testkit`; layer map in `TESTING.md` |
 | Reload | `SIGHUP` re-reads the YAML and swaps **only** the access policy (read per datagram, no rebind). Everything socket/crypto-bound is logged `(restart required)`, never silently ignored. An invalid file or uncompilable policy keeps the running policy. Flags mode: logged no-op |
 
 ## 3. Status / Roadmap
@@ -62,6 +63,14 @@ clear/wrong-user traffic), the manager-gateway (snmpget/getnext/
 bulkwalk/set vs REAL snmpd, v3-on-front-leg rejection, v3 trap
 direction; needs snmpd), and the TSM gateway (snmpget/getnext/
 bulkwalk/set, untrusted-client rejection, trap direction).**
+A cross-vendor **conformance matrix** (`internal/conformance`,
+`make conformance`) now drives the built binary with net-snmp, pysnmp, node
+net-snmp and gosnmp on the clear legs, plus a REAL `snmpd` as the v3 agent
+for usm-manager-gateway; it found and pinned four real bugs (gateway
+access-policy flags dropped, inform confirmations from the wrong socket,
+inform responses with a fresh msgID/Reportable flag, and missing
+authoritative-engine support for compliant informs). Findings and vendor
+divergences are in `CONFORMANCE.md`; the test layering is in `TESTING.md`.
 Every role also enforces a request-leg **access policy** (client
 allow-list, per-client rate limit, read-only / OID-scoped write policy;
 the device-facing agent box enforces the write half itself) with SIGHUP
@@ -113,6 +122,8 @@ plus the short `/tmp` prefix hides it).
 | Makefile (`make build/test/vet/release/release-all/interop`), systemd units (`deploy/*.service`: hardening, CAP_NET_BIND_SERVICE, StateDirectory, Type=notify + WatchdogSec=30), examples directory (6 copy-paste walkthroughs), README rewrite | done |
 | README decision guidance (native SNMPv3, WireGuard/IPsec, and `snmpfwd` alternatives; snmp-shield's DTLS/TSM and appliance-operations fit) | done |
 | Goroutine-leak regression test (`internal/tunnel/leak_test.go`: 30 connect/exchange/close cycles over real PSK-DTLS loopback, goroutine count must return to baseline; server side keyed on `Session.Done()` + production `SetTuning` so there is no test-end accounting noise) | done (tested, -race -count 8 stable: before=after=5) |
+| Cross-vendor conformance matrix (`internal/conformance`: peer contract `peer.go`, subprocess adapters `peers_exec.go`, in-process gosnmp peer, `harness_test.go` builds the CLI in TestMain; scenarios: usm-gateway requests/rejections/engine persistence/notification ingress/filter/access policy, two-proxy translate chain incl. device-side write policy, usm-manager-gateway against REAL snmpd incl. v3 traps and v3 informs) + `internal/testkit` (fake device, PKI, trap sinks, V3 sink, frame-sink pipe, ports) + `test/peers/` adapters + `scripts/peers-setup.sh` + `make peers`/`make conformance` | done (tested: all four stacks green, `go test -race ./...` green; four real bugs found and fixed — see §7 and CONFORMANCE.md) |
+| Fuzz coverage for the new decoders (`msg.ParseVarbinds`, `access.WritePolicy.Allowed`, `config.Load`, `cache.LoadEngine`, `notifyfilter.Allowed/New`) | done (tested, each target fuzzed 15s green; corpus runs in every `go test`) |
 | SBOM + automated vuln-DB comparison (`make sbom` → syft SPDX+CycloneDX into `dist/`; `make vulnscan` → `grype db update` + `grype --fail-on high` vs NVD/GHSA/OSV; `scripts/sbom.sh --sbom-only`) + x/crypto v0.48.0 → v0.58.0 upgrade clearing all Critical/High advisories (go directive 1.24 → 1.26, mandatory for x/crypto ≥ 0.56) | done (tested, `make vulnscan` rc=0 — only residual GO-2026-5932 is Unknown severity/unfixed deprecated-openpgp advisory, below the gate; direct symbol-precise binary scan: 0 findings) |
 | SNMP metrics interface (`internal/snmpmetrics`: read-only SNMPv2c health MIB GET/GETNEXT on `metrics.listen_addr` + v2c tunnel-lifecycle traps to `metrics.trap_sink_addr`; `Session.SetEventFunc` events, all roles; Prometheus stays alongside) | done (tested, unit tests + e2e: two-proxy chain polling + tunnel-down trap pinned) |
 | Front-leg access policy (`internal/access` + `internal/oidmatch`): client allow-list, per-client rate limit, read-only and OID-scoped write policy on the 6 client-facing request ingress sites (usm gateway/manager, tsm gateway/manager, passthrough manager, usm manager-gateway) **plus the write policy at both device-facing agent ingress sites** (usm-translate + tsm tunnel requests, answered `notWritable` back through the tunnel); 3 new Prometheus counters; `access.*` YAML + `--allow`/`--rate-per-sec`/`--read-only`/`--write-default`/`--write-allow`/`--write-deny` flags; SIGHUP access-policy reload (`internal/proxy/reload.go`) | done (tested: access unit tests pin deny-overrides/allow-must-cover/arc boundaries/undecodable-SET/fail-closed cap; wire e2e `internal/usm/access_e2e_test.go` (gosnmp: read-only→notWritable with 0 SETs at the agent, allow-list silence + live holder swap, subtree allow/deny incl. straddling SET, rate-limit burst) + `internal/tsm/access_test.go` (TSM read-only → notWritable, msgID/req-id echoed, agent untouched) + `internal/proxy/proxy_test.go TestRunAgentReadOnlyE2E` (full usm-translate chain, agent-side policy, device sees 0 SETs) + `internal/tsm/tsm_e2e_test.go TestTSMEndToEndAgentReadOnly`; reload tests; full race suite + smoke + interop green) |
@@ -204,8 +215,12 @@ usm-gateway — **IMPLEMENTED (see below)**:
   `gateway.trap_sink_addr` (legacy manager's clear trap receiver) +
   `gateway.trap_sink_community`. `security.users` = the AGENT's v3
   credentials (one user; `--user` in flags mode names it, default
-  'proxy'). NO `security.engine_store` — the AGENT is the authoritative
-  engine; the proxy follows it.
+  'proxy'). For the REQUEST leg the AGENT is the authoritative engine and
+  the proxy follows it; the proxy's own engine clock is used only on the
+  TRAP leg, where a confirmed notification (inform) makes the RECEIVER
+  authoritative (RFC 3414 §2.2). `security.engine_store` is optional here:
+  set it for a stable inform-leg engineID/boots across restarts, otherwise
+  an in-memory engine is generated per process.
 - `internal/usm/manager_gateway.go` — `ManagerGateway`: clear v1/v2c at
   `listen_addr` → SplitV1V2c + ParsePDU → RFC 3414 discovery against the
   agent (Reportable NoAuthNoPriv empty GET, one-shot ephemeral socket,
@@ -339,6 +354,11 @@ internal/discovery/       engineID discovery per RFC 3414
 internal/securitylevel/   securityLevel constants/validation
 internal/observ/          zap logging + Prometheus metrics
 internal/snmpmetrics/     SNMP health MIB agent + tunnel event traps
+internal/testkit/         shared test scaffolding: fake v2c device, PKI, trap sinks,
+                          USM V3 sink, frame-sink pipe, free-port helpers
+internal/conformance/     cross-vendor matrix: peer contract, subprocess + gosnmp
+                          peers, scenario suites (drives the built CLI)
+test/peers/               peer_<vendor> adapters (net-snmp, pysnmp, node) + contract
 ```
 
 (Directories with code: config, observ, tunnel, msg, passthrough, proxy,
@@ -353,7 +373,9 @@ throwaway test PKI into gitignored certs/, scripts/tsm-sink raw-DTLS
 test receiver for interop, scripts/interop-manager-gateway.sh real-snmpd
 manager-gateway interop, scripts/sbom.sh SBOM+vulnscan entry point,
 deploy/ systemd unit files, examples/
-deployment walkthroughs, Makefile (build/test/fmt-check/vet/release/release-all/interop/sbom/vulnscan).)
+deployment walkthroughs, Makefile (build/test/fmt-check/vet/release/
+release-all/peers/conformance/interop/sbom/vulnscan),
+scripts/peers-setup.sh, CONFORMANCE.md, TESTING.md.)
 
 ## 5. Build / Test
 
@@ -372,6 +394,12 @@ commands (`release` = stripped static binary, `CGO_ENABLED=0
 cross-builds stripped static binaries for all appliance platforms into
 `dist/`: `linux-amd64`, `linux-arm64`, `linux-armv7` (pure Go + CGO
 disabled = cross-compiling is exact; verified: all three build).
+`make peers` provisions the managed third-party stacks for the conformance
+matrix (Python venv + npm; exit 77 when neither can be installed), and
+`make conformance` runs that matrix alone (~40s, builds the CLI once; peers
+without a toolchain skip, gosnmp always runs). The full `make test` includes
+the matrix. Fuzz targets: `go test ./internal/msg -run '^$' -fuzz 'Fuzz'
+-fuzztime 30s` (same shape in access/config/cache/notifyfilter).
 `make interop` runs the net-snmp two-proxy interop suite (exit 77 =
 skip when net-snmp is missing); the other interop scripts
 (gateway/tsm/manager-gateway) run standalone via
@@ -1070,6 +1098,80 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
     rejected by RequireAndVerifyClientCert sinks with "x509:
     certificate specifies an incompatible key usage" — the gateway's
     trap dialer needs a clientAuth cert if the sink checks EKU.
+
+
+### Cross-vendor conformance matrix (`internal/conformance`, `internal/testkit`, `test/peers`)
+
+The independence layer. Every other test in this repository is written
+against our own encoders, so it can prove self-consistency and nothing more.
+This suite drives the **built CLI** with four unrelated stacks and asserts on
+wire behaviour. Findings live in `CONFORMANCE.md`, layering in `TESTING.md`.
+
+- **Peers**: gosnmp (in-process, always available), net-snmp CLI (Python
+  adapter), pysnmp 7 (Python venv), node `net-snmp` (JS, npm). `make peers`
+  provisions the managed ones; `scripts/peers-setup.sh` exits 77 when it can
+  install nothing. `AllPeers()` includes unavailable peers so `-v` shows the
+  whole matrix; a missing toolchain skips with a reason.
+- **Contract**: `peer_<vendor> <verb> --target HOST:PORT [flags]` prints one
+  JSON object; assertions use `ok` + `error_kind`, never vendor prose.
+  `KindUnsupported` → scenario skips (vendor cannot express it);
+  `KindUsage` → the scenario is buggy and fails loudly. Adapters may
+  normalize presentation only (net-snmp `STRING`, pysnmp `DisplayString`,
+  gosnmp `OctetString` → all the base type).
+- **Fixtures**: `harness_test.go` builds the binary once in `TestMain`;
+  scenarios start real proxy processes on ephemeral ports against
+  `testkit.NewAgent` (honest GET/GETNEXT/GETBULK, real exceptions),
+  `testkit.NewTrapSink`/`NewAnsweringTrapSink`, `testkit.NewV3Sink`.
+  `TestManagerGatewayRealAgent` additionally starts the system `snmpd` with a
+  throwaway v3 user and persistent dir. Apple net-snmp 5.6.2.1 gotchas:
+  `rouser`/`rwuser` are unknown tokens, and `createUser` only takes effect
+  when `SNMP_PERSISTENT_DIR` points at a writable directory (otherwise the
+  user silently never exists); the created user can read.
+- **What it found** (all fixed, all pinned):
+  1. `flagsConfig` returned before `accessPolicy(...)` for the gateway role,
+     so `--read-only`/`--allow`/`--rate-per-sec`/`--write-*` were silently
+     dropped in all three gateway modes
+     (`TestFlagsConfigGatewayAccessPolicy`).
+  2. Two-proxy inform confirmations left from the request listener instead of
+     the trap listener; connected-socket clients (gosnmp, pysnmp) discard
+     them, net-snmp tolerates it
+     (`TestChainInformConfirmationSourceSocket`).
+  3. Manager-gateway inform confirmations minted a fresh msgID and set the
+     Reportable flag; v3 Responses must echo the request's msgID (the
+     transaction id) and clear Reportable. net-snmp/pysnmp/node dropped the
+     answer; gosnmp does not validate the v3 header msgID, so only vendors
+     could expose it (`buildV3Reply`/`buildV3Message`,
+     `TestManagerGatewayCompliantInform`).
+  4. Manager-gateway had no authoritative engine on the trap leg, so a
+     compliant sender's discovery probe got no Report and the inform was
+     rejected as "unknown user" — informs from every RFC-compliant stack
+     failed while traps worked. The trap leg now owns a
+     `cache.EngineClock` (persistent when `security.engine_store` is set),
+     answers probes with an `usmStatsUnknownEngineIDs` Report, checks the
+     inform's boots/time against it, and answers from the announced engine.
+- **RFC 3414 notification authority** (the rule behind #4): traps are
+  sender-authoritative (verify with keys localized to the wire engineID, no
+  discovery, accept first-seen engine state); informs are
+  receiver-authoritative (the sender discovers OUR engine first and signs
+  with keys localized to it). The manager-gateway supports both: a message
+  addressed to our engine is handled authoritatively, anything else is
+  verified sender-authoritatively (gosnmp sends informs that way).
+- **V3 response rules** (vendor-checked, easy to get wrong):
+  - msgID = the request's msgID (it is the transaction identifier).
+  - No Reportable flag: a response is unconfirmed class (RFC 3412 §6.4).
+  - USM engineID/boots/time = the authoritative engine; for informs that is
+    US, for sender-authoritative fallbacks it is the sender's.
+  - scoped contextEngineID = the REQUEST's contextEngineID (a notification
+    originator puts its own engine there). net-snmp verifies the echo AFTER
+    the digest check and discards a mismatch silently — indistinguishable
+    from a timeout.
+  - A confirmation must leave from the socket that received the inform and go
+    to the datagram's source address: connected UDP senders (gosnmp,
+    pysnmp) have the kernel drop anything from another source port.
+- **Deliberate gap**: no third-party TSM/DTLS peer on this host (Apple
+  net-snmp has no TLS; Docker daemon unavailable). TSM stays covered by
+  `internal/tsm` + `scripts/interop-gateway-tsm.sh` where a TLS-enabled
+  net-snmp exists.
 
 ### pion/dtls v3 quirks (learned the hard way, do not regress)
 

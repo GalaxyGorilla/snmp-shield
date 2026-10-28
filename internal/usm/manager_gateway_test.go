@@ -430,8 +430,11 @@ func TestManagerGatewayAgentInform(t *testing.T) {
 	out := buildV3Notification(t, agent, 600, msg.PDUInformRequest, 777, notifVarbinds(t))
 
 	// The inform is sent toward the trap listener from an ephemeral
-	// socket; the gateway answers it toward AgentAddr, where the fake
-	// agent reports it on acks.
+	// socket. The confirmation must come back to THAT socket: a sender
+	// that uses a connected UDP socket (gosnmp, pysnmp, plenty of agents)
+	// has the kernel discard an answer from any other source address, so
+	// replying toward the configured AgentAddr only works when the sender
+	// happens to be the agent and happens to use its service port.
 	src, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -441,28 +444,45 @@ func TestManagerGatewayAgentInform(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	select {
-	case ev := <-agent.acks:
-		if !msg.IsGetResponse(ev.pduType) {
-			t.Fatalf("agent ack PDU type = 0x%x, want GetResponse", ev.pduType)
-		}
-		if ev.reqID != 777 {
-			t.Fatalf("agent ack req-id = %d, want 777 (echoed)", ev.reqID)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("agent never saw the inform ack")
+	_ = src.SetReadDeadline(time.Now().Add(5 * time.Second))
+	buf := make([]byte, 65536)
+	n, _, err := src.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("inform sender never saw its ack: %v", err)
+	}
+	m, err := msg.ParseV3(buf[:n])
+	if err != nil {
+		t.Fatalf("ack is not a v3 message: %v", err)
+	}
+	keys, err := usm.NewProfilesFromSecurity(securityForAgentUser(), agent.eng)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, plain, err := usm.UnwrapV3(keys, m, buf[:n])
+	if err != nil {
+		t.Fatalf("ack rejected by the sender's own keys: %v", err)
+	}
+	pduType, fields, err := msg.ParsePDU(plain)
+	if err != nil {
+		t.Fatalf("ack PDU: %v", err)
+	}
+	if !msg.IsGetResponse(pduType) {
+		t.Fatalf("ack PDU type = 0x%x, want GetResponse", pduType)
+	}
+	if fields.ReqID != 777 {
+		t.Fatalf("ack req-id = %d, want 777 (echoed)", fields.ReqID)
 	}
 
 	// And the payload is relayed as a clear v2 trap to the trap sink.
 	sink.SetReadDeadline(time.Now().Add(5 * time.Second))
-	buf := make([]byte, 65536)
-	n, _, err := sink.ReadFrom(buf)
+	sinkBuf := make([]byte, 65536)
+	sn, _, err := sink.ReadFrom(sinkBuf)
 	if err != nil {
 		t.Fatalf("trap sink read: %v", err)
 	}
-	pduType, _, err := msg.ParsePDU(mustPDUTLV(t, buf[:n]))
-	if err != nil || pduType != msg.PDUSNMPv2Trap {
-		t.Fatalf("relay PDU type = 0x%x (err %v), want v2 trap", pduType, err)
+	relayType, _, err := msg.ParsePDU(mustPDUTLV(t, sinkBuf[:sn]))
+	if err != nil || relayType != msg.PDUSNMPv2Trap {
+		t.Fatalf("relay PDU type = 0x%x (err %v), want v2 trap", relayType, err)
 	}
 }
 
@@ -527,4 +547,173 @@ func mustAddr(t *testing.T, addr string) net.Addr {
 		t.Fatal(err)
 	}
 	return a
+}
+
+// TestManagerGatewayCompliantInform pins the RFC 3414 rule that the
+// RECEIVER of a confirmed notification is the authoritative engine.
+//
+// A compliant sender (net-snmp, pysnmp, node) first probes for our engine,
+// then builds the inform with OUR engineID and keys localized to it, and
+// keeps its own contextEngineID. Our answer has to be a response in every
+// detail: the probe's msgID echoed back, no Reportable flag, the request's
+// contextEngineID, and the same engine state we announced. gosnmp skips
+// the discovery handshake and accepts a sloppy answer, so only this test
+// (and the vendor matrix) catches the difference.
+func TestManagerGatewayCompliantInform(t *testing.T) {
+	const front = 12630
+	trapListen := freeUDPPort(t)
+
+	agent := startFakeV3Agent(t)
+	defer agent.conn.Close()
+
+	sink, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+
+	_, stop := buildManagerGateway(t, front, agent.addr, trapListen, sink.LocalAddr().String())
+	defer stop()
+
+	src, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+	trapAddr := mustAddr(t, trapListen)
+
+	// 1. Discovery probe, exactly the shape a vendor sender emits:
+	// Reportable|NoAuthNoPriv, empty user/engine, empty GET.
+	probePDU := msg.BuildPDU(msg.PDUGetRequest, 1234, 0, 0, nil)
+	probe, err := msg.BuildV3(msg.V3Header{
+		MsgID:      4242,
+		MsgMaxSize: msg.DefaultMsgMaxSize,
+		MsgFlags:   msg.MsgFlagReportable,
+		SecModel:   msg.SecurityModelUSM,
+	}, msg.USMParams{}, msg.BuildScoped([]byte{0x80, 0, 0x1f, 0x88, 0x80, 9}, []byte{}, probePDU), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.WriteTo(probe, trapAddr); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, 65536)
+	_ = src.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, _, err := src.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("no discovery Report: %v", err)
+	}
+	report, err := msg.ParseV3(buf[:n])
+	if err != nil {
+		t.Fatalf("Report is not v3: %v", err)
+	}
+	if report.Header.MsgID != 4242 {
+		t.Fatalf("Report msgID = %d, want the probe's 4242", report.Header.MsgID)
+	}
+	if report.Header.MsgFlags&(msg.MsgFlagAuth|msg.MsgFlagPriv) != 0 {
+		t.Fatalf("Report flags = %#x, want NoAuthNoPriv", report.Header.MsgFlags)
+	}
+	if len(report.USM.EngineID) == 0 {
+		t.Fatal("Report carries no authoritative engine ID")
+	}
+	if pduType, _, perr := msg.ParsePDU(report.PDU); perr != nil || pduType != msg.PDUReport {
+		t.Fatalf("Report PDU type = 0x%02x (err %v), want a Report", pduType, perr)
+	}
+
+	engineID := report.USM.EngineID
+	boots, etime := report.USM.Boots, report.USM.Time
+
+	// 2. The inform: addressed to the discovered engine, keys localized
+	// to it, but with the originator's own contextEngineID.
+	authKey, err := usm.PasswordToKey(usm.AuthSHA, "authpass", string(engineID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	privKey, err := usm.LocalizedPrivKey(usm.AuthSHA, usm.PrivAES, "privpass", string(engineID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	originatorID := []byte{0x80, 0, 0x1f, 0x88, 0x80, 7, 7, 7, 7, 7, 7}
+	privParams := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	authParams := make([]byte, usm.AuthSHA.MacLength())
+
+	informPDU := msg.BuildPDU(msg.PDUInformRequest, 777, 0, 0, notifVarbinds(t))
+	scoped := msg.BuildScoped(originatorID, []byte{}, informPDU)
+	inform, err := msg.BuildV3(msg.V3Header{
+		MsgID:      5150,
+		MsgMaxSize: msg.DefaultMsgMaxSize,
+		MsgFlags:   byte(msg.MsgFlagReportable | msg.MsgFlagAuth | msg.MsgFlagPriv),
+		SecModel:   msg.SecurityModelUSM,
+	}, msg.USMParams{
+		EngineID:   engineID,
+		Boots:      boots,
+		Time:       etime,
+		UserName:   "proxy",
+		AuthParams: authParams,
+		PrivParams: privParams,
+	}, scoped, func(plain []byte) ([]byte, error) {
+		return usm.EncryptScoped(usm.PrivAES, privKey, boots, etime, privParams, plain)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := usm.SignV3(inform, usm.AuthSHA, authKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := src.WriteTo(inform, trapAddr); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. The confirmation, judged the way a vendor judges it.
+	_ = src.SetReadDeadline(time.Now().Add(5 * time.Second))
+	n, _, err = src.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("inform was not confirmed: %v", err)
+	}
+	ack, err := msg.ParseV3(buf[:n])
+	if err != nil {
+		t.Fatalf("confirmation is not v3: %v", err)
+	}
+	if ack.Header.MsgID != 5150 {
+		t.Fatalf("confirmation msgID = %d, want the inform's 5150 (it is the transaction id)", ack.Header.MsgID)
+	}
+	if ack.Header.MsgFlags&msg.MsgFlagReportable != 0 {
+		t.Fatalf("confirmation has the Reportable flag set (flags %#x): a response is unconfirmed class", ack.Header.MsgFlags)
+	}
+	if ack.Header.MsgFlags&(msg.MsgFlagAuth|msg.MsgFlagPriv) != msg.MsgFlagAuth|msg.MsgFlagPriv {
+		t.Fatalf("confirmation flags = %#x, want authPriv", ack.Header.MsgFlags)
+	}
+	if string(ack.USM.EngineID) != string(engineID) {
+		t.Fatalf("confirmation engine = %x, want the discovered %x", ack.USM.EngineID, engineID)
+	}
+	keys, err := usm.NewProfilesFromSecurity(securityForAgentUser(), engineID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, plain, err := usm.UnwrapV3(keys, ack, buf[:n])
+	if err != nil {
+		t.Fatalf("confirmation does not verify/decrypt with the announced keys: %v", err)
+	}
+	if string(ack.ContextEngineID) != string(originatorID) {
+		t.Fatalf("confirmation contextEngineID = %x, want the request's %x", ack.ContextEngineID, originatorID)
+	}
+	pduType, fields, err := msg.ParsePDU(plain)
+	if err != nil {
+		t.Fatalf("confirmation PDU: %v", err)
+	}
+	if !msg.IsGetResponse(pduType) || fields.ReqID != 777 {
+		t.Fatalf("confirmation PDU type/req-id = 0x%02x/%d, want GetResponse/777", pduType, fields.ReqID)
+	}
+
+	// 4. And the payload reached the legacy manager as a clear v2 trap.
+	sink.SetReadDeadline(time.Now().Add(5 * time.Second))
+	sinkBuf := make([]byte, 65536)
+	sn, _, err := sink.ReadFrom(sinkBuf)
+	if err != nil {
+		t.Fatalf("trap sink read: %v", err)
+	}
+	if typ, _, perr := msg.ParsePDU(mustPDUTLV(t, sinkBuf[:sn])); perr != nil || typ != msg.PDUSNMPv2Trap {
+		t.Fatalf("relay PDU type = 0x%02x (err %v), want v2 trap", typ, perr)
+	}
 }

@@ -410,10 +410,26 @@ func (m *ManagerTranslator) handleTunnelInformResp(f *tunnel.Frame) {
 		return
 	}
 	if udp, ok2 := ip.addr.(*net.UDPAddr); ok2 {
-		if _, err := m.conn.WriteTo(out, udp); err != nil {
+		// Answer FROM the socket that received the inform. A client that
+		// uses a connected UDP socket (gosnmp, pysnmp) only accepts
+		// datagrams from the address it connected to — the trap port — so
+		// a confirmation sent from the request listener is discarded by
+		// the kernel and looks exactly like a timeout. net-snmp tolerates
+		// the mismatch, which is why this only shows up with some vendors.
+		if _, err := m.notifyConn().WriteTo(out, udp); err != nil {
 			m.log.Debug("usm manager: inform response delivery failed", zap.Error(err))
 		}
 	}
+}
+
+// notifyConn is the socket a notification confirmation must leave from: the
+// trap listener that received the inform, falling back to the request
+// listener when no trap listener is configured.
+func (m *ManagerTranslator) notifyConn() net.PacketConn {
+	if m.trapConn != nil {
+		return m.trapConn
+	}
+	return m.conn
 }
 
 // handleReport processes a Report PDU from the authoritative engine: the

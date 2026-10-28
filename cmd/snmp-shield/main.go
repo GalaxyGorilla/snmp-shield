@@ -474,6 +474,17 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 			cfg.Notifications = config.Notifications{Filter: filt}
 		}
 		cfg.Metrics = snmpMetrics(o)
+		// Front-leg access policy (client allow-list, rate limit, write
+		// policy). The gateway modes are the ones that face third-party
+		// clients, so silently dropping these flags here would leave the
+		// front door open while the operator believes it is locked.
+		acc, aerr := accessPolicy(o)
+		if aerr != nil {
+			return nil, aerr
+		}
+		if acc != nil {
+			cfg.Access = *acc
+		}
 		// Engine state: flags mode is the plug-and-play path, so an
 		// unnamed store means memory-only — explicitly (YAML configs must
 		// name a persistent store; see config.Validate).

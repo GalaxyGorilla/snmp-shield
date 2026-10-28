@@ -377,14 +377,20 @@ make test        # gofmt gate + go test ./... -race -timeout 180s
 make vet         # go vet ./...
 make release     # stripped static binary for deployment
 make release-all # cross-builds: linux-amd64, linux-arm64, linux-armv7 into dist/
+make peers       # provision the third-party stacks for the conformance matrix
+make conformance # cross-vendor matrix: net-snmp, pysnmp, node net-snmp, gosnmp
 make interop     # net-snmp CLI interop test (exit 77 = skip when missing)
 make sbom        # SPDX + CycloneDX SBOMs for the release binary (syft) into dist/
 make vulnscan    # match the SBOM against NVD/GHSA/OSV; fails on HIGH+ (grype)
 ```
 
 Every commit is expected to pass build + vet + the race suite (run
-manually; the project is CI-free). `make vulnscan` also runs
-`scripts/sbom.sh`-style supply-chain checks standalone; both targets
+manually; the project is CI-free). `make conformance` additionally drives
+the built binary with independent SNMP implementations, so a bug in our own
+encoder cannot hide behind a matching decoder; see
+[`CONFORMANCE.md`](CONFORMANCE.md) and [`TESTING.md`](TESTING.md).
+`make vulnscan` also runs `scripts/sbom.sh`-style supply-chain checks
+standalone; both targets
 exit 77 (skip) when syft/grype are not installed.
 
 ## Documentation

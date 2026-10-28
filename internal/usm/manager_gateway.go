@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/GalaxyGorilla/snmp-shield/internal/access"
+	"github.com/GalaxyGorilla/snmp-shield/internal/cache"
 	"github.com/GalaxyGorilla/snmp-shield/internal/config"
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/notifyfilter"
@@ -56,6 +57,14 @@ type ManagerGateway struct {
 	// remote agent engine state (discovered, refreshed)
 	engineMu sync.Mutex
 	remote   *remoteEngine
+
+	// clock is the proxy's OWN USM engine. It is not used toward the agent
+	// (the agent is authoritative there), but it IS used on the trap leg:
+	// for a confirmed notification (an inform) the RECEIVER is the
+	// authoritative engine (RFC 3414 §2.2), so a compliant sender performs
+	// discovery against this listener and then signs with keys localized to
+	// this engine ID. Traps stay sender-authoritative.
+	clock *cache.EngineClock
 
 	msgID atomic.Uint32
 	reqID atomic.Uint32
@@ -89,6 +98,18 @@ func NewManagerGateway(cfg config.GatewayRole, sec config.Security, log *zap.Log
 	if len(users) == 0 {
 		return nil, errors.New("usm manager-gateway: no users configured (agent-side v3 credentials)")
 	}
+	// A configured engine_store gives the inform leg a stable engine ID and
+	// anti-rollback boots across restarts; without one, an in-memory engine
+	// is generated per process (senders re-discover on every inform, so a
+	// fresh ID is correct, only noisier).
+	store, err := cache.Open(sec.EngineStore)
+	if err != nil {
+		return nil, fmt.Errorf("usm manager-gateway: engine store: %w", err)
+	}
+	clock, err := cache.NewEngineClock(store, nil, nil)
+	if err != nil {
+		return nil, fmt.Errorf("usm manager-gateway: engine clock: %w", err)
+	}
 	return &ManagerGateway{
 		translatorBase: translatorBase{
 			keys:   newKeyCache(users),
@@ -99,6 +120,7 @@ func NewManagerGateway(cfg config.GatewayRole, sec config.Security, log *zap.Log
 		log:   log,
 		met:   met,
 		filtr: notifyfilter.From(filt...),
+		clock: clock,
 		pend:  make(map[int32]*mgwPending),
 		stop:  make(chan struct{}),
 	}, nil
@@ -485,25 +507,43 @@ func (g *ManagerGateway) ensureEngine() (*remoteEngine, error) {
 // keys localized to the agent's engineID. Returns the marshalled message
 // and the v3 msgID used (for response matching).
 func (g *ManagerGateway) buildV3Request(eng *remoteEngine, scoped []byte) ([]byte, int32, error) {
-	keys, err := g.keys.profilesFor(eng.id)
+	mid := int32(g.msgID.Add(1))
+	// capture the msgID BEFORE building the header: returning the
+	// counter's latest value instead would hand back another request's
+	// msgID under concurrency and mis-correlate the response.
+	out, err := g.buildV3Message(eng, mid, msg.MsgFlagAuth|msg.MsgFlagPriv|msg.MsgFlagReportable, scoped)
 	if err != nil {
 		return nil, 0, err
 	}
+	return out, mid, nil
+}
+
+// buildV3Reply builds a RESPONSE to an incoming v3 message. Two things
+// differ from a request and both are checked by every vendor stack except
+// gosnmp: the msgID must be the request's msgID (it is the transaction
+// identifier), and the Reportable flag must be clear (responses are
+// unconfirmed-class PDUs, RFC 3412 §6.4). A fresh msgID makes net-snmp,
+// pysnmp and node silently discard the answer and time out.
+func (g *ManagerGateway) buildV3Reply(eng *remoteEngine, msgID int32, scoped []byte) ([]byte, error) {
+	return g.buildV3Message(eng, msgID, msg.MsgFlagAuth|msg.MsgFlagPriv, scoped)
+}
+
+func (g *ManagerGateway) buildV3Message(eng *remoteEngine, mid int32, msgFlags byte, scoped []byte) ([]byte, error) {
+	keys, err := g.keys.profilesFor(eng.id)
+	if err != nil {
+		return nil, err
+	}
 	users := profilesFromConfig(g.sec)
 	if len(users) == 0 {
-		return nil, 0, errors.New("usm manager-gateway: no users configured")
+		return nil, errors.New("usm manager-gateway: no users configured")
 	}
 	u := users[0]
 	c, ok := keys.Lookup(u.Name)
 	if !ok {
-		return nil, 0, fmt.Errorf("usm manager-gateway: user %s not found", u.Name)
+		return nil, fmt.Errorf("usm manager-gateway: user %s not found", u.Name)
 	}
 
-	// capture the msgID BEFORE building the header: returning the
-	// counter's latest value instead would hand back another request's
-	// msgID under concurrency and mis-correlate the response.
-	mid := int32(g.msgID.Add(1))
-	flags := byte(msg.MsgFlagAuth | msg.MsgFlagPriv | msg.MsgFlagReportable)
+	flags := byte(msgFlags)
 	boots := eng.boots
 	etime := eng.time
 	privParams := g.salt.NextAES()
@@ -525,12 +565,12 @@ func (g *ManagerGateway) buildV3Request(eng *remoteEngine, scoped []byte) ([]byt
 		return encryptScoped(c.p.PrivProtocol, c.privKey, boots, etime, privParams, plain)
 	})
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	if err := signV3(out, c.p.AuthProtocol, c.authKey); err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-	return out, mid, nil
+	return out, nil
 }
 
 // readTraps reads v3 notifications from the v3 agent at the trap
@@ -541,7 +581,7 @@ func (g *ManagerGateway) buildV3Request(eng *remoteEngine, scoped []byte) ([]byt
 func (g *ManagerGateway) readTraps() {
 	buf := make([]byte, 65536)
 	for {
-		n, _, err := g.trapConn.ReadFrom(buf)
+		n, from, err := g.trapConn.ReadFrom(buf)
 		if err != nil {
 			select {
 			case <-g.stop:
@@ -554,13 +594,19 @@ func (g *ManagerGateway) readTraps() {
 			continue
 		}
 		dg := append([]byte{}, buf[:n]...)
-		g.handleAgentTrap(dg)
+		g.handleAgentTrap(dg, from)
 	}
 }
 
 // handleAgentTrap verifies a v3 notification from the agent and relays
 // it as a clear v1/v2c notification toward the manager's trap receiver.
-func (g *ManagerGateway) handleAgentTrap(dg []byte) {
+//
+// from is the datagram's source address. It is where an inform
+// confirmation must go: the sender is authoritative for its own engine and
+// may be any agent (or any manager acting as one), not necessarily the
+// configured AgentAddr, and vendor senders use an ephemeral source port. A
+// confirmation sent to AgentAddr never reaches a connected inform sender.
+func (g *ManagerGateway) handleAgentTrap(dg []byte, from net.Addr) {
 	info, err := msg.Peek(dg)
 	if err != nil || info.Version != msg.Version3 {
 		return
@@ -570,6 +616,24 @@ func (g *ManagerGateway) handleAgentTrap(dg []byte) {
 		g.log.Debug("usm manager-gateway: undecodable trap", zap.Error(err))
 		return
 	}
+
+	// RFC 3414 discovery probe: Reportable|NoAuthNoPriv with an empty user.
+	// A sender that is about to send an INFORM performs this handshake
+	// against the receiver, because the receiver is the authoritative
+	// engine for confirmed notifications. Answering it is what makes
+	// standards-compliant informs work at all; a trap-only listener never
+	// sees one, which is why gosnmp-only testing missed this.
+	if m2.Header.MsgFlags&msg.MsgFlagReportable != 0 && m2.USM.UserName == "" {
+		g.log.Debug("usm manager-gateway: discovery probe", zap.Int32("msgID", int32(m2.Header.MsgID)))
+		g.sendDiscoveryReport(int32(m2.Header.MsgID), from)
+		return
+	}
+
+	// A notification addressed to THIS engine was sent by a peer that
+	// discovered us and treats us as authoritative (a compliant inform).
+	// Everything else is sender-authoritative: traps always, and informs
+	// from stacks that skip the receiver-side handshake.
+	authoritative := string(m2.USM.EngineID) == string(g.clock.EngineID())
 	keys, kerr := g.keys.profilesFor(m2.USM.EngineID)
 	if kerr != nil {
 		g.log.Debug("usm manager-gateway: no keys for trap engine", zap.Error(kerr))
@@ -588,22 +652,51 @@ func (g *ManagerGateway) handleAgentTrap(dg []byte) {
 	}
 	varbs := fields.Varbinds
 	if msg.IsInform(pduType) {
-		// answer the agent directly (the confirmation terminates here):
-		// a v3 GetResponse echoing the inform's msgID/req-id/engine.
-		resp := msg.BuildPDU(msg.PDUGetResponse, fields.ReqID, 0, 0, fields.Varbinds)
-		scoped := msg.BuildScoped(m2.USM.EngineID, []byte{}, resp)
-		out, _, oerr := g.buildV3Request(&remoteEngine{
+		if authoritative {
+			// The sender's boots/time describe OUR engine state. Verify
+			// them against our clock (anti-replay): a stale inform is
+			// dropped like any other out-of-window message.
+			if terr := g.clock.AcceptInbound(m2.USM.Boots, m2.USM.Time); terr != nil {
+				g.log.Warn("usm manager-gateway: inform outside the time window", zap.Error(terr))
+				return
+			}
+		}
+		// answer the sender directly (the confirmation terminates here):
+		// a GetResponse echoing the inform's msgID/req-id, signed and
+		// encrypted with the engine the sender expects.
+		eng := &remoteEngine{
 			id:           m2.USM.EngineID,
 			boots:        m2.USM.Boots,
 			time:         m2.USM.Time,
 			discoveredAt: time.Now(),
-		}, scoped)
+		}
+		if authoritative {
+			eng = &remoteEngine{
+				id:           g.clock.EngineID(),
+				boots:        g.clock.Boots(),
+				time:         g.clock.Time(),
+				discoveredAt: time.Now(),
+			}
+		}
+		resp := msg.BuildPDU(msg.PDUGetResponse, fields.ReqID, 0, 0, fields.Varbinds)
+		// The response's contextEngineID must be the REQUEST's, not
+		// necessarily the security engine. A notification originator puts
+		// its own engine there (it is the context), and net-snmp verifies
+		// the echo after the digest check — a mismatch is discarded without
+		// an error, i.e. a timeout.
+		ctxEngine := m2.ContextEngineID
+		if len(ctxEngine) == 0 {
+			ctxEngine = eng.id
+		}
+		scoped := msg.BuildScoped(ctxEngine, []byte{}, resp)
+		out, oerr := g.buildV3Reply(eng, int32(m2.Header.MsgID), scoped)
 		if oerr != nil {
 			g.log.Warn("usm manager-gateway: inform response build failed", zap.Error(oerr))
-		} else if agent, aerr := net.ResolveUDPAddr("udp", g.cfg.AgentAddr); aerr == nil {
-			// reply to the sender: best-effort, from the trap listener
-			// socket toward the agent.
-			if _, werr := g.trapConn.WriteTo(out, agent); werr != nil {
+		} else if from != nil {
+			// Reply from the socket that received the inform (a connected
+			// sender discards a datagram from any other source port) to
+			// the address it came from.
+			if _, werr := g.trapConn.WriteTo(out, from); werr != nil {
 				g.log.Debug("usm manager-gateway: inform response failed", zap.Error(werr))
 			}
 		}
@@ -629,5 +722,31 @@ func (g *ManagerGateway) handleAgentTrap(dg []byte) {
 	}
 	if _, err := g.trapConn.WriteTo(out, sink); err != nil {
 		g.log.Debug("usm manager-gateway: trap sink delivery failed", zap.Error(err))
+	}
+}
+
+// sendDiscoveryReport answers an RFC 3414 discovery probe with this proxy's
+// own engine parameters, which is what a sender needs before it can build a
+// confirmed notification addressed to us. The Report is NoAuthNoPriv with
+// the probe's msgID and an usmStatsUnknownEngineIDs varbind.
+func (g *ManagerGateway) sendDiscoveryReport(msgID int32, from net.Addr) {
+	engineID := g.clock.EngineID()
+	pdu := msg.BuildPDU(msg.PDUReport, msgID, 0, 0, reportVarbinds(usmStatsOIDFor(ErrUnknownEngine)))
+	scoped := msg.BuildScoped(engineID, []byte{}, pdu)
+	out, err := msg.BuildV3(msg.V3Header{
+		MsgID:      msgID,
+		MsgMaxSize: msg.DefaultMsgMaxSize,
+		MsgFlags:   msg.MsgFlagReportable,
+		SecModel:   msg.SecurityModelUSM,
+	}, msg.USMParams{
+		EngineID: engineID,
+		Boots:    g.clock.Boots(),
+		Time:     g.clock.Time(),
+	}, scoped, nil)
+	if err != nil {
+		return
+	}
+	if from != nil {
+		_, _ = g.trapConn.WriteTo(out, from)
 	}
 }

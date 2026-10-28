@@ -174,8 +174,24 @@ type chainHarness struct {
 
 // startChain builds and starts both translators with the given users and an
 // optional notify filter (applied on the manager-side trap ingress).
+// chainOpts configures optional legs before Run starts. Fields are set
+// before the goroutines exist, so nothing here races the translators.
+type chainOpts struct {
+	filt *notifyfilter.Filter
+	// trapListen is the manager-side clear trap listener ("" = none).
+	trapListen string
+	// agentTrapSink is the agent-side clear sink for tunnel notifications.
+	agentTrapSink string
+}
+
 func startChain(t *testing.T, filt *notifyfilter.Filter) *chainHarness {
 	t.Helper()
+	return startChainOpts(t, chainOpts{filt: filt})
+}
+
+func startChainOpts(t *testing.T, o chainOpts) *chainHarness {
+	t.Helper()
+	filt := o.filt
 
 	store, err := cache.Open("")
 	if err != nil {
@@ -212,7 +228,7 @@ func startChain(t *testing.T, filt *notifyfilter.Filter) *chainHarness {
 
 	// both translators share the same engine clock: the agent side is the
 	// authoritative engine, the manager side discovers it via reports.
-	mcfg := config.ManagerRole{ListenAddr: listenPort}
+	mcfg := config.ManagerRole{ListenAddr: listenPort, TrapListenAddr: o.trapListen}
 	sec := config.Security{
 		Users: []config.UserCfg{{
 			Name:           "proxy",
@@ -229,7 +245,10 @@ func startChain(t *testing.T, filt *notifyfilter.Filter) *chainHarness {
 		t.Fatal(err)
 	}
 	h.mgr = mgr
-	agt, err := NewAgentTranslator(config.AgentRole{AgentAddr: agent.conn.LocalAddr().String()}, users, clock, pb, zap.NewNop(), nil)
+	agt, err := NewAgentTranslator(config.AgentRole{
+		AgentAddr:    agent.conn.LocalAddr().String(),
+		TrapSinkAddr: o.agentTrapSink,
+	}, users, clock, pb, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,12 +312,11 @@ func (h *chainHarness) clearGet(t *testing.T, community, oidDotted string) ([]by
 }
 
 // startChainSink builds the chain with the agent-side translator's trap
-// sink pre-configured (read-safe: set before Run starts).
+// sink pre-configured. It goes through the constructor rather than poking
+// cfg after Run, so it cannot race the agent's dispatch loop.
 func startChainSink(t *testing.T, filt *notifyfilter.Filter, trapSink string) *chainHarness {
 	t.Helper()
-	h := startChain(t, filt)
-	h.agt.cfg.TrapSinkAddr = trapSink
-	return h
+	return startChainOpts(t, chainOpts{filt: filt, agentTrapSink: trapSink})
 }
 
 // TestChainDiscoveryAndGET pins the full request path: clear v2c GET from a
@@ -837,5 +855,76 @@ func TestChainInformRoundTrip(t *testing.T) {
 	}
 	if fields.ReqID != 777 {
 		t.Fatalf("inform response req-id %d, want 777 (device's req-id echoed)", fields.ReqID)
+	}
+}
+
+// TestChainInformConfirmationSourceSocket pins WHERE the clear inform
+// confirmation leaves the manager proxy. It must come from the trap listener
+// that received the inform, not from the request listener.
+//
+// Why a connected socket: gosnmp and pysnmp send informs over a connected
+// UDP socket, and the kernel then drops datagrams from any other source
+// address. Replying from the request listener worked for net-snmp (which
+// uses recvfrom) and timed out for two independent stacks — a vendor matrix
+// finding, not a theoretical concern.
+func TestChainInformConfirmationSourceSocket(t *testing.T) {
+	// reserve a port for the manager's trap listener (Run binds it)
+	probe, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trapListen := probe.LocalAddr().String()
+	probe.Close()
+
+	h := startChainOpts(t, chainOpts{trapListen: trapListen})
+
+	// establish engine state: the inform path wraps at our own engine
+	for i := 0; i < 3; i++ {
+		if _, ok := h.clearGet(t, "public", "1.3.6.1.2.1.1.1.0"); ok {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// A CONNECTED device socket: the standard way a manager sends informs.
+	dev, err := net.Dial("udp", trapListen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dev.Close()
+
+	oidBytes, err := msg.EncodeOID("1.3.6.1.6.3.1.1.5.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vbs []byte
+	vbs = appendBinding(vbs, msg.OIDSysUpTime, 0x43, []byte{0, 0, 0, 1})
+	vbs = appendBinding(vbs, msg.OIDSnmpTrapOID, 0x06, oidBytes)
+	informDG, err := msg.BuildV1V2c(msg.Version2c, []byte("public"),
+		msg.BuildPDU(msg.PDUInformRequest, 909, 0, 0, vbs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dev.Write(informDG); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = dev.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 65536)
+	n, err := dev.Read(buf)
+	if err != nil {
+		t.Fatalf("no inform confirmation on the connected device socket: %v "+
+			"(a reply from another source port is dropped by the kernel)", err)
+	}
+	ver, comm, pdu, err := msg.SplitV1V2c(buf[:n])
+	if err != nil {
+		t.Fatalf("undecodable confirmation: %v", err)
+	}
+	if ver != msg.Version2c || string(comm) != "public" {
+		t.Fatalf("confirmation version/community = %d/%q", ver, comm)
+	}
+	fields, ok := pduCommon(pdu)
+	if !ok || fields.ReqID != 909 {
+		t.Fatalf("confirmation req-id = %d (ok=%v), want the inform's 909", fields.ReqID, ok)
 	}
 }

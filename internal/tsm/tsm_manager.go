@@ -484,10 +484,23 @@ func (m *ManagerTranslator) handleTunnelInformResp(f *tunnel.Frame) {
 		return
 	}
 	if udp, ok2 := ip.addr.(*net.UDPAddr); ok2 {
-		if _, err := m.conn.WriteTo(out, udp); err != nil {
+		// Answer from the socket that received the inform: clients with a
+		// connected UDP socket (gosnmp, pysnmp) discard a reply from any
+		// other source port, so replying from the request listener would
+		// time out for them while net-snmp accepts it.
+		if _, err := m.notifyConn().WriteTo(out, udp); err != nil {
 			m.log.Debug("tsm manager: inform response delivery failed", zap.Error(err))
 		}
 	}
+}
+
+// notifyConn is the socket a notification confirmation must leave from (see
+// handleTunnelInformResp).
+func (m *ManagerTranslator) notifyConn() net.PacketConn {
+	if m.trapConn != nil {
+		return m.trapConn
+	}
+	return m.conn
 }
 
 // readTraps serves clear traps/informs from local devices.

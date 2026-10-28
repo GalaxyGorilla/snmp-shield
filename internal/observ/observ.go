@@ -49,6 +49,7 @@ type Metrics struct {
 	RateLimited    prometheus.Counter // front-leg requests refused by the rate limit
 	SessionsDenied prometheus.Counter // (D)TLS sessions refused by the session cap
 	TunnelUp       prometheus.Gauge   // 1 when the tunnel session is up
+	SessionsActive prometheus.Gauge   // (D)TLS sessions currently holding a cap slot
 	ForwardLatency prometheus.Histogram
 }
 
@@ -74,6 +75,15 @@ func NewMetrics() *Metrics {
 		Help: "1 when the tunnel session is established.",
 	})
 	m.reg.MustRegister(m.TunnelUp)
+	// Occupancy of the session-cap semaphore. Denials alone say nothing about
+	// how close a box is to its ceiling, and the cap is the one resource an
+	// unauthenticated peer can consume: a slot held by a vanished client is
+	// invisible without this gauge.
+	m.SessionsActive = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "snmp_shield_sessions_active",
+		Help: "Concurrent (D)TLS sessions currently holding a session-cap slot.",
+	})
+	m.reg.MustRegister(m.SessionsActive)
 	m.ForwardLatency = prometheus.NewHistogram(prometheus.HistogramOpts{
 		Name:    "snmp_shield_forward_latency_seconds",
 		Help:    "End-to-end request forwarding latency.",

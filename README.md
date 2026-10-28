@@ -367,7 +367,22 @@ with `validate --json`, and offer a "test connection" button backed by
 - **Config reload** — `SIGHUP` re-reads the YAML file and swaps the
   access policy in place; other blocks are reported as restart-only.
 - **Engine state persistence** — engineBoots persisted to disk;
-  timeliness enforced per RFC 3414 §3.2 (±150 s window).
+  timeliness enforced per RFC 3414 §3.2 (±150 s window). `--engine-id` /
+  `security.engine_id` pins the engine identity when replicas must share it.
+- **Bounded front door** — `tunnel.max_sessions` (`--max-sessions`,
+  default 64) caps concurrent tunnel and TSM-front (D)TLS sessions; beyond
+  it, new connections are closed immediately instead of queueing, so an
+  unauthenticated peer cannot pin unlimited goroutines. Occupancy is
+  exported as `snmp_shield_sessions_active`, and a TSM front session that
+  goes idle for two minutes releases its slot (DTLS has no keepalive of its
+  own, so a vanished client would otherwise hold one forever).
+- **Panic isolation** — every per-datagram/frame handler runs under a
+  recover that logs the panic (value and stack) and keeps serving; one
+  hostile packet cannot take the process down. It is a safety net, never a
+  substitute for fixing the bug.
+- **SNMP-trap authority** — traps are sent sender-authoritative and informs
+  receiver-authoritative (RFC 3414 §2.2), including discovery of the
+  manager's trap receiver before an inform is sent.
 
 ## Building and testing
 

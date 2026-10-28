@@ -123,6 +123,17 @@ type TSMGateway struct {
 // passes 0 (config default is 64; this is the belt for direct callers).
 const defaultMaxSessions = 64
 
+// frontIdleTimeout bounds how long one TSM front session may hold its
+// session-cap slot without traffic. DTLS sessions carry no keepalive of their
+// own, so without this a vanished peer's slot is never released. It is
+// deliberately generous: a manager polling once a minute keeps its session,
+// and a client that has been silent for two minutes simply re-handshakes on
+// its next request.
+//
+// A variable, not a constant, only so front_idle_test.go can compress the
+// wait; nothing in production assigns it.
+var frontIdleTimeout = 2 * time.Minute
+
 func NewTSMGateway(cfg config.GatewayRole, sec config.Security, lcfg tunnel.ListenerConfig, maxSessions int, log *zap.Logger, met *observ.Metrics, filt ...*notifyfilter.Filter) (*TSMGateway, error) {
 	allowed := sec.TSMIdentities
 	if len(allowed) == 0 {
@@ -229,10 +240,18 @@ func (g *TSMGateway) Run(done <-chan struct{}) error {
 			continue
 		}
 		wg.Add(1)
+		if g.met != nil {
+			g.met.SessionsActive.Inc()
+		}
 		sessionConn := conn
 		safego.Go(g.log, "tsm gateway front session", func() {
 			defer wg.Done()
-			defer func() { <-sem }()
+			defer func() {
+				<-sem
+				if g.met != nil {
+					g.met.SessionsActive.Dec()
+				}
+			}()
 			g.serveFront(sessionConn)
 		})
 	}
@@ -247,6 +266,18 @@ func (g *TSMGateway) serveFront(conn net.Conn) {
 	defer conn.Close()
 	buf := make([]byte, 65536)
 	for {
+		// Every front session holds a slot in the cap, so it needs an idle
+		// bound: DTLS has no application-level keepalive here, and a peer
+		// that crashes, is unplugged or loses its route leaves Read blocked
+		// forever. Without the deadline such a peer pins its slot until the
+		// process restarts — the cap then guarantees the outage it exists to
+		// prevent (64 vanished clients is a full denial of service). The
+		// first Read also runs the server-side handshake, so this bounds a
+		// half-open handshake too. A session that has been idle this long
+		// holds no useful state: the client re-handshakes on its next poll.
+		if err := conn.SetReadDeadline(time.Now().Add(frontIdleTimeout)); err != nil {
+			return
+		}
 		n, err := conn.Read(buf)
 		if err != nil {
 			return

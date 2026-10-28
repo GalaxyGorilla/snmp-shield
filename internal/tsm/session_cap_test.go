@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 
 	"github.com/GalaxyGorilla/snmp-shield/internal/config"
@@ -76,6 +77,10 @@ func TestTSMGatewaySessionCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first session: %v", err)
 	}
+	if !waitActive(t, met, 1, 10*time.Second) {
+		t.Fatalf("sessions_active never reached 1 with one accepted session (got %v)",
+			gaugeValue(t, met.SessionsActive))
+	}
 
 	// The second session has no slot: the gateway closes the accepted conn
 	// without ever reading the ClientHello, so the handshake never finishes.
@@ -98,15 +103,47 @@ func TestTSMGatewaySessionCap(t *testing.T) {
 	}
 
 	// Releasing the slot must let the next client in (a cap that never
-	// recovers would be a self-inflicted outage).
+	// recovers would be a self-inflicted outage). Teardown is asynchronous —
+	// the server notices the close on its next read — so wait on the
+	// occupancy gauge (the same instrument an operator watches) instead of
+	// guessing with a sleep, and only then require a successful handshake.
 	_ = first.Close()
-	var third net.Conn
-	for attempt := 0; attempt < 5 && third == nil; attempt++ {
-		time.Sleep(300 * time.Millisecond)
-		third, err = tryDial(t, front, ca, clientCrt, clientKey, 5*time.Second)
+	if !waitActive(t, met, 0, 15*time.Second) {
+		t.Fatalf("the cap slot was never released after the session closed (sessions_active=%v)",
+			gaugeValue(t, met.SessionsActive))
 	}
-	if third == nil {
+	third, err := tryDial(t, front, ca, clientCrt, clientKey, 10*time.Second)
+	if err != nil {
 		t.Fatalf("no TSM session accepted after the slot was released: %v", err)
 	}
 	_ = third.Close()
+	if !waitActive(t, met, 0, 15*time.Second) {
+		t.Fatalf("sessions_active did not return to 0 after teardown (got %v)",
+			gaugeValue(t, met.SessionsActive))
+	}
+}
+
+// waitActive polls an occupancy gauge until it equals want.
+func waitActive(t *testing.T, met *observ.Metrics, want float64, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if gaugeValue(t, met.SessionsActive) == want {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// gaugeValue reads a Prometheus gauge (instrument.Write, not Collect).
+func gaugeValue(t *testing.T, g prometheus.Gauge) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := g.Write(&m); err != nil {
+		t.Fatalf("read gauge: %v", err)
+	}
+	return m.GetGauge().GetValue()
 }

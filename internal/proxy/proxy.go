@@ -432,12 +432,20 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent 
 			continue
 		}
 		wg.Add(1)
+		if met != nil {
+			met.SessionsActive.Inc()
+		}
 		// Bind the conn per iteration: the goroutine outlives this loop
 		// body, and a shared variable would serve the wrong session.
 		sessionConn := conn
 		safego.Go(opts.Log, "agent session", func() {
 			defer wg.Done()
-			defer func() { <-sem }()
+			defer func() {
+				<-sem
+				if met != nil {
+					met.SessionsActive.Dec()
+				}
+			}()
 			sess := tunnel.NewServerSession(sessionConn, opts.Config.Tunnel.MaxFrameSize, 1200, opts.Log)
 			defer sess.Close()
 			// Cancel per-session work when the tunnel conn dies (the

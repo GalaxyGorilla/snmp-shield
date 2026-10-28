@@ -1039,6 +1039,31 @@ func counterValue(t *testing.T, c interface{ Write(*dto.Metric) error }) float64
 	return m.GetCounter().GetValue()
 }
 
+// gaugeValue reads a Prometheus gauge (instrument.Write, not Collect).
+func gaugeValue(t *testing.T, g interface{ Write(*dto.Metric) error }) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := g.Write(&m); err != nil {
+		t.Fatalf("read gauge: %v", err)
+	}
+	return m.GetGauge().GetValue()
+}
+
+// waitSessionsActive polls the cap-occupancy gauge until it equals want.
+func waitSessionsActive(t *testing.T, met *observ.Metrics, want float64, timeout time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if gaugeValue(t, met.SessionsActive) == want {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // TestRunAgentSessionCap pins the front-door resource bound: the agent
 // tunnel listener serves at most tunnel.max_sessions concurrent sessions
 // and closes any further conn immediately. Without the cap, an
@@ -1090,6 +1115,10 @@ func TestRunAgentSessionCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first session: %v", err)
 	}
+	if !waitSessionsActive(t, met, 1, 10*time.Second) {
+		t.Fatalf("sessions_active never reached 1 with one accepted session (got %v)",
+			gaugeValue(t, met.SessionsActive))
+	}
 
 	// Second concurrent session: the listener has one slot, which the
 	// first session holds. The accept is refused immediately, so the
@@ -1108,14 +1137,15 @@ func TestRunAgentSessionCap(t *testing.T) {
 
 	// Release the slot and confirm the listener is not wedged: the session
 	// teardown is asynchronous (the server notices the close on its next
-	// read), so allow a few attempts.
+	// read), so wait for the occupancy gauge to drop — the same signal an
+	// operator watches — and only then require a successful handshake. A
+	// fixed sleep here flakes under load, where teardown can lag by seconds.
 	_ = first.Close()
-	var third *tunnel.Session
-	var lastErr error
-	for attempt := 0; attempt < 5 && third == nil; attempt++ {
-		time.Sleep(300 * time.Millisecond)
-		third, lastErr = connect(5 * time.Second)
+	if !waitSessionsActive(t, met, 0, 15*time.Second) {
+		t.Fatalf("the cap slot was never released after the session closed (sessions_active=%v)",
+			gaugeValue(t, met.SessionsActive))
 	}
+	third, lastErr := connect(10 * time.Second)
 	if third == nil {
 		t.Fatalf("no session accepted after the slot was released: %v", lastErr)
 	}

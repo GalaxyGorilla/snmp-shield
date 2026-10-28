@@ -454,6 +454,12 @@ runs the same flow standalone (`--sbom-only` skips the scan).
 **Acceptance for every commit**: build + vet + `go test -race ./...` clean.
 Note: non-login shells may not have `go` on PATH — use `/usr/local/go/bin/go`
 or set `-timeout` on `go test` (DTLS tests would hang without one).
+**What a green run does NOT prove** is inventoried explicitly in
+`TESTING.md` ("What a green run does not prove"): peers skip silently when
+their toolchain is absent, IPv6 is unproven, there is no soak/load run,
+`cmd`/`observ` are the least-covered code, HA is pinned as a state machine
+rather than as a mid-request outage, and TSM notifications still have no
+vendor receiver. Read it before treating a green suite as a release gate.
 
 ### No-YAML CLI mode (plug-and-play deployment)
 

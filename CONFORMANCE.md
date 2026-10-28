@@ -227,11 +227,6 @@ Recorded so nobody "fixes" the proxy to match one vendor. Adapters normalize
   a proxy bug: traps become invisible, or informs stop being answered. Both
   lines are in the fixture's config, and the two tests exercise them
   separately.
-- **No TSM notification receiver.** net-snmp 5.9's `snmptrapd` in `dtls:`
-  mode never reads its socket, so it cannot receive our TSM notifications
-  even though it works fine over UDP (that is how the USM receiver above
-  runs). TSM notification wrapping stays verified by `internal/tsm` and
-  `scripts/tsm-sink`.
 - **No syslog/SNMPv1 trap receiver matrix.** v1 trap *sending* is covered
   (translated and relayed); a vendor v1 receiver adds nothing the parser
   tests do not already pin.

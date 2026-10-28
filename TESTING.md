@@ -81,8 +81,11 @@ make vulnscan        # SBOM + grype, fails on HIGH+
 3. Build the fixture with `startProxy` (real binary) and
    `testkit.NewAgent`/`NewV3Sink`/`NewTrapSink`, or one of the existing
    `start*` helpers in the package.
-4. Assert with `requireOK`, `requireRefused`, `requireVarbind`,
-   `requireV3Notification`; skip vendor gaps with `skipUnsupported`.
+4. Assert with `requireOK`, `requireRefused`, `requireVarbind`; skip
+   vendor gaps with `skipUnsupported`. There is deliberately no
+   `requireV3Notification` helper: "the notification is really an
+   authenticated v3 message" is judged by `snmptrapd` in `trapd_test.go`,
+   not by a parser we wrote.
 5. Prefer OIDs unique to the scenario: `WaitForTrapOID` searches everything
    the sink has seen.
 
@@ -136,6 +139,49 @@ go test ./internal/notifyfilter -run '^$' -fuzz 'Fuzz' -fuzztime 30s
 
 Crashers and failing inputs land in `testdata/fuzz/` and run as normal test
 cases afterwards.
+
+## What a green run does not prove
+
+"Green" is a claim about what was actually exercised, so the gaps are listed
+here rather than discovered later by someone trusting the colour. Each line
+names what would close it.
+
+- **A fresh machine proves much less than a provisioned one.** The matrix
+  skips (with a reason, in `-v` output) when Docker, pysnmp or node are
+  absent, and after such a run "all peers green" can mean gosnmp alone. Not
+  covered by anything: the strongest layer is the one that degrades quietly.
+  *Closer with:* a `make conformance-required` that fails when a peer skips,
+  used before a release rather than on every edit.
+- **`cmd` and `observ` are the least-covered production code** (measured
+  2026-10-28: `cmd/snmp-shield` 53.4%, `internal/observ` 0%, overall 67.6%
+  excluding the conformance package). That is not cosmetic: conformance
+  finding 1 — gateway access-policy flags silently dropped — lived in
+  `flagsConfig`, and the fix is pinned for the gateway role only.
+  *Closer with:* a table-driven `flagsConfig` × security-mode sweep that
+  asserts every flag survives assembly in every valid mode.
+- **IPv4 is assumed; IPv6 is unproven.** Engine discovery binds the IPv4
+  wildcard, the container reaches the host by IPv4 name, and no test binds a
+  `[::1]` front leg. *Closer with:* one scenario per mode on `[::1]`.
+- **No soak or load run.** The rate limiter's 4096-entry cap fails closed by
+  design, but nothing drives it with spoofed sources; goroutine stability is
+  proven over 30 connect/close cycles, not over hours; memory is never
+  measured. *Closer with:* a `make soak` (10 min, synthetic load, assert
+  goroutines and RSS flat, table bounded).
+- **Fuzzing is burst-mode.** Targets are run 15–30 s when a parser changes;
+  the corpus runs on every `go test`, which is the important half, but long
+  sessions are not continuous.
+- **HA is covered as a state machine, not as an outage.** Sticky endpoint
+  walk, dead-peer detection and digest-verified engine-state adoption are
+  pinned; a failover while requests are in flight against two live replicas
+  is not. *Closer with:* two manager-side proxies with one killed
+  mid-request under continuous polling.
+- **Vendor coverage means "the stacks on this host".** Real devices are not
+  part of the loop: v1 traps and v1 PDUs are hand-built, and `snmpd` is
+  Apple's. TSM notifications have no vendor receiver at all
+  (`CONFORMANCE.md`, "Deliberate limits").
+- **No CI.** Regressions are caught when someone runs the suite. The
+  acceptance rule in `AGENTS.md` §5 only works because it is run manually,
+  every time.
 
 ## What is intentionally not here
 

@@ -175,10 +175,13 @@ names what would close it.
   pinned; a failover while requests are in flight against two live replicas
   is not. *Closer with:* two manager-side proxies with one killed
   mid-request under continuous polling.
-- **Vendor coverage means "the stacks on this host".** Real devices are not
-  part of the loop: v1 traps and v1 PDUs are hand-built, and `snmpd` is
-  Apple's. TSM notifications have no vendor receiver at all
-  (`CONFORMANCE.md`, "Deliberate limits").
+- **Vendor coverage means "the stacks on this host".** v1 traffic IS
+  vendor-generated (`snmptrap -v 1`, `snmpget -v 1`, so v1 *translation* is
+  judged by a real encoder), but no physical device is in the loop and the
+  v3 agent is Apple's `snmpd` 5.6.2.1 — the Debian image ships a 5.9.3
+  `snmpd` that nothing starts, so "current agent" is untested and cheap to
+  add. TSM notifications have no vendor receiver at all (`CONFORMANCE.md`,
+  "Deliberate limits").
 - **No CI.** Regressions are caught when someone runs the suite. The
   acceptance rule in `AGENTS.md` §5 only works because it is run manually,
   every time.

@@ -30,6 +30,7 @@ import (
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/notifyfilter"
 	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
+	"github.com/GalaxyGorilla/snmp-shield/internal/safego"
 	"go.uber.org/zap"
 )
 
@@ -216,7 +217,7 @@ func (g *GatewayTranslator) readFront() {
 			g.rejectClear(info.Version)
 			continue
 		}
-		g.handleFrontRequest(addr, dg)
+		safego.Dispatch(g.log, "usm gateway front request", func() { g.handleFrontRequest(addr, dg) })
 	}
 }
 
@@ -431,7 +432,7 @@ func (g *GatewayTranslator) readAgent() {
 			continue
 		}
 		dg := append([]byte{}, buf[:n]...)
-		g.handleAgentResponse(dg)
+		safego.Dispatch(g.log, "usm gateway agent response", func() { g.handleAgentResponse(dg) })
 	}
 }
 
@@ -644,10 +645,10 @@ func (g *GatewayTranslator) readTraps() {
 		// v3 from the manager (inform responses) vs clear v1/v2c from
 		// devices: Peek distinguishes them cheaply.
 		if info, perr := msg.Peek(dg); perr == nil && info.Version == msg.Version3 {
-			g.handleSinkResponse(dg)
+			safego.Dispatch(g.log, "usm gateway inform response", func() { g.handleSinkResponse(dg) })
 			continue
 		}
-		g.handleClearTrap(addr, dg)
+		safego.Dispatch(g.log, "usm gateway clear trap", func() { g.handleClearTrap(addr, dg) })
 	}
 }
 

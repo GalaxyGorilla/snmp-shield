@@ -24,6 +24,7 @@ import (
 	"github.com/GalaxyGorilla/snmp-shield/internal/snmpmetrics"
 	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
 	"github.com/gosnmp/gosnmp"
+	dto "github.com/prometheus/client_model/go"
 	"go.uber.org/zap"
 )
 
@@ -1026,4 +1027,99 @@ func TestRunAgentReadOnlyE2E(t *testing.T) {
 
 	stopRun(t, agCancel, agErr, "agent")
 	stopRun(t, mgCancel, mgErr, "manager")
+}
+
+// counterValue reads a Prometheus counter without pulling in testutil.
+func counterValue(t *testing.T, c interface{ Write(*dto.Metric) error }) float64 {
+	t.Helper()
+	var m dto.Metric
+	if err := c.Write(&m); err != nil {
+		t.Fatalf("read counter: %v", err)
+	}
+	return m.GetCounter().GetValue()
+}
+
+// TestRunAgentSessionCap pins the front-door resource bound: the agent
+// tunnel listener serves at most tunnel.max_sessions concurrent sessions
+// and closes any further conn immediately. Without the cap, an
+// unauthenticated peer can pin one goroutine + one DTLS FSM per source
+// port for the whole dead-peer window, which is exactly the pre-auth DoS
+// the cap exists to prevent.
+//
+// The test also pins the recovery side: releasing a slot must let the next
+// session in, otherwise a burst would wedge the proxy for its lifetime.
+func TestRunAgentSessionCap(t *testing.T) {
+	met := observ.NewMetrics()
+	agent := fakeAgent(t, "127.0.0.1:0")
+	defer agent.Close()
+
+	agentCfg := &config.Config{Role: config.RoleAgent}
+	agentCfg.Defaults()
+	agentCfg.Tunnel.Mode = "dtls"
+	agentCfg.Tunnel.ListenAddr = freeUDPPort(t)
+	agentCfg.Tunnel.PSK = "text:testpsk"
+	agentCfg.Tunnel.PSKIdentity = "cap-test"
+	agentCfg.Tunnel.MaxSessions = 1
+	agentCfg.Agent.AgentAddr = agent.LocalAddr().String()
+
+	agCancel, agErr := startAgent(t, agentCfg, met)
+
+	dialer := &tunnel.Dialer{
+		Mode:        "dtls",
+		RemoteAddr:  agentCfg.Tunnel.ListenAddr,
+		PSK:         []byte("testpsk"),
+		PSKIdentity: []byte("cap-test"),
+		Timeout:     3 * time.Second,
+	}
+	// connect always returns the session so a failed attempt can be closed:
+	// an abandoned client keeps retransmitting its ClientHello, and those
+	// retransmissions are themselves new accepts that would compete for the
+	// freed slot in the recovery check below.
+	connect := func(timeout time.Duration) (*tunnel.Session, error) {
+		sess := tunnel.NewClientSession(dialer, 65536, 1200, zap.NewNop())
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		err := sess.Connect(ctx)
+		if err != nil {
+			_ = sess.Close()
+		}
+		return sess, err
+	}
+
+	first, err := connect(10 * time.Second)
+	if err != nil {
+		t.Fatalf("first session: %v", err)
+	}
+
+	// Second concurrent session: the listener has one slot, which the
+	// first session holds. The accept is refused immediately, so the
+	// handshake never completes.
+	start := time.Now()
+	if second, serr := connect(2 * time.Second); serr == nil {
+		_ = second.Close()
+		t.Fatal("second concurrent session was served with max_sessions=1")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("refused session took %s to fail; the cap should fail fast", elapsed)
+	}
+	if got := counterValue(t, met.SessionsDenied); got < 1 {
+		t.Fatalf("sessions_denied_total = %v, want >= 1 (the refusal must be observable)", got)
+	}
+
+	// Release the slot and confirm the listener is not wedged: the session
+	// teardown is asynchronous (the server notices the close on its next
+	// read), so allow a few attempts.
+	_ = first.Close()
+	var third *tunnel.Session
+	var lastErr error
+	for attempt := 0; attempt < 5 && third == nil; attempt++ {
+		time.Sleep(300 * time.Millisecond)
+		third, lastErr = connect(5 * time.Second)
+	}
+	if third == nil {
+		t.Fatalf("no session accepted after the slot was released: %v", lastErr)
+	}
+	_ = third.Close()
+
+	stopRun(t, agCancel, agErr, "agent")
 }

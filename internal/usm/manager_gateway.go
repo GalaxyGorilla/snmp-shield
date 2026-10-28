@@ -36,6 +36,7 @@ import (
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/notifyfilter"
 	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
+	"github.com/GalaxyGorilla/snmp-shield/internal/safego"
 	"go.uber.org/zap"
 )
 
@@ -205,7 +206,7 @@ func (g *ManagerGateway) readFront() {
 			continue
 		}
 		dg := append([]byte{}, buf[:n]...)
-		g.handleClearRequest(addr, dg)
+		safego.Dispatch(g.log, "manager-gateway clear request", func() { g.handleClearRequest(addr, dg) })
 	}
 }
 
@@ -351,7 +352,7 @@ func (g *ManagerGateway) readAgent() {
 			continue
 		}
 		dg := append([]byte{}, buf[:n]...)
-		g.handleAgentResponse(dg)
+		safego.Dispatch(g.log, "manager-gateway agent response", func() { g.handleAgentResponse(dg) })
 	}
 }
 
@@ -594,7 +595,7 @@ func (g *ManagerGateway) readTraps() {
 			continue
 		}
 		dg := append([]byte{}, buf[:n]...)
-		g.handleAgentTrap(dg, from)
+		safego.Dispatch(g.log, "manager-gateway agent notification", func() { g.handleAgentTrap(dg, from) })
 	}
 }
 

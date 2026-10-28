@@ -74,6 +74,15 @@ type Tunnel struct {
 	KeepaliveSecs       int `yaml:"keepalive_secs"`
 	MaxReconnectBackoff int `yaml:"max_reconnect_backoff_secs"`
 	MaxFrameSize        int `yaml:"max_frame_size"`
+
+	// MaxSessions caps how many (D)TLS sessions a listener serves at once
+	// (agent tunnel listener, TSM gateway front leg). A DTLS handshake is
+	// cheap to start and expensive to keep: without a cap, a peer that
+	// never completes (or never reuses) a handshake can pin one goroutine
+	// and one pion FSM per source port. At the cap new connections are
+	// closed immediately rather than queued, so the cap bounds memory
+	// instead of adding latency. 0 = default (64).
+	MaxSessions int `yaml:"max_sessions"`
 }
 
 // ManagerRole is the configuration for the manager-side instance: it
@@ -426,6 +435,9 @@ func (c *Config) Defaults() {
 	if c.Tunnel.MaxFrameSize <= 0 {
 		c.Tunnel.MaxFrameSize = 65536
 	}
+	if c.Tunnel.MaxSessions == 0 {
+		c.Tunnel.MaxSessions = 64
+	}
 	if c.Security.Mode == "" {
 		c.Security.Mode = "passthrough"
 	}
@@ -509,6 +521,11 @@ func (c *Config) requireEngineStore() error {
 func (c *Config) Validate() error {
 	if _, err := c.TrapFilter(); err != nil {
 		return fmt.Errorf("notifications.filter: %w", err)
+	}
+	if c.Tunnel.MaxSessions < 0 {
+		// 0 means "default"; a negative cap is a typo, not "unlimited"
+		// (unlimited is exactly what this guard exists to prevent).
+		return fmt.Errorf("tunnel.max_sessions: must not be negative (%d)", c.Tunnel.MaxSessions)
 	}
 	if err := c.validateAccess(); err != nil {
 		return err

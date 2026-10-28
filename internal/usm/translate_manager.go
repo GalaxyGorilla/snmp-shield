@@ -23,6 +23,7 @@ import (
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/notifyfilter"
 	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
+	"github.com/GalaxyGorilla/snmp-shield/internal/safego"
 	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
 	"go.uber.org/zap"
 )
@@ -164,16 +165,18 @@ func (m *ManagerTranslator) Run(done <-chan struct{}) error {
 			if !ok {
 				return nil
 			}
-			if f.Flags&tunnel.FlagInform != 0 {
-				m.handleTunnelInformResp(f)
-			} else {
-				m.handleTunnelResponse(f)
-			}
+			safego.Dispatch(m.log, "usm manager frame", func() {
+				if f.Flags&tunnel.FlagInform != 0 {
+					m.handleTunnelInformResp(f)
+				} else {
+					m.handleTunnelResponse(f)
+				}
+			})
 		case f, ok := <-notifCh:
 			if !ok {
 				return nil
 			}
-			m.handleTunnelNotif(f)
+			safego.Dispatch(m.log, "usm manager notification", func() { m.handleTunnelNotif(f) })
 		}
 	}
 }
@@ -625,7 +628,7 @@ func (m *ManagerTranslator) readTraps() {
 			m.lastInform = addr
 			m.informMu.Unlock()
 		}
-		m.handleClearTrap(dg)
+		safego.Dispatch(m.log, "usm manager clear trap", func() { m.handleClearTrap(dg) })
 	}
 }
 

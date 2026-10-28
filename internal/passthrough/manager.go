@@ -13,6 +13,7 @@ import (
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/notifyfilter"
 	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
+	"github.com/GalaxyGorilla/snmp-shield/internal/safego"
 	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
 	"go.uber.org/zap"
 )
@@ -190,65 +191,71 @@ func (m *Manager) serveClearRequests() error {
 		}
 		payload := make([]byte, n)
 		copy(payload, buf[:n])
-
-		// Access policy on the clear manager leg. Off-list and over-rate
-		// clients are dropped in silence; a write refusal is answered so
-		// the manager learns immediately.
-		pol := m.access.Get()
-		switch pol.Check(access.IPOf(addr)) {
-		case access.DeniedClient:
-			if m.met != nil {
-				m.met.ACLDenied.Inc()
-			}
-			continue
-		case access.DeniedRate:
-			if m.met != nil {
-				m.met.RateLimited.Inc()
-			}
-			continue
-		}
-		// The write policy only sees v1/v2c: passthrough forwards v3
-		// opaquely, so a v3 SET cannot be inspected (inherent to
-		// passthrough, not a gap here).
-		if ver, community, pdu, serr := msg.SplitV1V2c(payload); serr == nil {
-			if !pol.AllowWrite(pdu) {
-				if m.met != nil {
-					m.met.WritesDenied.Inc()
-				}
-				if out, ok := access.DenyResponse(ver, community, pdu); ok {
-					if _, werr := conn.WriteToUDP(out, addr); werr != nil && m.log != nil {
-						m.log.Debug("notWritable delivery failed", zap.Error(werr))
-					}
-				}
-				continue
-			}
-		}
-
-		corrID := uint16(m.nextID.Add(1))
-		p := &pending{addr: addr, ready: make(chan struct{})}
-		m.pendMu.Lock()
-		m.pend[corrID] = p
-		m.pendMu.Unlock()
-
-		if m.met != nil {
-			m.met.ReqForwarded.Inc()
-			m.met.BytesSent.Add(float64(len(payload)))
-		}
-		if err := m.sess.Send(m.reqCtx(), tunnel.TypeREQ, 0, corrID, payload); err != nil {
-			m.pendMu.Lock()
-			delete(m.pend, corrID)
-			m.pendMu.Unlock()
-			if m.met != nil {
-				m.met.ReqErrors.Inc()
-			}
-			m.log.Warn("tunnel send failed", zap.Error(err))
-			continue // manager will retransmit
-		}
-
-		// Wait for the response and deliver it; SNMP managers retransmit
-		// on their own, but we must not leak pending entries.
-		go m.awaitResponse(corrID, p)
+		safego.Dispatch(m.log, "passthrough manager request", func() { m.handleClearRequest(conn, payload, addr) })
 	}
+}
+
+// handleClearRequest applies the access policy to one clear request and
+// ships it over the tunnel. It runs under safego.Dispatch: the datagram is
+// untrusted input.
+func (m *Manager) handleClearRequest(conn *net.UDPConn, payload []byte, addr *net.UDPAddr) {
+	// Access policy on the clear manager leg. Off-list and over-rate
+	// clients are dropped in silence; a write refusal is answered so
+	// the manager learns immediately.
+	pol := m.access.Get()
+	switch pol.Check(access.IPOf(addr)) {
+	case access.DeniedClient:
+		if m.met != nil {
+			m.met.ACLDenied.Inc()
+		}
+		return
+	case access.DeniedRate:
+		if m.met != nil {
+			m.met.RateLimited.Inc()
+		}
+		return
+	}
+	// The write policy only sees v1/v2c: passthrough forwards v3
+	// opaquely, so a v3 SET cannot be inspected (inherent to
+	// passthrough, not a gap here).
+	if ver, community, pdu, serr := msg.SplitV1V2c(payload); serr == nil {
+		if !pol.AllowWrite(pdu) {
+			if m.met != nil {
+				m.met.WritesDenied.Inc()
+			}
+			if out, ok := access.DenyResponse(ver, community, pdu); ok {
+				if _, werr := conn.WriteToUDP(out, addr); werr != nil && m.log != nil {
+					m.log.Debug("notWritable delivery failed", zap.Error(werr))
+				}
+			}
+			return
+		}
+	}
+
+	corrID := uint16(m.nextID.Add(1))
+	p := &pending{addr: addr, ready: make(chan struct{})}
+	m.pendMu.Lock()
+	m.pend[corrID] = p
+	m.pendMu.Unlock()
+
+	if m.met != nil {
+		m.met.ReqForwarded.Inc()
+		m.met.BytesSent.Add(float64(len(payload)))
+	}
+	if err := m.sess.Send(m.reqCtx(), tunnel.TypeREQ, 0, corrID, payload); err != nil {
+		m.pendMu.Lock()
+		delete(m.pend, corrID)
+		m.pendMu.Unlock()
+		if m.met != nil {
+			m.met.ReqErrors.Inc()
+		}
+		m.log.Warn("tunnel send failed", zap.Error(err))
+		return // manager will retransmit
+	}
+
+	// Wait for the response and deliver it; SNMP managers retransmit
+	// on their own, but we must not leak pending entries.
+	go m.awaitResponse(corrID, p)
 }
 
 // awaitResponse waits for p's response and delivers it to the manager.
@@ -327,29 +334,34 @@ func (m *Manager) serveClearTraps() error {
 		}
 		payload := make([]byte, n)
 		copy(payload, buf[:n])
+		safego.Dispatch(m.log, "passthrough manager trap", func() { m.handleClearTrap(payload, raddr) })
+	}
+}
 
-		if m.filtr != nil {
-			if info, perr := msg.Peek(payload); perr == nil && (msg.IsTrap(info.PDUType) || msg.IsInform(info.PDUType)) {
-				oid, ok := msg.TrapOID(payload)
-				if !ok || !m.filtr.Allowed(oid) {
-					if m.met != nil {
-						m.met.NotifsFiltered.Inc()
-					}
-					m.log.Debug("notification filtered",
-						zap.String("trap_oid", oid), zap.String("addr", raddr.String()))
-					continue
+// handleClearTrap ships one clear notification from a local device over
+// the tunnel toward the manager side.
+func (m *Manager) handleClearTrap(payload []byte, raddr *net.UDPAddr) {
+	if m.filtr != nil {
+		if info, perr := msg.Peek(payload); perr == nil && (msg.IsTrap(info.PDUType) || msg.IsInform(info.PDUType)) {
+			oid, ok := msg.TrapOID(payload)
+			if !ok || !m.filtr.Allowed(oid) {
+				if m.met != nil {
+					m.met.NotifsFiltered.Inc()
 				}
+				m.log.Debug("notification filtered",
+					zap.String("trap_oid", oid), zap.String("addr", raddr.String()))
+				return
 			}
 		}
+	}
 
-		corrID := uint16(m.nextID.Add(1))
+	corrID := uint16(m.nextID.Add(1))
+	if m.met != nil {
+		m.met.NotifsRelayed.Inc()
+	}
+	if err := m.sess.Send(m.trapCtx(), tunnel.TypeNOTIF, 0, corrID, payload); err != nil {
 		if m.met != nil {
-			m.met.NotifsRelayed.Inc()
-		}
-		if err := m.sess.Send(m.trapCtx(), tunnel.TypeNOTIF, 0, corrID, payload); err != nil {
-			if m.met != nil {
-				m.met.DropTotal.Inc()
-			}
+			m.met.DropTotal.Inc()
 		}
 	}
 }

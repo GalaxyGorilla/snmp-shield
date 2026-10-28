@@ -94,6 +94,7 @@ type cliFlags struct {
 	pskIdentity   *string
 	pskSuites     *string
 	insecure      *bool
+	maxSessions   *int
 	secMode       *string
 	authPass      *string
 	privPass      *string
@@ -141,6 +142,7 @@ func register(fs *pflag.FlagSet) cliFlags {
 	c.pskIdentity = fs.String("psk-identity", "snmp-shield", "PSK identity string")
 	c.pskSuites = fs.String("psk-ciphersuites", "", "DTLS PSK ciphersuites, comma-separated, most preferred first (aes128-ccm-8, aes256-ccm-8, aes128-ccm, aes128-gcm, aes128-cbc; default aes128-ccm-8)")
 	c.insecure = fs.Bool("insecure", false, "skip tunnel certificate verification (tls mode only; never in production)")
+	c.maxSessions = fs.Int("max-sessions", 0, "max concurrent tunnel/front (D)TLS sessions, refused beyond the cap (default 64)")
 
 	// direct-flags mode: usm-translate security
 	c.secMode = fs.String("security", "usm-translate", "security mode when using flags: usm-translate or passthrough (gateway: usm-gateway, usm-manager-gateway or tsm-gateway)")
@@ -193,6 +195,7 @@ func (c cliFlags) opts() flagsOpts {
 		pskIdentity:  *c.pskIdentity,
 		pskSuites:    *c.pskSuites,
 		insecure:     *c.insecure,
+		maxSessions:  *c.maxSessions,
 		secMode:      *c.secMode,
 		authPass:     *c.authPass,
 		privPass:     *c.privPass,
@@ -293,6 +296,7 @@ type flagsOpts struct {
 	pskIdentity  string
 	pskSuites    string
 	insecure     bool
+	maxSessions  int
 	secMode      string
 	authPass     string
 	privPass     string
@@ -462,9 +466,10 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 			}
 			cfg.Security = config.Security{Mode: "tsm-gateway"}
 			cfg.Tunnel = config.Tunnel{
-				CAFile:   o.caFile,
-				CertFile: o.certFile,
-				KeyFile:  o.keyFile,
+				CAFile:      o.caFile,
+				CertFile:    o.certFile,
+				KeyFile:     o.keyFile,
+				MaxSessions: o.maxSessions,
 			}
 		}
 		// Notification filtering (gateway role, flags mode).
@@ -517,6 +522,7 @@ func flagsConfig(r config.Role, o flagsOpts) (*config.Config, error) {
 		PSK:                "hex:" + o.psk,
 		PskCiphersuites:    parsePskCiphersuites(o.pskSuites),
 		InsecureSkipVerify: o.insecure,
+		MaxSessions:        o.maxSessions,
 	}
 	cfg.Security = config.Security{Mode: o.secMode}
 

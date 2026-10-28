@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
+	"github.com/GalaxyGorilla/snmp-shield/internal/safego"
 	"go.uber.org/zap"
 )
 
@@ -164,6 +165,12 @@ func (s *Session) SetEventFunc(f func(Event)) {
 
 // emit invokes the event callback when one is registered. The endpoint
 // is read from the current connection (best effort).
+//
+// The callback runs under safego.Dispatch: it is called from the read loop
+// and the reconnect path, so a panic in a consumer (metrics bookkeeping, a
+// trap send) would otherwise take down the session or the whole process.
+// A panicking callback is a bug and is logged as one, but the tunnel keeps
+// running.
 func (s *Session) emit(kind EventKind) {
 	s.mu.Lock()
 	f := s.onEvent
@@ -173,7 +180,9 @@ func (s *Session) emit(kind EventKind) {
 	}
 	s.mu.Unlock()
 	if f != nil {
-		f(Event{Kind: kind, Endpoint: ep})
+		safego.Dispatch(s.log, "tunnel event callback", func() {
+			f(Event{Kind: kind, Endpoint: ep})
+		})
 	}
 }
 
@@ -538,7 +547,7 @@ func (s *Session) readLoop() {
 			continue // waiting for more fragments
 		}
 		f.Payload = complete
-		s.dispatch(f)
+		safego.Dispatch(s.log, "tunnel frame", func() { s.dispatch(f) })
 	}
 }
 

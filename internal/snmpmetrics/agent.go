@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
+	"github.com/GalaxyGorilla/snmp-shield/internal/safego"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"go.uber.org/zap"
@@ -153,11 +154,13 @@ func (a *Agent) Serve(addr string, stop <-chan struct{}, ready ...chan<- struct{
 		}
 		dg := make([]byte, n)
 		copy(dg, buf[:n])
-		if resp := a.handle(dg); resp != nil {
-			if _, werr := pc.WriteTo(resp, raddr); werr != nil && a.log != nil {
-				a.log.Debug("snmp metrics write", zap.Error(werr))
+		safego.Dispatch(a.log, "snmp metrics request", func() {
+			if resp := a.handle(dg); resp != nil {
+				if _, werr := pc.WriteTo(resp, raddr); werr != nil && a.log != nil {
+					a.log.Debug("snmp metrics write", zap.Error(werr))
+				}
 			}
-		}
+		})
 	}
 }
 

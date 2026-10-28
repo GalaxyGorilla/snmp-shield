@@ -15,6 +15,7 @@ import (
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/notifyfilter"
 	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
+	"github.com/GalaxyGorilla/snmp-shield/internal/safego"
 	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
 	"go.uber.org/zap"
 )
@@ -195,17 +196,23 @@ func (a *Agent) readAgent() error {
 		}
 		payload := make([]byte, n)
 		copy(payload, buf[:n])
-
-		corrID, ok := a.matchResponse(payload)
-		if !ok {
-			// Unsolicited or late response: drop.
-			if a.met != nil {
-				a.met.DropTotal.Inc()
-			}
-			continue
-		}
-		a.sendRESP(corrID, payload)
+		safego.Dispatch(a.log, "passthrough agent response", func() { a.handleAgentDatagram(payload) })
 	}
+}
+
+// handleAgentDatagram matches one agent response to a pending tunnel
+// request and ships it back. It runs under safego.Dispatch: a malformed
+// response is untrusted input.
+func (a *Agent) handleAgentDatagram(payload []byte) {
+	corrID, ok := a.matchResponse(payload)
+	if !ok {
+		// Unsolicited or late response: drop.
+		if a.met != nil {
+			a.met.DropTotal.Inc()
+		}
+		return
+	}
+	a.sendRESP(corrID, payload)
 }
 
 // matchResponse finds the pending corrID for a response datagram.
@@ -272,40 +279,45 @@ func (a *Agent) serveClearTraps() error {
 		}
 		payload := make([]byte, n)
 		copy(payload, buf[:n])
+		safego.Dispatch(a.log, "passthrough agent trap", func() { a.handleClearTrap(payload, raddr) })
+	}
+}
 
-		info, perr := msg.Peek(payload)
-		isInform := perr == nil && msg.IsInform(info.PDUType)
-		if a.filtr != nil && (isInform || (perr == nil && msg.IsTrap(info.PDUType))) {
-			oid, ok := msg.TrapOID(payload)
-			if !ok || !a.filtr.Allowed(oid) {
-				if a.met != nil {
-					a.met.NotifsFiltered.Inc()
-				}
-				a.log.Debug("notification filtered",
-					zap.String("trap_oid", oid), zap.String("addr", raddr.String()))
-				continue
-			}
-		}
-		flags := uint8(0)
-		corrID := uint16(a.nextID.Add(1))
-		if isInform {
-			a.notifMu.Lock()
-			a.notifPend[corrID] = &notifPend{ready: make(chan struct{})}
-			a.notifMu.Unlock()
-			flags = tunnel.FlagInform
-		}
-		if a.met != nil {
-			a.met.NotifsRelayed.Inc()
-		}
-		if serr := a.sess.Send(a.bgctx(), tunnel.TypeNOTIF, flags, corrID, payload); serr != nil {
+// handleClearTrap ships one clear device notification over the tunnel;
+// informs wait for the manager-side confirmation.
+func (a *Agent) handleClearTrap(payload []byte, raddr *net.UDPAddr) {
+	info, perr := msg.Peek(payload)
+	isInform := perr == nil && msg.IsInform(info.PDUType)
+	if a.filtr != nil && (isInform || (perr == nil && msg.IsTrap(info.PDUType))) {
+		oid, ok := msg.TrapOID(payload)
+		if !ok || !a.filtr.Allowed(oid) {
 			if a.met != nil {
-				a.met.DropTotal.Inc()
+				a.met.NotifsFiltered.Inc()
 			}
-			continue
+			a.log.Debug("notification filtered",
+				zap.String("trap_oid", oid), zap.String("addr", raddr.String()))
+			return
 		}
-		if isInform {
-			go a.awaitInformResp(corrID)
+	}
+	flags := uint8(0)
+	corrID := uint16(a.nextID.Add(1))
+	if isInform {
+		a.notifMu.Lock()
+		a.notifPend[corrID] = &notifPend{ready: make(chan struct{})}
+		a.notifMu.Unlock()
+		flags = tunnel.FlagInform
+	}
+	if a.met != nil {
+		a.met.NotifsRelayed.Inc()
+	}
+	if serr := a.sess.Send(a.bgctx(), tunnel.TypeNOTIF, flags, corrID, payload); serr != nil {
+		if a.met != nil {
+			a.met.DropTotal.Inc()
 		}
+		return
+	}
+	if isInform {
+		go a.awaitInformResp(corrID)
 	}
 }
 

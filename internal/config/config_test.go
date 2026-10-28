@@ -683,3 +683,29 @@ access:
 		t.Errorf("compiled policy: %v", err)
 	}
 }
+
+// TestTunnelMaxSessions pins the session-cap contract: 0 means "use the
+// default", a negative value is a configuration error (not "unlimited" —
+// unlimited is precisely what the guard exists to prevent).
+func TestTunnelMaxSessions(t *testing.T) {
+	cfg := &Config{Role: RoleAgent, Tunnel: Tunnel{Mode: "dtls", ListenAddr: ":10162", PSK: "text:s"}, Agent: AgentRole{AgentAddr: "127.0.0.1:161"}, Security: Security{Mode: "passthrough"}}
+	cfg.Defaults()
+	if got := cfg.Tunnel.MaxSessions; got != 64 {
+		t.Fatalf("default max_sessions = %d, want 64", got)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("validate with default cap: %v", err)
+	}
+
+	explicit := &Config{Role: RoleAgent, Tunnel: Tunnel{Mode: "dtls", ListenAddr: ":10162", PSK: "text:s", MaxSessions: 7}, Agent: AgentRole{AgentAddr: "127.0.0.1:161"}, Security: Security{Mode: "passthrough"}}
+	explicit.Defaults()
+	if explicit.Tunnel.MaxSessions != 7 {
+		t.Fatalf("explicit max_sessions overwritten: %d", explicit.Tunnel.MaxSessions)
+	}
+
+	negative := &Config{Role: RoleAgent, Tunnel: Tunnel{Mode: "dtls", ListenAddr: ":10162", PSK: "text:s", MaxSessions: -1}, Agent: AgentRole{AgentAddr: "127.0.0.1:161"}, Security: Security{Mode: "passthrough"}}
+	negative.Defaults()
+	if err := negative.Validate(); err == nil {
+		t.Fatal("negative tunnel.max_sessions accepted (would read as unlimited)")
+	}
+}

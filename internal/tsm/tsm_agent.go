@@ -20,6 +20,7 @@ import (
 	"github.com/GalaxyGorilla/snmp-shield/internal/config"
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
+	"github.com/GalaxyGorilla/snmp-shield/internal/safego"
 	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
 	"go.uber.org/zap"
 )
@@ -117,12 +118,12 @@ func (a *AgentTranslator) Run(done <-chan struct{}) error {
 			if !ok {
 				return nil
 			}
-			a.handleTunnelRequest(f)
+			safego.Dispatch(a.log, "tsm agent request", func() { a.handleTunnelRequest(f) })
 		case f, ok := <-notCh:
 			if !ok {
 				return nil
 			}
-			a.handleTunnelNotif(f)
+			safego.Dispatch(a.log, "tsm agent notification", func() { a.handleTunnelNotif(f) })
 		}
 	}
 }

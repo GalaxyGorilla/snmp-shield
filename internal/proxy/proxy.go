@@ -21,6 +21,7 @@ import (
 	"github.com/GalaxyGorilla/snmp-shield/internal/config"
 	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
 	"github.com/GalaxyGorilla/snmp-shield/internal/passthrough"
+	"github.com/GalaxyGorilla/snmp-shield/internal/safego"
 	"github.com/GalaxyGorilla/snmp-shield/internal/snmpmetrics"
 	"github.com/GalaxyGorilla/snmp-shield/internal/tsm"
 	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
@@ -400,6 +401,16 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent 
 	// Serve tunnel sessions concurrently: every manager-side proxy dials
 	// its own session, and each is served in parallel. Requests within a
 	// session are multiplexed by frame correlation id.
+	//
+	// The session cap bounds exactly that concurrency. A peer without the
+	// PSK can still complete a DTLS handshake far enough to make pion hand
+	// us a conn, and a peer that never reuses its socket leaves one
+	// goroutine + FSM parked until the keepalive drops it. Accepting
+	// without a bound lets an unauthenticated sender allocate those
+	// without limit, so at the cap the new conn is closed immediately:
+	// the proxy keeps its memory rather than queueing the attack.
+	maxSessions := opts.Config.Tunnel.MaxSessions
+	sem := make(chan struct{}, maxSessions)
 	var wg sync.WaitGroup
 	for {
 		conn, aerr := l.Accept()
@@ -409,10 +420,25 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent 
 			}
 			return fmt.Errorf("tunnel accept: %w", aerr)
 		}
+		select {
+		case sem <- struct{}{}:
+		default:
+			_ = conn.Close()
+			if met != nil {
+				met.SessionsDenied.Inc()
+			}
+			opts.Log.Warn("tunnel session refused: session cap reached",
+				zap.Int("max_sessions", maxSessions), zap.String("peer", conn.RemoteAddr().String()))
+			continue
+		}
 		wg.Add(1)
-		go func(conn net.Conn) {
+		// Bind the conn per iteration: the goroutine outlives this loop
+		// body, and a shared variable would serve the wrong session.
+		sessionConn := conn
+		safego.Go(opts.Log, "agent session", func() {
 			defer wg.Done()
-			sess := tunnel.NewServerSession(conn, opts.Config.Tunnel.MaxFrameSize, 1200, opts.Log)
+			defer func() { <-sem }()
+			sess := tunnel.NewServerSession(sessionConn, opts.Config.Tunnel.MaxFrameSize, 1200, opts.Log)
 			defer sess.Close()
 			// Cancel per-session work when the tunnel conn dies (the
 			// server readLoop fires Done); otherwise the translator
@@ -456,7 +482,7 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent 
 			if rerr != nil {
 				opts.Log.Error("agent session ended", zap.Error(rerr))
 			}
-		}(conn)
+		})
 	}
 	wg.Wait()
 	return nil
@@ -499,7 +525,7 @@ func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
 			KeyFile:  opts.Config.Tunnel.KeyFile,
 			Insecure: opts.Config.Tunnel.InsecureSkipVerify,
 		}
-		gw, err := tsm.NewTSMGateway(opts.Config.Gateway, opts.Config.Security, lcfg, opts.Log, met, filt)
+		gw, err := tsm.NewTSMGateway(opts.Config.Gateway, opts.Config.Security, lcfg, opts.Config.Tunnel.MaxSessions, opts.Log, met, filt)
 		if err != nil {
 			return err
 		}

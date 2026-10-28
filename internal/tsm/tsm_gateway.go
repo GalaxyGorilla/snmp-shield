@@ -28,6 +28,7 @@ import (
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/notifyfilter"
 	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
+	"github.com/GalaxyGorilla/snmp-shield/internal/safego"
 	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
 	"github.com/pion/dtls/v3"
 	"go.uber.org/zap"
@@ -78,11 +79,12 @@ const sinkDialTimeout = 10 * time.Second
 // directly from TSM-capable managers; authenticated requests are relayed
 // as clear v1/v2c to the legacy agent.
 type TSMGateway struct {
-	cfg   config.GatewayRole
-	sec   config.Security
-	log   *zap.Logger
-	met   *observ.Metrics
-	filtr *notifyfilter.Filter // notification filter (nil = allow all)
+	cfg         config.GatewayRole
+	sec         config.Security
+	maxSessions int
+	log         *zap.Logger
+	met         *observ.Metrics
+	filtr       *notifyfilter.Filter // notification filter (nil = allow all)
 	// access is the front-leg policy (client allow-list, rate limit,
 	// write policy); nil holder / nil policy = allow everything.
 	access *access.Holder
@@ -117,7 +119,11 @@ type TSMGateway struct {
 // NewTSMGateway builds the single-box TSM gateway. The identity
 // allow-list comes from security.tsm_identities, falling back to the
 // configured user names.
-func NewTSMGateway(cfg config.GatewayRole, sec config.Security, lcfg tunnel.ListenerConfig, log *zap.Logger, met *observ.Metrics, filt ...*notifyfilter.Filter) (*TSMGateway, error) {
+// defaultMaxSessions bounds the front-leg session count when the caller
+// passes 0 (config default is 64; this is the belt for direct callers).
+const defaultMaxSessions = 64
+
+func NewTSMGateway(cfg config.GatewayRole, sec config.Security, lcfg tunnel.ListenerConfig, maxSessions int, log *zap.Logger, met *observ.Metrics, filt ...*notifyfilter.Filter) (*TSMGateway, error) {
 	allowed := sec.TSMIdentities
 	if len(allowed) == 0 {
 		for _, u := range sec.Users {
@@ -125,16 +131,17 @@ func NewTSMGateway(cfg config.GatewayRole, sec config.Security, lcfg tunnel.List
 		}
 	}
 	return &TSMGateway{
-		cfg:     cfg,
-		sec:     sec,
-		lcfg:    lcfg,
-		log:     log,
-		met:     met,
-		filtr:   notifyfilter.From(filt...),
-		allowed: allowed,
-		pend:    make(map[int32]*tsmGwPending),
-		inform:  make(map[int32]*gwInformPending),
-		stop:    make(chan struct{}),
+		cfg:         cfg,
+		sec:         sec,
+		lcfg:        lcfg,
+		maxSessions: maxSessions,
+		log:         log,
+		met:         met,
+		filtr:       notifyfilter.From(filt...),
+		allowed:     allowed,
+		pend:        make(map[int32]*tsmGwPending),
+		inform:      make(map[int32]*gwInformPending),
+		stop:        make(chan struct{}),
 	}, nil
 }
 
@@ -181,6 +188,15 @@ func (g *TSMGateway) Run(done <-chan struct{}) error {
 	// serve DTLS sessions concurrently: every TSM manager dials its own
 	// session; RFC 6353 session semantics are per-manager.
 	defer close(g.stop)
+	// Bound concurrent front sessions: a raw DTLS handshake is cheap to
+	// start and expensive to hold, and this listener is the most exposed
+	// surface in the product (pre-authentication, third-party clients).
+	// At the cap the conn is closed immediately instead of queued.
+	maxSessions := g.maxSessions
+	if maxSessions <= 0 {
+		maxSessions = defaultMaxSessions
+	}
+	sem := make(chan struct{}, maxSessions)
 	var wg sync.WaitGroup
 	for {
 		conn, aerr := l.Accept()
@@ -199,11 +215,26 @@ func (g *TSMGateway) Run(done <-chan struct{}) error {
 			}
 			return fmt.Errorf("tsm gateway: front accept: %w", aerr)
 		}
+		select {
+		case sem <- struct{}{}:
+		default:
+			_ = conn.Close()
+			if g.met != nil {
+				g.met.SessionsDenied.Inc()
+			}
+			if g.log != nil {
+				g.log.Warn("tsm gateway session refused: session cap reached",
+					zap.Int("max_sessions", maxSessions), zap.String("peer", conn.RemoteAddr().String()))
+			}
+			continue
+		}
 		wg.Add(1)
-		go func() {
+		sessionConn := conn
+		safego.Go(g.log, "tsm gateway front session", func() {
 			defer wg.Done()
-			g.serveFront(conn)
-		}()
+			defer func() { <-sem }()
+			g.serveFront(sessionConn)
+		})
 	}
 }
 
@@ -221,7 +252,7 @@ func (g *TSMGateway) serveFront(conn net.Conn) {
 			return
 		}
 		dg := append([]byte{}, buf[:n]...)
-		g.handleFrontDatagram(conn, dg)
+		safego.Dispatch(g.log, "tsm gateway front datagram", func() { g.handleFrontDatagram(conn, dg) })
 	}
 }
 
@@ -394,7 +425,7 @@ func (g *TSMGateway) readAgent() {
 			continue
 		}
 		dg := append([]byte{}, buf[:n]...)
-		g.handleAgentResponse(dg)
+		safego.Dispatch(g.log, "tsm gateway agent response", func() { g.handleAgentResponse(dg) })
 	}
 }
 
@@ -461,7 +492,7 @@ func (g *TSMGateway) readTraps() {
 			continue
 		}
 		dg := append([]byte{}, buf[:n]...)
-		g.handleClearTrap(dg, addr)
+		safego.Dispatch(g.log, "tsm gateway clear trap", func() { g.handleClearTrap(dg, addr) })
 	}
 }
 
@@ -672,7 +703,7 @@ func (g *TSMGateway) trapSinkWrite(dg []byte) {
 	g.sinkMu.Lock()
 	g.sinkConn = c
 	g.sinkMu.Unlock()
-	go g.serveSinkConn(c)
+	safego.Go(g.log, "tsm gateway sink session", func() { g.serveSinkConn(c) })
 	if _, err := c.Write(dg); err != nil {
 		g.log.Debug("tsm gateway: trap sink write failed", zap.Error(err))
 	}

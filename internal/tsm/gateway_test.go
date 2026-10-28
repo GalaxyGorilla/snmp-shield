@@ -133,7 +133,7 @@ func buildTSMGateway(t *testing.T, ca, serverCrt, serverKey string, agentAddr st
 	sec := config.Security{Mode: "tsm-gateway", TSMIdentities: identities}
 	lcfg := tunnel.ListenerConfig{Mode: "dtls", CAFile: ca, CertFile: serverCrt, KeyFile: serverKey}
 
-	gw, err := tsm.NewTSMGateway(cfg, sec, lcfg, zap.NewNop(), nil)
+	gw, err := tsm.NewTSMGateway(cfg, sec, lcfg, 0, zap.NewNop(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

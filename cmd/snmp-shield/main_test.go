@@ -502,3 +502,59 @@ func TestFlagsConfigAccess(t *testing.T) {
 		t.Fatalf("compiled access policy = %v", pol)
 	}
 }
+
+// TestFlagsConfigMaxSessions: --max-sessions must reach the config in both
+// places the cap is enforced (tunnel roles and the TSM gateway front leg).
+// A dropped flag here would leave the front door unbounded while the
+// operator believes it is capped.
+func TestFlagsConfigMaxSessions(t *testing.T) {
+	agent, err := flagsConfig(config.RoleAgent, flagsOpts{
+		tunnelMode:  "dtls",
+		tunnelAddr:  "0.0.0.0:10162",
+		psk:         "aabbccdd",
+		secMode:     "usm-translate",
+		authPass:    "authpass",
+		privPass:    "privpass",
+		agent:       "127.0.0.1:161",
+		community:   "realcomm",
+		maxSessions: 9,
+	})
+	if err != nil {
+		t.Fatalf("agent flagsConfig: %v", err)
+	}
+	if agent.Tunnel.MaxSessions != 9 {
+		t.Fatalf("agent tunnel.max_sessions = %d, want 9", agent.Tunnel.MaxSessions)
+	}
+
+	gw, err := flagsConfig(config.RoleGateway, flagsOpts{
+		secMode:     "tsm-gateway",
+		listen:      "0.0.0.0:10161",
+		agent:       "127.0.0.1:161",
+		caFile:      "/tmp/ca.pem",
+		certFile:    "/tmp/cert.pem",
+		keyFile:     "/tmp/key.pem",
+		maxSessions: 3,
+	})
+	if err != nil {
+		t.Fatalf("gateway flagsConfig: %v", err)
+	}
+	if gw.Tunnel.MaxSessions != 3 {
+		t.Fatalf("gateway tunnel.max_sessions = %d, want 3", gw.Tunnel.MaxSessions)
+	}
+
+	// Default (flag unset) stays the config default.
+	gwDef, err := flagsConfig(config.RoleGateway, flagsOpts{
+		secMode:  "tsm-gateway",
+		listen:   "0.0.0.0:10161",
+		agent:    "127.0.0.1:161",
+		caFile:   "/tmp/ca.pem",
+		certFile: "/tmp/cert.pem",
+		keyFile:  "/tmp/key.pem",
+	})
+	if err != nil {
+		t.Fatalf("gateway flagsConfig (defaults): %v", err)
+	}
+	if gwDef.Tunnel.MaxSessions != 64 {
+		t.Fatalf("default tunnel.max_sessions = %d, want 64", gwDef.Tunnel.MaxSessions)
+	}
+}

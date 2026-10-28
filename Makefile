@@ -35,9 +35,10 @@ govulncheck:
 race: test
 
 # peers provisions the independent SNMP stacks used by the conformance
-# suite (net-snmp CLI, pysnmp in a venv, node net-snmp in node_modules).
-# Exit 77 when no third-party stack is available — the in-process gosnmp
-# peer always runs, so the suite itself is never skipped.
+# suite (net-snmp CLI, pysnmp in a venv, node net-snmp in node_modules, and
+# a net-snmp 5.9 container for the RFC 6353 TSM client). Exit 77 when no
+# third-party stack is available — the in-process gosnmp peer always runs,
+# so the suite itself is never skipped.
 peers:
 	sh scripts/peers-setup.sh
 

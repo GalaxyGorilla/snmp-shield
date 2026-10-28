@@ -240,6 +240,15 @@ func TestTSMGatewayGet(t *testing.T) {
 	if m.IsEncrypted() {
 		t.Fatal("TSM scopedPDU must not be encrypted")
 	}
+	// A Response is unconfirmed class: the request's Reportable flag must
+	// NOT be echoed (RFC 3412 §6.4). net-snmp 5.9 tolerates it, so only
+	// this assertion keeps the wire honest.
+	if m.Header.MsgFlags&msg.MsgFlagReportable != 0 {
+		t.Fatalf("response flags = %#x: Reportable is set on an unconfirmed-class PDU", m.Header.MsgFlags)
+	}
+	if m.Header.MsgID != 1001 {
+		t.Fatalf("response msgID = %d, want the request's 1001", m.Header.MsgID)
+	}
 	// ParseV3 pre-splits the plaintext scopedPDU into m.PDU (raw PDU TLV).
 	pdu := m.PDU
 	if len(pdu) == 0 || pdu[0] != msg.PDUGetResponse {

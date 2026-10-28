@@ -39,6 +39,17 @@ type PKI struct {
 // rejected by RequireAndVerifyClientCert sinks.
 func NewPKI(t testing.TB) *PKI {
 	t.Helper()
+	return NewPKIWithNames(t)
+}
+
+// NewPKIWithNames is NewPKI with extra DNS SANs on the server certificate.
+//
+// It exists for peers that cannot dial 127.0.0.1: a net-snmp TSM client
+// refuses an IP target ("No matching names in the certificate to match the
+// expected 127.0.0.1"), so a client in a container has to connect as
+// host.docker.internal, and the certificate it verifies must name that host.
+func NewPKIWithNames(t testing.TB, extraServerNames ...string) *PKI {
+	t.Helper()
 	dir := t.TempDir()
 
 	caKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -75,7 +86,7 @@ func NewPKI(t testing.TB) *PKI {
 	writePEM(t, p.CAFile, "CERTIFICATE", caDER)
 	issueLeaf(t, caCert, caKey, p.ServerCrt, p.ServerKey,
 		"snmp-shield-server", []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		[]string{"localhost", "127.0.0.1", "::1"})
+		append([]string{"localhost", "127.0.0.1", "::1"}, extraServerNames...))
 	issueLeaf(t, caCert, caKey, p.ClientCrt, p.ClientKey,
 		"snmp-shield-manager", []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
 		[]string{"localhost", "127.0.0.1"})

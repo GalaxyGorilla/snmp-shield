@@ -488,7 +488,10 @@ func (g *GatewayTranslator) buildAndSendResponse(pend *gwPending, c *compiled, p
 // sends it on the front leg, echoing the request's msgID and security
 // level so the manager can correlate and verify it.
 func (g *GatewayTranslator) sendV3Response(pend *gwPending, c *compiled, resp []byte) error {
-	flags := pend.flags | msg.MsgFlagReportable
+	// A Response is an unconfirmed-class PDU, so the Reportable flag is
+	// cleared (RFC 3412 §6.4). Every vendor we test tolerates the flag on a
+	// response, but a response claiming to be confirmed is malformed.
+	flags := pend.flags &^ msg.MsgFlagReportable
 	engineID := g.clock.EngineID()
 	boots := g.clock.Boots()
 	etime := g.clock.Time()

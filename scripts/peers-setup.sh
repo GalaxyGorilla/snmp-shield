@@ -4,10 +4,13 @@
 #
 #   python venv + pysnmp + cryptography   -> test/peers/.venv
 #   node net-snmp                         -> test/peers/node_modules
+#   net-snmp in Docker (TSM/DTLS client)  -> docker image snmp-shield-net-snmp:peer
 #
-# net-snmp itself is NOT installed here: it is a system package
+# net-snmp on the host is NOT installed here: it is a system package
 # (apt-get install snmp / brew install net-snmp), and the adapter simply
-# reports itself unavailable when the binaries are missing.
+# reports itself unavailable when the binaries are missing. The Docker image
+# exists because a host net-snmp may be built without TLS, and RFC 6353
+# cannot be exercised without `dtls:`.
 #
 # Exit codes: 0 = ready (possibly partially: see the summary),
 #             77 = no usable toolchain on this host (tests skip).
@@ -70,6 +73,28 @@ if command -v snmpget >/dev/null 2>&1; then
     ready=1
 else
     missing="$missing net-snmp(snmpget)"
+fi
+
+# --- net-snmp in Docker: the only TSM/DTLS-capable peer ----------------------
+# The host's net-snmp may be built without TLS (Apple's is), and RFC 6353
+# cannot be exercised without a `dtls:` transport. A small Debian image with
+# a current net-snmp gives the TSM scenarios a real third-party client.
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    if docker image inspect snmp-shield-net-snmp:peer >/dev/null 2>&1; then
+        echo "== net-snmp docker peer: already built"
+    else
+        echo "== building net-snmp docker peer image (test/peers/netsnmp-docker)"
+        docker build --quiet -t snmp-shield-net-snmp:peer "$here/netsnmp-docker" >/dev/null 2>&1 \
+            || echo "   docker build failed"
+    fi
+    if docker image inspect snmp-shield-net-snmp:peer >/dev/null 2>&1; then
+        echo "== net-snmp docker peer: $(docker run --rm snmp-shield-net-snmp:peer snmpget --version 2>&1 | head -1) ready"
+        ready=1
+    else
+        missing="$missing docker-netsnmp"
+    fi
+else
+    missing="$missing docker(netsnmp-tsm)"
 fi
 
 if [ -n "$missing" ]; then

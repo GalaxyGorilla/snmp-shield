@@ -346,6 +346,67 @@ func TestGatewayGarbageDoesNotKillFront(t *testing.T) {
 	}
 }
 
+// TestGatewayResponseIsUnconfirmedClass: a v3 Response must echo the
+// manager's msgID and must NOT carry the Reportable flag — only
+// confirmed-class messages (requests, informs) set it (RFC 3412 §6.4).
+//
+// We used to echo the request's flags verbatim, Reportable included. Every
+// vendor we test tolerates that, so no interop suite failed; the wire was
+// still malformed. Both halves are checked here on the raw datagram.
+func TestGatewayResponseIsUnconfirmedClass(t *testing.T) {
+	const front, agent = 12622, 11722
+	frontAddr := net.JoinHostPort("127.0.0.1", strconv.Itoa(front))
+
+	fake, err := net.ListenPacket("udp", net.JoinHostPort("127.0.0.1", strconv.Itoa(agent)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fake.Close()
+	go fakeAgent(fake)
+
+	tr, stop := challengeGateway(t, front, agent)
+	defer stop()
+
+	src, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer src.Close()
+
+	dst, err := net.ResolveUDPAddr("udp", frontAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// craftV3GET sends msgID 1234 and AuthPriv|Reportable, exactly like a
+	// manager's first authenticated request after discovery.
+	req := craftV3GET(t, tr.clock.EngineID(), tr.clock.Boots(), tr.clock.Time(), 77)
+	if _, err := src.WriteTo(req, dst); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := src.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 65536)
+	n, _, err := src.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("no response to a valid authPriv GET: %v", err)
+	}
+	m, err := msg.ParseV3(buf[:n])
+	if err != nil {
+		t.Fatalf("response is not v3: %v", err)
+	}
+	if m.Header.MsgFlags&msg.MsgFlagReportable != 0 {
+		t.Fatalf("response flags = %#x: the Reportable flag is set on an unconfirmed-class PDU", m.Header.MsgFlags)
+	}
+	if m.Header.MsgFlags&(msg.MsgFlagAuth|msg.MsgFlagPriv) != msg.MsgFlagAuth|msg.MsgFlagPriv {
+		t.Fatalf("response flags = %#x, want authPriv preserved", m.Header.MsgFlags)
+	}
+	if m.Header.MsgID != 1234 {
+		t.Fatalf("response msgID = %d, want the request's 1234", m.Header.MsgID)
+	}
+}
+
 // --- helpers ----------------------------------------------------------------
 
 // openStoreForTest opens an in-memory engine store (challenge helper).

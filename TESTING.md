@@ -10,7 +10,7 @@ the less it can be fooled by our own encoders.
 |---|---|---|---|---|
 | Unit | `internal/*/..._test.go` | hand-built vectors, RFC examples | ms | yes |
 | Wire e2e (Go) | `internal/usm`, `internal/tsm`, `internal/tunnel`, `internal/proxy`, `internal/access`, `internal/snmpmetrics` | gosnmp, raw datagrams, real UDP/DTLS loopback | seconds | yes |
-| Conformance | `internal/conformance` | four independent vendor stacks driving the real binary | ~40s | yes |
+| Conformance | `internal/conformance` | four independent vendor stacks driving the real binary, plus net-snmp 5.9 over DTLS (TSM) in Docker | ~45s | yes |
 | Interop scripts | `scripts/interop-*.sh` | net-snmp CLI / snmpd as the peer | minutes | no (`make interop ...`) |
 | Smoke | `scripts/smoke-cli.sh` | a hand-written Python v2c agent | seconds | no |
 | Fuzz | `internal/{msg,access,config,cache,notifyfilter}` | the Go fuzzer | bounded | corpus only |
@@ -25,8 +25,8 @@ covered too.
 ```bash
 make test            # gofmt check + go test ./... -race
 make vet             # go vet ./...
-make conformance     # the vendor matrix only (~40s, builds the CLI once)
-make peers           # provision pysnmp venv + node net-snmp (idempotent)
+make conformance     # the vendor matrix only (~45s, builds the CLI once)
+make peers           # pysnmp venv + node net-snmp + the Docker TSM image (idempotent)
 make interop         # two-proxy net-snmp interop (rc 77 without net-snmp)
 
 go test ./internal/conformance -v -count=1          # see which peers ran/skipped
@@ -52,7 +52,14 @@ make vulnscan        # SBOM + grype, fails on HIGH+
   **`KindUnsupported` means the vendor cannot express the operation** —
   `skipUnsupported` skips it, so the gap stays visible without failing.
 - **Missing toolchain = skip with a reason.** `make peers` provisions the
-  managed ones; `gosnmp` is always present.
+  managed ones; `gosnmp` is always present. The two TSM scenarios need a
+  Docker daemon and skip without one: their peer is net-snmp 5.9 in a
+  container, because a host net-snmp may have no TLS transport at all.
+- **A vendor cannot be pointed at an IP in TSM.** net-snmp compares the
+  server certificate against the *name* dialed, so the container dials
+  `dtls:host.docker.internal:port`, the proxy listens on `[::]` (a container
+  cannot reach host loopback), and the test PKI issues the server certificate
+  with that SAN (`testkit.NewPKIWithNames`).
 - Every scenario starts its own proxy process on ephemeral ports and its own
   fake device; nothing is shared between subtests.
 
@@ -126,5 +133,6 @@ cases afterwards.
   on a developer machine with no network beyond loopback.
 - **No cross-repo integration with modbus-shield.** That is a separate
   product.
-- **No external TSM/DTLS peer on this host** (net-snmp without TLS, Docker
-  unavailable). See `CONFORMANCE.md` for the exact gap and how to close it.
+- **No third-party TSM *receiver*.** A containerised net-snmp is a TSM
+  client; `snmptrapd` cannot receive DTLS. Our notification wrapping stays
+  verified by `internal/tsm`. See `CONFORMANCE.md` for the exact gap.

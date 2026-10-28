@@ -10,10 +10,19 @@ silence in an adapter.
 | `peer_netsnmp.py` | net-snmp CLI (`snmpget`/`snmpset`/…) | 5.6.2.1 (Apple) | `snmp` package only |
 | `peer_pysnmp.py` | pysnmp (pure Python) | 7.1.30 | `test/peers/.venv` |
 | `peer_node.js` | node `net-snmp` (JS) | 3.29.2 | `test/peers/node_modules` |
+| `netsnmp-docker/Dockerfile` | net-snmp CLI in a container (**TSM/DTLS** client) | 5.9.3 (Debian) | Docker daemon |
 
-`scripts/peers-setup.sh` prepares the two managed toolchains (Python venv +
-npm install). Both are gitignored; the Go test suite skips a peer whose
-toolchain is missing and says why.
+`scripts/peers-setup.sh` prepares the managed toolchains (Python venv + npm
+install + the Docker image). The venv and `node_modules` are gitignored; the
+Go test suite skips a peer whose toolchain is missing and says why.
+
+The Docker image is not driven through the contract below: RFC 6353 needs a
+`dtls:` target and a client certificate, and net-snmp refuses to check a
+server certificate against an IP address at all. `internal/conformance/docker_test.go`
+mounts a client identity and runs `snmpget`/`snmpwalk`/`snmpset` in it; the
+scenario lives in `tsm_test.go`. It exists because a host net-snmp may be
+built without TLS (Apple's 5.6.2.1 is), which would otherwise leave TSM
+verified only against our own DTLS stack.
 
 ## Contract
 
@@ -74,9 +83,11 @@ traps, informs, and the compatibility probes.
 
 ## Deliberate limits
 
-- **No DTLS/TSM peers.** This host's net-snmp has no TLS support and Docker's
-  daemon is not running, so no external TSM client is available. TSM is
-  covered by Go-level tests only (`internal/tsm`), and the net-snmp TSM
-  interop script cannot pass here. Recorded in `CONFORMANCE.md`.
+- **No third-party TSM *receiver*.** The Docker image is a TSM *client*:
+  `snmptrapd`'s `dtls:` server mode never reads its socket (net-snmp 5.9), so
+  our proxy's TSM notification wrapping is verified by `internal/tsm` and
+  `scripts/tsm-sink`, not by a vendor. The request leg is verified by a
+  vendor.
+- **A missing Docker daemon skips the TSM scenarios**, it never fails them.
 - Adapters are **thin**. Anything that looks like protocol logic belongs in
   the Go suite, where the assertions are.

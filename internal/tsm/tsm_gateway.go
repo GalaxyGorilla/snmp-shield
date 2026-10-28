@@ -291,7 +291,7 @@ func (g *TSMGateway) handleFrontDatagram(conn net.Conn, dg []byte) {
 			g.met.WritesDenied.Inc()
 		}
 		refusal := msg.BuildPDU(msg.PDUGetResponse, fields.ReqID, msg.ErrStatusNotWritable, 0, fields.Varbinds)
-		out, werr := wrapTSMPDU(int32(m.Header.MsgID), refusal, m.ContextEngineID, m.Header.MsgFlags|msg.MsgFlagReportable, m.USM.UserName)
+		out, werr := wrapTSMPDU(int32(m.Header.MsgID), refusal, m.ContextEngineID, m.Header.MsgFlags&^msg.MsgFlagReportable, m.USM.UserName)
 		if werr == nil {
 			if _, werr = conn.Write(out); werr != nil {
 				g.log.Debug("tsm gateway: notWritable delivery failed", zap.Error(werr))
@@ -430,8 +430,10 @@ func (g *TSMGateway) handleAgentResponse(dg []byte) {
 	close(pend.ready)
 
 	// Echo the request's msgID/reqID/contextEngineID/securityName/security
-	// level: net-snmp's snmpv3_verify_msg validates every one of them.
-	flags := pend.clientFlags | msg.MsgFlagReportable
+	// level: net-snmp's snmpv3_verify_msg validates every one of them. The
+	// Reportable flag is the exception — it belongs to requests only
+	// (RFC 3412 §6.4), so a response clears it.
+	flags := pend.clientFlags &^ msg.MsgFlagReportable
 	out, err := wrapTSM(pend.clientMsgID, pend.clientReqID, msg.PDUGetResponse, fields.Varbinds, pend.clientCtxID, flags, pend.clientSecName)
 	if err != nil {
 		return

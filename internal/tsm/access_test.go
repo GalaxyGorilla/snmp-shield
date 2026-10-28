@@ -114,6 +114,9 @@ func TestTSMGatewayReadOnlyRefusesWrites(t *testing.T) {
 	if m.Header.MsgID != 2001 {
 		t.Errorf("response msgID = %d, want the request's 2001", m.Header.MsgID)
 	}
+	if m.Header.MsgFlags&msg.MsgFlagReportable != 0 {
+		t.Errorf("response flags = %#x: a locally generated refusal is still a Response (unconfirmed class)", m.Header.MsgFlags)
+	}
 	if len(m.PDU) == 0 || m.PDU[0] != msg.PDUGetResponse {
 		t.Fatalf("response PDU type = %v, want GetResponse", m.PDU)
 	}

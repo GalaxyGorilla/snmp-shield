@@ -18,6 +18,7 @@ about, and what cannot be verified on this host.
 | `pysnmp` | pure Python | 7.1.30 | `make peers` (venv) |
 | `node` | node `net-snmp` | 3.29.2 | `make peers` (npm) |
 | `snmpd` | net-snmp agent | 5.6.2.1 (Apple) | system `snmpd` (agent-leg scenario) |
+| `netsnmp-docker` | net-snmp CLI over **DTLS/TSM** | 5.9.3 (Debian) | Docker daemon (`make peers` builds the image) |
 
 `make peers` runs `scripts/peers-setup.sh`; it exits 77 when nothing can be
 provisioned. A peer with a missing toolchain **skips**, it never fails: this
@@ -37,10 +38,13 @@ runs, so the matrix can never become empty.
 | `TestTranslateChainRequests` (v1 + v2c × get/getnext/set/trap, getbulk, inform) | Two-proxy chain: an untouched legacy manager keeps working across the PSK-DTLS tunnel; traps come out clear v2c on the far side; inform confirmation survives four hops |
 | `TestTranslateChainAgentWritePolicy` | Device-side policy refuses a write and the refusal travels back through the tunnel instead of timing out; the device sees no SET |
 | `TestManagerGatewayRealAgent` (real snmpd) | v3 **request generation**: RFC 3414 discovery, signed+encrypted requests, and parsing a real agent's answer; v3 trap and v3 inform reception, including the authoritative-inform handshake |
+| `TestTSMGatewayVendorClient` (net-snmp 5.9 in Docker) | RFC 6353 **TSM**: a third-party client completes the DTLS handshake, presents a client certificate, and accepts our responses over `dtls:` — GET, GETNEXT, WALK, SET, plus a foreign-CA client being refused before anything reaches the device |
+| `TestTSMGatewayVendorClientReadOnly` | A locally generated `notWritable` reaches the vendor client as an answer, not a timeout, and the device sees no SET |
 
-TSM has no third-party peer on this host (see limits): it is covered by Go
-wire tests and by `scripts/interop-gateway-tsm.sh` where a TLS-enabled
-net-snmp exists.
+The TSM scenarios are the only ones that need Docker. A host whose net-snmp
+has no TLS (Apple's does not) would otherwise leave RFC 6353 verified only
+against our own DTLS stack — which is exactly the self-consistency trap this
+layer exists to avoid.
 
 ## Findings: real bugs the vendor matrix forced out
 
@@ -65,12 +69,12 @@ These were **our** bugs. Each is fixed and pinned by a regression test.
    `internal/usm/translate_manager_e2e_test.go:TestChainInformConfirmationSourceSocket`
    and `TestTranslateChainRequests/inform-round-trip-through-both-proxies`.
 
-3. **Manager-gateway inform confirmations used a fresh msgID and set
-   Reportable.** A v3 Response must echo the request's msgID (it is the
-   transaction identifier) and must not be a confirmed-class message.
-   net-snmp, pysnmp and node silently dropped that answer; gosnmp does not
-   validate the v3 header msgID, so a gosnmp-only test could never see it.
-   Fixed by `buildV3Reply`/`buildV3Message` in
+3. **Manager-gateway inform confirmations used a fresh msgID.** A v3 Response
+   must echo the request's msgID: it is the transaction identifier.
+   net-snmp, pysnmp and node silently dropped the answer and timed out;
+   gosnmp does not validate the v3 header msgID, so a gosnmp-only test could
+   never see it (measured: mutating only the msgID fails those three and
+   passes gosnmp). Fixed by `buildV3Reply`/`buildV3Message` in
    `internal/usm/manager_gateway.go`; pinned by
    `TestManagerGatewayCompliantInform`.
 
@@ -86,6 +90,20 @@ These were **our** bugs. Each is fixed and pinned by a regression test.
    state. Pinned by `TestManagerGatewayCompliantInform` and the vendor
    matrix (net-snmp, pysnmp, node, gosnmp).
 
+5. **Responses carried the Reportable flag.** Our USM gateway and TSM gateway
+   echoed the request's `msgFlags` verbatim, so every response — and every
+   locally generated `notWritable` refusal — claimed to be a
+   confirmed-class message. RFC 3412 §6.4 reserves the flag for
+   requests/informs. This one is *not* vendor-caught: all four stacks
+   tolerate it (measured: setting it on the inform confirmation changes
+   nothing for net-snmp, pysnmp, node or gosnmp), which is why it survived
+   until the flag was checked against the RFC. Fixed in
+   `internal/usm/gateway.go` (`sendV3Response`) and
+   `internal/tsm/tsm_gateway.go` (forwarded answers and refusals); pinned by
+   `TestGatewayResponseIsUnconfirmedClass`,
+   `TestTSMGatewayGet` and `TestTSMGatewayReadOnlyRefusesWrites`, and the
+   cleared form is what the vendor TSM client above verifies.
+
 ## Findings: vendor divergences (not our bugs)
 
 Recorded so nobody "fixes" the proxy to match one vendor. Adapters normalize
@@ -99,11 +117,13 @@ Recorded so nobody "fixes" the proxy to match one vendor. Adapters normalize
   gosnmp tolerates (`msgMaxSize` as `FF FF`) are rejected with
   `Received bad msgMaxSize`. This class was found by net-snmp during earlier
   hardening and is pinned in `internal/msg/ber_test.go`.
-- **net-snmp is the strict decoder.** It validates the v3 msgID, the
-  Reportable flag on responses, the echoed contextEngineID, securityName,
-  engine boots/time and the security-level flags. gosnmp validates almost
-  none of these; a gosnmp-only suite gives false confidence in exactly this
-  area.
+- **net-snmp is the strict decoder.** It validates the v3 msgID, the echoed
+  contextEngineID, securityName, engine boots/time and the security-level
+  flags. gosnmp validates almost none of these; a gosnmp-only suite gives
+  false confidence in exactly this area. Where net-snmp is *not* strict is
+  instructive too: it (and pysnmp, node, gosnmp) all tolerate a Reportable
+  flag on a response, so that defect had to be caught by reading RFC 3412,
+  not by a peer (finding 5 above).
 - **Inform authority.** net-snmp, pysnmp and node perform receiver-side
   discovery for informs (RFC-correct). gosnmp treats informs like traps and
   addresses them to its own engine. The proxy supports both: a message
@@ -136,13 +156,16 @@ Recorded so nobody "fixes" the proxy to match one vendor. Adapters normalize
 
 ## Deliberate limits
 
-- **No external TSM/DTLS peer.** This host's net-snmp (5.6.2.1, Apple) is
-  built without TLS support, and Docker's daemon is not running, so a modern
-  net-snmp container cannot be used either. TSM is covered by
-  `internal/tsm` wire tests and `scripts/interop-gateway-tsm.sh` (which
-  skips rc 77 without a TLS-enabled `snmpget` + `openssl`). Re-run that
-  script on a host with a modern net-snmp before trusting TSM against
-  third-party clients.
+- **No third-party TSM *receiver*.** The Docker peer is a client: net-snmp
+  5.9's `snmptrapd` in `dtls:` mode never reads its socket, so it cannot
+  receive our TSM notifications. Notification wrapping stays verified by
+  `internal/tsm` and `scripts/tsm-sink` (our own sink). The request direction
+  — where the echo rules, the certificate gate and the response format are
+  judged by a vendor — is covered.
+- **Docker required for the TSM scenarios.** Without a running daemon they
+  skip. `scripts/interop-gateway-tsm.sh` remains the shell-level equivalent
+  for hosts that have a TLS-enabled net-snmp installed directly (rc 77 when
+  they do not).
 - **No vendor v3 trap *receiver*.** No peer here offers a configurable USM
   trap receiver with a known engine, so notification *content* is verified
   by `testkit.V3Sink` (gosnmp `TrapListener`). The sending side of every

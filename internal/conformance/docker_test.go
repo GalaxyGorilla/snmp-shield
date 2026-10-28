@@ -25,13 +25,13 @@ import (
 func requireDockerNetSNMP(t *testing.T) {
 	t.Helper()
 	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("docker not installed — the third-party TSM client needs it (see CONFORMANCE.md)")
+		skipOrFail(t, "docker not installed — the third-party TSM client needs it (see CONFORMANCE.md)")
 	}
 	if out, err := exec.Command("docker", "info", "--format", "{{.ServerVersion}}").CombinedOutput(); err != nil {
-		t.Skipf("docker daemon unavailable (%s) — start Docker and run `make peers`", firstLine(string(out)))
+		skipOrFail(t, "docker daemon unavailable (%s) — start Docker and run `make peers`", firstLine(string(out)))
 	}
 	if err := exec.Command("docker", "image", "inspect", dockerNetSNMPImage).Run(); err != nil {
-		t.Skipf("image %s missing — run `make peers` to build it", dockerNetSNMPImage)
+		skipOrFail(t, "image %s missing — run `make peers` to build it", dockerNetSNMPImage)
 	}
 }
 

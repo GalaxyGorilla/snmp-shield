@@ -34,6 +34,13 @@ provisioned. A peer with a missing toolchain **skips**, it never fails: this
 repository has no CI and must stay green on a bare machine. `gosnmp` always
 runs, so the matrix can never become empty.
 
+For a release, run `make conformance-required` instead
+(`CONFORMANCE_REQUIRED=1`): every environment skip then becomes a failure,
+because "all peers green" on a host without Docker, pysnmp or node means
+gosnmp alone ran. A vendor limitation (`KindUnsupported` — the stack cannot
+express the operation) still skips, and a source-scan test fails if a new
+`t.Skip` bypasses the gate.
+
 ## Covered today
 
 | Scenario | What it proves |

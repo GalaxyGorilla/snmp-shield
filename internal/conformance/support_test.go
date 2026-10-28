@@ -15,7 +15,7 @@ func eachPeer(t *testing.T, fn func(t *testing.T, p Peer)) {
 		p := p
 		t.Run(p.Name(), func(t *testing.T) {
 			if reason := p.Unavailable(); reason != "" {
-				t.Skipf("%s unavailable: %s", p.Stack(), reason)
+				skipOrFail(t, "%s unavailable: %s", p.Stack(), reason)
 			}
 			t.Logf("peer: %s", p.Stack())
 			fn(t, p)

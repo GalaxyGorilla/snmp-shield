@@ -5,7 +5,7 @@
 BINARY := snmp-shield
 GO     ?= go
 
-.PHONY: all build test fmt-check vet staticcheck govulncheck race peers conformance interop release release-all sbom vulnscan clean
+.PHONY: all build test fmt-check vet staticcheck govulncheck race peers conformance conformance-required interop release release-all sbom vulnscan clean
 
 all: build
 
@@ -49,6 +49,15 @@ peers:
 # Requires `make peers` for the full matrix.
 conformance:
 	$(GO) test ./internal/conformance -count=1 -timeout 900s
+
+# conformance-required is the release gate: the same matrix, but a missing
+# toolchain is a FAILURE (CONFORMANCE_REQUIRED=1) instead of a skip. Without
+# it a host with no Docker, node or pysnmp reports success while only gosnmp
+# executed — the strongest test layer degrades into the weakest, silently.
+# Genuine vendor limitations (a stack that cannot express an operation) still
+# skip. Run `make peers` first; an incomplete host now says so loudly.
+conformance-required:
+	CONFORMANCE_REQUIRED=1 $(GO) test ./internal/conformance -count=1 -timeout 900s
 
 # release builds a stripped static binary for appliance deployment.
 release:

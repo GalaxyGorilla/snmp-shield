@@ -394,6 +394,7 @@ make release     # stripped static binary for deployment
 make release-all # cross-builds: linux-amd64, linux-arm64, linux-armv7 into dist/
 make peers       # provision the third-party stacks for the conformance matrix
 make conformance # cross-vendor matrix: net-snmp, pysnmp, node net-snmp, gosnmp
+make conformance-required # same, but a missing peer FAILS (release gate)
 make interop     # net-snmp CLI interop test (exit 77 = skip when missing)
 make sbom        # SPDX + CycloneDX SBOMs for the release binary (syft) into dist/
 make vulnscan    # match the SBOM against NVD/GHSA/OSV; fails on HIGH+ (grype)
@@ -402,7 +403,10 @@ make vulnscan    # match the SBOM against NVD/GHSA/OSV; fails on HIGH+ (grype)
 Every commit is expected to pass build + vet + the race suite (run
 manually; the project is CI-free). `make conformance` additionally drives
 the built binary with independent SNMP implementations, so a bug in our own
-encoder cannot hide behind a matching decoder; see
+encoder cannot hide behind a matching decoder; for a release, use
+`make conformance-required`, which fails instead of skipping when Docker,
+pysnmp or node is missing (a plain run on a bare host exercises only the
+in-process peer). See
 [`CONFORMANCE.md`](CONFORMANCE.md) and [`TESTING.md`](TESTING.md).
 `make vulnscan` also runs `scripts/sbom.sh`-style supply-chain checks
 standalone; both targets

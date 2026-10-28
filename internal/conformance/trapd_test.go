@@ -151,13 +151,13 @@ func (f *trapdFixture) waitForLog(t *testing.T, want string, timeout time.Durati
 func requireDocker(t *testing.T, what string) {
 	t.Helper()
 	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skipf("%s unavailable: docker not installed (run `make peers`)", what)
+		skipOrFail(t, "%s unavailable: docker not installed (run `make peers`)", what)
 	}
 	if out, err := exec.Command("docker", "info", "--format", "{{.ServerVersion}}").CombinedOutput(); err != nil {
-		t.Skipf("%s unavailable: docker daemon not reachable (%s)", what, firstLine(string(out)))
+		skipOrFail(t, "%s unavailable: docker daemon not reachable (%s)", what, firstLine(string(out)))
 	}
 	if err := exec.Command("docker", "image", "inspect", dockerNetSNMPImage).Run(); err != nil {
-		t.Skipf("%s unavailable: image %s missing (run `make peers`)", what, dockerNetSNMPImage)
+		skipOrFail(t, "%s unavailable: image %s missing (run `make peers`)", what, dockerNetSNMPImage)
 	}
 }
 

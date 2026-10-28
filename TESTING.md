@@ -26,6 +26,7 @@ covered too.
 make test            # gofmt check + go test ./... -race
 make vet             # go vet ./...
 make conformance     # the vendor matrix only (~45s, builds the CLI once)
+make conformance-required  # same matrix, but a missing toolchain FAILS (release gate)
 make peers           # pysnmp venv + node net-snmp + the Docker TSM image (idempotent)
 make interop         # two-proxy net-snmp interop (rc 77 without net-snmp)
 
@@ -41,6 +42,20 @@ govulncheck ./...
 make vulnscan        # SBOM + grype, fails on HIGH+
 ```
 
+## Flags-mode wiring sweep
+
+`cmd/snmp-shield/flags_sweep_test.go` walks every role × security-mode path
+(eight: manager/agent × usm-translate/passthrough, usm-gateway full and
+notification-only, usm-manager-gateway, tsm-gateway) with the **full** flag
+set, and asserts each config-bound flag survives assembly — twice, once with
+`--read-only` and once with an explicit write policy. Two completeness
+tripwires keep it from rotting: `fullOpts()` must set every `flagsOpts` field
+(non-zero), and `TestOptsWiresEveryFlag` parses the real `register()` flag set
+and compares the result field by field, so a flag that is registered but not
+copied into `flagsOpts` fails too. Conformance finding 1 (gateway
+access-policy flags dropped by an early return) is reproduced by the sweep if
+the early return is reintroduced — both halves were verified by mutation.
+
 ## Conformance conventions
 
 - **Peers are never adapted to us.** A vendor disagreement is a finding for
@@ -51,11 +66,23 @@ make vulnscan        # SBOM + grype, fails on HIGH+
 - **`KindUsage` means the scenario is wrong** — `mustRun` fails loudly.
   **`KindUnsupported` means the vendor cannot express the operation** —
   `skipUnsupported` skips it, so the gap stays visible without failing.
-- **Missing toolchain = skip with a reason.** `make peers` provisions the
-  managed ones; `gosnmp` is always present. The TSM scenarios, the 5.9
-  clear-leg peer and the `snmptrapd` receiver need a Docker daemon and skip
-  without one: the container carries the current net-snmp (5.9.3), while a
-  host net-snmp may be Apple's 5.6.2.1 with no TLS transport at all.
+- **Missing toolchain = skip with a reason — unless the run claims to be
+  complete.** `make peers` provisions the managed ones; `gosnmp` is always
+  present. The TSM scenarios, the 5.9 clear-leg peer and the `snmptrapd`
+  receiver need a Docker daemon and skip without one: the container carries
+  the current net-snmp (5.9.3), while a host net-snmp may be Apple's 5.6.2.1
+  with no TLS transport at all. Skips route through `skipOrFail`, so
+  `make conformance-required` (`CONFORMANCE_REQUIRED=1`) turns every one of
+  them into a failure: a release run cannot pass on a host that only ran
+  gosnmp. `TestNoSkipBypassesRequiredGate` source-scans the package and fails
+  when a new `t.Skip` bypasses that helper; the only sanctioned direct skip
+  is `KindUnsupported` (the vendor genuinely cannot express the operation).
+- **An available peer must also be runnable.** `Unavailable()` probes the
+  peer's runtime through PATH as well as its data files — otherwise a peer
+  whose `node` was removed still counts as present (the `node_modules`
+  directory survives) and every scenario fails as an adapter error instead of
+  skipping with a fixable reason. `TestMissingRuntimeSkipsInsteadOfFailing`
+  pins it.
 - **The notification receiver is a vendor too.** `TestUSMGatewayVendor*Receiver`
   read `snmptrapd`'s log, which it emits only after USM verification and
   decryption succeed. Nothing in that path uses our own sink: without it,
@@ -146,19 +173,22 @@ cases afterwards.
 here rather than discovered later by someone trusting the colour. Each line
 names what would close it.
 
-- **A fresh machine proves much less than a provisioned one.** The matrix
-  skips (with a reason, in `-v` output) when Docker, pysnmp or node are
-  absent, and after such a run "all peers green" can mean gosnmp alone. Not
-  covered by anything: the strongest layer is the one that degrades quietly.
-  *Closer with:* a `make conformance-required` that fails when a peer skips,
-  used before a release rather than on every edit.
-- **`cmd` and `observ` are the least-covered production code** (measured
-  2026-10-28: `cmd/snmp-shield` 53.4%, `internal/observ` 0%, overall 67.6%
-  excluding the conformance package). That is not cosmetic: conformance
-  finding 1 — gateway access-policy flags silently dropped — lived in
-  `flagsConfig`, and the fix is pinned for the gateway role only.
-  *Closer with:* a table-driven `flagsConfig` × security-mode sweep that
-  asserts every flag survives assembly in every valid mode.
+- **A green `make conformance` still proves much less than a provisioned
+  host.** It skips (with a reason, in `-v` output) when Docker, pysnmp or node
+  are absent, and after such a run "all peers green" can mean gosnmp alone.
+  `make conformance-required` now makes every such skip a failure, but nothing
+  enforces running it: there is no CI by design, so the gate is only as good
+  as the release checklist that calls it. Vendor limitations
+  (`KindUnsupported`) still skip, correctly, even under the gate.
+- **`observ` and `cmd`'s run paths are the least-covered production code**
+  (measured 2026-10-28: `cmd/snmp-shield` 53.6%, `internal/observ` 0%, overall
+  67.6% excluding the conformance package). Assembly coverage is now
+  structural rather than incidental: the flags wiring sweep (above) exercises
+  every role × mode with every flag, which closes the class conformance
+  finding 1 lived in. What is still thin is process lifecycle —
+  `runRole`/`Run`, signal handling, reload, logger errors — not configuration
+  assembly. *Closer with:* a harness that starts the built binary per role,
+  sends SIGHUP, and asserts the reload/restart-required behaviour.
 - **IPv4 is assumed; IPv6 is unproven.** Engine discovery binds the IPv4
   wildcard, the container reaches the host by IPv4 name, and no test binds a
   `[::1]` front leg. *Closer with:* one scenario per mode on `[::1]`.

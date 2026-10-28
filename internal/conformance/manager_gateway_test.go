@@ -64,7 +64,7 @@ func startV3Snmpd(t *testing.T) *snmpdAgent {
 		path = p
 	}
 	if _, err := os.Stat(path); err != nil {
-		t.Skipf("snmpd not installed (%s): the v3 agent leg is unverified on this host", path)
+		skipOrFail(t, "snmpd not installed (%s): the v3 agent leg is unverified on this host", path)
 	}
 
 	dir := t.TempDir()
@@ -82,7 +82,7 @@ func startV3Snmpd(t *testing.T) *snmpdAgent {
 	cmd.Stdout = lb
 	cmd.Stderr = lb
 	if err := cmd.Start(); err != nil {
-		t.Skipf("snmpd cannot start here: %v", err)
+		skipOrFail(t, "snmpd cannot start here: %v", err)
 	}
 	agent := &snmpdAgent{addr: addr, cmd: cmd, log: lb, done: make(chan struct{})}
 	go func() {

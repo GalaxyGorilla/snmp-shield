@@ -74,6 +74,19 @@ func (p *execPeer) Unavailable() string {
 				return
 			}
 		}
+		// cmd[0] is either an absolute path inside test/peers (the venv)
+		// or a bare runtime name resolved through PATH (python3, node).
+		// The bare case must be probed too: previously only absolute
+		// entries were checked, so a host whose node had been removed
+		// still reported the peer as available as long as node_modules
+		// survived — and then every scenario failed as an adapter error
+		// instead of skipping with a fixable reason.
+		if !filepath.IsAbs(p.cmd[0]) {
+			if _, err := exec.LookPath(p.cmd[0]); err != nil {
+				p.unavail = fmt.Sprintf("%s not found in PATH", p.cmd[0])
+				return
+			}
+		}
 		for _, part := range p.cmd {
 			if filepath.IsAbs(part) {
 				if _, err := os.Stat(part); err != nil {

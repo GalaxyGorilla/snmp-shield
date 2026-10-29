@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -305,6 +306,17 @@ func probeTunnel(ctx context.Context, cfg *config.Config) []check {
 	}
 	var checks []check
 	for _, addr := range addrs {
+		// The selftest runs under ONE overall deadline (30s in runSelftest),
+		// while each endpoint may spend 6s. Without this guard an HA list
+		// whose first endpoints are dead reports the live ones as failed,
+		// because their dial starts with the budget already spent. Say
+		// "not probed" instead — a false failure is as misleading as a
+		// false ok when the operator is deciding whether to cut over.
+		if ctx.Err() != nil {
+			checks = append(checks, check{Name: "tunnel " + addr, OK: false,
+				Detail: "not probed: selftest deadline reached"})
+			continue
+		}
 		d := &tunnel.Dialer{
 			Mode:            cfg.Tunnel.Mode,
 			RemoteAddr:      addr,
@@ -354,12 +366,28 @@ func probeAgent(ctx context.Context, addr, community string) check {
 
 	var lastErr string
 	for attempt := 0; attempt < 2; attempt++ {
+		// Do not start an attempt the context has already cancelled: its
+		// deadline is in the past, so the write fails immediately and the
+		// check would blame the write instead of the timeout that actually
+		// happened.
+		if ctx.Err() != nil {
+			break
+		}
 		deadline := time.Now().Add(2 * time.Second)
 		if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
 			deadline = dl
 		}
 		_ = conn.SetDeadline(deadline)
 		if _, err := conn.Write(dg); err != nil {
+			// A write that times out means the deadline expired between the
+			// context check above and this write — the attempt never
+			// reached the device. Report the timeout it actually was, not a
+			// confusing "write ... i/o timeout".
+			var ne net.Error
+			if errors.As(err, &ne) && ne.Timeout() {
+				lastErr = err.Error()
+				break
+			}
 			return check{Name: name, OK: false, Detail: err.Error()}
 		}
 		buf := make([]byte, 65536)
@@ -384,19 +412,35 @@ func probeAgent(ctx context.Context, addr, community string) check {
 		}
 		lastErr = rerr.Error()
 	}
+	if lastErr == "" {
+		// The context was already done before the first attempt.
+		if cerr := ctx.Err(); cerr != nil {
+			lastErr = cerr.Error()
+		} else {
+			lastErr = "no attempt made"
+		}
+	}
 	return check{Name: name, OK: false, Detail: "no response: " + lastErr}
 }
 
-// sysDescrVarbinds builds the raw varbind-list content for a single GET
-// varbind: sysDescr.0 = NULL (a varbind TLV wrapped in the varbind-list
-// SEQUENCE, as BuildPDU expects).
+// sysDescrVarbinds builds the raw varbind-list CONTENT for a single GET
+// varbind: sysDescr.0 = NULL. BuildPDU wraps the content in the
+// varbind-list SEQUENCE itself, so this returns exactly one varbind TLV.
+//
+// Two bugs lived here, both invisible to a lenient peer and fatal to a
+// strict one (found by probing the testkit device, which validates input):
+// the varbind was wrapped in a second SEQUENCE (so the list held a SEQUENCE
+// where an OID was expected), and the mandatory NULL value was missing
+// (RFC 3416 §4.2.1: a GET varbind is a SEQUENCE of name and value).
+// selftest therefore reported a healthy device as "no response".
 func sysDescrVarbinds() []byte {
 	oid, err := msg.EncodeOID("1.3.6.1.2.1.1.1.0")
 	if err != nil {
 		return nil
 	}
-	varbind := msg.AppendTLV(nil, 0x30, msg.AppendTLV(nil, 0x06, oid))
-	return msg.AppendTLV(nil, 0x30, varbind)
+	body := msg.AppendTLV(nil, 0x06, oid)
+	body = msg.AppendTLV(body, 0x05, nil) // unSpecified / NULL
+	return msg.AppendTLV(nil, 0x30, body)
 }
 
 // probeAgentV3 probes the v3 agent behind an usm-manager-gateway: the

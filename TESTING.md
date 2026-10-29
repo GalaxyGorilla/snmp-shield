@@ -213,6 +213,17 @@ stack immediately runs the whole matrix.
 - **Test proxies log to a buffer** that is printed only when the test fails.
   Rerun a failing scenario with `-v` and add `--log-level debug` to the
   fixture when diagnosing a wire problem.
+- **A cold chain may drop the first request — wait for a real answer.** The
+  tunnel is a live stream, not a replay queue: a frame that reaches the
+  agent-side proxy before its per-session translator has subscribed is
+  discarded. For `usm-translate` that first request also *triggers* engine
+  discovery, so the loss costs a full discovery timeout (5 s) and the
+  manager's read loop is blocked while it waits. A real SNMP manager retries,
+  so the product is fine; a test that measures "the first request works"
+  measures startup timing instead. `waitChainReady` (in
+  `internal/proxy/goroutines_test.go`) polls until an answer arrives before
+  any measurement — under `-race` the window is wide enough that the
+  non-retrying version failed every run.
 
 ## Fuzzing
 
@@ -251,15 +262,26 @@ names what would close it.
   enforces running it: there is no CI by design, so the gate is only as good
   as the release checklist that calls it. Vendor limitations
   (`KindUnsupported`) still skip, correctly, even under the gate.
-- **`observ` and `cmd`'s run paths are the least-covered production code**
-  (measured 2026-10-28: `cmd/snmp-shield` 53.6%, `internal/observ` 0%, overall
-  67.6% excluding the conformance package). Assembly coverage is now
-  structural rather than incidental: the flags wiring sweep (above) exercises
-  every role × mode with every flag, which closes the class conformance
-  finding 1 lived in. What is still thin is process lifecycle —
-  `runRole`/`Run`, signal handling, reload, logger errors — not configuration
-  assembly. *Closer with:* a harness that starts the built binary per role,
-  sends SIGHUP, and asserts the reload/restart-required behaviour.
+- **`cmd`'s process lifecycle is only partly covered** (measured 2026-10-29:
+  `cmd/snmp-shield` 86.0%, `internal/observ` 100%, overall 67.5% excluding
+  the conformance package). Assembly coverage is structural rather than
+  incidental: the flags wiring sweep (above) exercises every role × mode with
+  every flag, which closes the class conformance finding 1 lived in. The
+  `selftest` probes are now driven against real wire peers (`selftest_test.go`:
+  a live testkit device, a silent one, a malformed answer, a real PSK-DTLS
+  listener per endpoint, a fake USM agent for discovery + authPriv, expired /
+  expiring / missing certificates) and the SIGHUP path runs end to end from a
+  YAML file to the wire (`internal/proxy/reload_e2e_test.go`). What is still
+  uncovered is the *signal* edge and `Run` itself: `runRole`'s success path
+  blocks in `proxy.Run`, which installs the process-wide SIGINT/SIGTERM and
+  SIGHUP handlers, and a test cannot deliver those without firing into the
+  test binary's own process. Everything from the SIGHUP handler inwards is
+  covered (`reloadLoop` → `reloadConfig` → `config.Load` → the next
+  datagram); the handler registration and shutdown-by-signal are not.
+  *Closer with:* a harness that starts the **built binary** per role, sends a
+  real SIGHUP and SIGTERM, and asserts the reload and the clean exit — the
+  conformance harness already builds and supervises the CLI, so it is the
+  natural home.
 - **IPv6 is covered at the socket level, not by a vendor.** One scenario per
   mode now binds `[::1]`: the USM gateway's request leg, its inform round trip
   (including the sink-discovery socket, which is separate from the request

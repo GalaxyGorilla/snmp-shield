@@ -93,6 +93,7 @@ func TestNoPerRequestGoroutines(t *testing.T) {
 			defer stop()
 
 			poll := newChainPoll(t, listen)
+			waitChainReady(t, poll)
 			for i := 0; i < 5; i++ { // warm up the lazily started loops
 				if _, err := poll.once(5 * time.Second); err != nil {
 					t.Fatalf("warmup request %d: %v", i, err)
@@ -119,4 +120,25 @@ func TestNoPerRequestGoroutines(t *testing.T) {
 			waitGoroutines(t, baseline+8, 15*time.Second)
 		})
 	}
+}
+
+// waitChainReady polls until the chain answers a request.
+//
+// A cold usm-translate chain discovers the agent's engine on the first
+// request, and a frame that reaches the agent side before its translator has
+// subscribed is dropped (the tunnel is a live stream, not a replay queue).
+// A real manager retries on timeout, so the test must too — otherwise it
+// measures cold-start timing under -race instead of goroutines.
+func waitChainReady(t *testing.T, poll *chainPoll) {
+	t.Helper()
+	deadline := time.Now().Add(15 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		if _, err := poll.once(time.Second); err == nil {
+			return
+		} else {
+			lastErr = err
+		}
+	}
+	t.Fatalf("the chain never answered a request: %v", lastErr)
 }

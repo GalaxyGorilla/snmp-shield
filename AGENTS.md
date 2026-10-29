@@ -125,6 +125,7 @@ plus the short `/tmp` prefix hides it).
 | Static analysis (staticcheck + govulncheck toolset, pragmatic: fix only meaningful findings) | done (tested, staticcheck zero findings — dead code removed, pion/dtls v3.1.4 upgrade for GO-2026-6165, options-API migration; govulncheck clean) |
 | `validate` subcommand (`--role` + same flags/`--config`; `--json` for tooling; pre-flights cert keypairs, CA files, engine-store writability) + `selftest` subcommand (validate + probes: tunnel handshake per endpoint (manager), SNMP GET sysDescr.0 to the real agent (agent/gateway), front-cert expiry (tsm-gateway); `--probe=false`) | done (tested, unit tests + manual live-agent/tunnel/dead-addr verification) |
 | `validate --json` exit-code fix (rc mirrors `ok` in both output modes; previously `validate --json` returned 0 on invalid configs while `selftest --json` always honored rc 1 — README/AGENTS "Exit 0/1" only held for text mode) | done (tested, unit + live rc verification; full race suite re-run green) |
+| `selftest` probes + reload + observ covered, and the probe's GET fixed: the probes behind the appliance's "test connection" button had **no tests at all** (0%), and driving them against a *validating* peer found the reason they could lie — `sysDescrVarbinds` emitted a **double-wrapped varbind** (a SEQUENCE where the varbind list expects an OID) with **no NULL value** (RFC 3416 §4.2.1 requires one), so a lenient agent answered and a strict one dropped the request: `selftest` reported a healthy device as "no response". Also fixed: an expired selftest budget blamed a *write* timeout for the second attempt, and an HA endpoint list whose first entries are dead reported the live ones as failed because all per-endpoint budgets come out of one deadline (now "not probed: selftest deadline reached") | done (tested: `cmd/snmp-shield/selftest_test.go` — live/silent/malformed v2c device, retry-once, per-endpoint PSK-DTLS handshakes, a fake USM agent for discovery+authPriv incl. a tampered answer, expired/expiring/missing certs, community precedence, `runRole` exit codes, and the whole `selftest --role agent` subcommand end to end; `internal/proxy/reload_e2e_test.go` drives SIGHUP from a YAML file to the wire (lock writes → `notWritable` with 0 SETs at the device → invalid file keeps the policy → restart-required change reported, listener untouched → flags mode a logged no-op) and mutation-verified by dropping `h.Store`; `internal/observ/observ_test.go` pins log levels, the scrape page, the SNMP MIB counter row ORDER, `/metrics`-only routing, port release on shutdown and a logged bind error; cmd coverage 53.6% → 86.0%, observ 0% → 100%) |
 | Makefile (`make build/test/vet/release/release-all/interop`), systemd units (`deploy/*.service`: hardening, CAP_NET_BIND_SERVICE, StateDirectory, Type=notify + WatchdogSec=30), examples directory (6 copy-paste walkthroughs), README rewrite | done |
 | README decision guidance (native SNMPv3, WireGuard/IPsec, and `snmpfwd` alternatives; snmp-shield's DTLS/TSM and appliance-operations fit) | done |
 | Goroutine-leak regression test (`internal/tunnel/leak_test.go`: 30 connect/exchange/close cycles over real PSK-DTLS loopback, goroutine count must return to baseline; server side keyed on `Session.Done()` + production `SetTuning` so there is no test-end accounting noise) | done (tested, -race -count 8 stable: before=after=5) |
@@ -887,10 +888,27 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   probes are deliberately non-binding — the tunnel probe is a plain
   client dial (works while the service holds the tunnel), the agent
   probe is a one-shot SNMPv2c GET sysDescr.0 built with `msg.BuildPDU`
-  (raw varbind-list content: a varbind TLV wrapped in the 0x30
-  varbind-list SEQUENCE) so no gosnmp dependency is needed in cmd, and
+  (the varbind-list CONTENT: exactly one varbind TLV, `SEQUENCE { OID,
+  NULL }`) so no gosnmp dependency is needed in cmd, and
   the cert-expiry probe only WARNS at 30 days (ok=true) — expired is a
-  failure. `checkEngineStore` mirrors `cache.Open` semantics
+  failure.
+  **The GET varbind was wrong for years (fixed, pinned):** it was
+  double-wrapped (a SEQUENCE where the list expects an OID) and carried
+  no NULL value, which RFC 3416 §4.2.1 requires. A lenient agent
+  answered anyway; a validating one (testkit's device, which parses its
+  input) dropped it, so `selftest` said "no response" for a healthy
+  device. `TestSysDescrVarbindsIsConformant` pins the bytes, and
+  `TestProbeAgentAgainstDevice` pins the wire behaviour — probing a
+  *validating* peer is the only way this class surfaces, which is why
+  the probes now have tests instead of manual verification.
+  Two probe-behaviour rules came out of the same tests: an attempt the
+  context has already cancelled is **not** started (otherwise the second
+  attempt's write fails instantly and the report blames the write
+  instead of the timeout), and a tunnel endpoint whose dial would begin
+  with the shared deadline already spent is reported "not probed:
+  selftest deadline reached" rather than as a failed handshake — the
+  selftest has ONE 30s budget for all endpoints, so a long HA list of
+  dead peers used to make the live ones look broken. `checkEngineStore` mirrors `cache.Open` semantics
   (O_RDWR|O_CREATE on the file path; a directory in place fails; parent
   dirs are NOT created). `--json` reports go to stdout (tooling reads
   them), human errors go to stderr with exit 1. **Exit-code contract
@@ -1375,6 +1393,19 @@ Harness lessons:
   requests may not add 10 goroutines, and the count must return to baseline
   after stop. Both passthrough bugs reproduce as `36 at steady state, 436
   during 200 requests` when reverted.
+- **A cold chain may drop the first request, so wait for an answer before
+  measuring.** The tunnel is a live stream, not a replay queue: a frame that
+  reaches the agent side before its per-session translator has subscribed is
+  discarded. In `usm-translate` that first request also *triggers* engine
+  discovery, whose Report never arrives — so the loss costs a full 5 s
+  discovery timeout, during which the manager's single `readClear` loop is
+  blocked and the next datagram sits in the socket buffer. A real manager
+  retries, so this is benign on the wire (and the HA soak's failover
+  failures include it); a test that asserts "the first request works" is
+  measuring cold-start timing. `waitChainReady` polls until an answer
+  arrives; under `-race` the window is wide enough that the non-retrying
+  version failed **every** run while passing without `-race` — a
+  heisenflake that only a race build exposed.
 - `TestPanickingTunnelDownCallbackStillFiresDone` now sets a 200 ms keepalive
   on the server session. Without it the test depended on the client's DTLS
   `close_notify` arriving to make the server's read loop notice the dead

@@ -5,7 +5,7 @@
 BINARY := snmp-shield
 GO     ?= go
 
-.PHONY: all build test fmt-check vet staticcheck govulncheck race peers conformance conformance-required interop release release-all sbom vulnscan clean
+.PHONY: all build test fmt-check vet staticcheck govulncheck race peers conformance conformance-required soak interop release release-all sbom vulnscan clean
 
 all: build
 
@@ -58,6 +58,14 @@ conformance:
 # skip. Run `make peers` first; an incomplete host now says so loudly.
 conformance-required:
 	CONFORMANCE_REQUIRED=1 $(GO) test ./internal/conformance -count=1 -timeout 900s
+
+# soak runs the long tests a green `make test` cannot judge: continuous load
+# (goroutines and live heap must stay flat), the rate limiter under a flood of
+# spoofed sources, and a failover with a replica killed mid-poll. Ten minutes
+# by default; SOAK_DURATION overrides it (e.g. `make soak SOAK_DURATION=90s`).
+soak:
+	SNMP_SHIELD_SOAK=1 SNMP_SHIELD_SOAK_DURATION=$${SOAK_DURATION:-10m} \
+		$(GO) test ./internal/access ./internal/proxy -run 'TestSoak' -count=1 -timeout 30m -v
 
 # release builds a stripped static binary for appliance deployment.
 release:

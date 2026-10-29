@@ -55,6 +55,9 @@ type informPending struct {
 	ver         int      // clear version to rebuild the response for
 	community   string
 	clientReqID int32 // req-id from the clear inform (echoed back)
+	// ready is closed when the response is matched, so the 15s timeout
+	// goroutine exits at once instead of lingering per inform.
+	ready chan struct{}
 }
 
 // ManagerTranslator is the manager-side USM translation engine.
@@ -374,6 +377,7 @@ func (m *ManagerTranslator) handleTunnelInformResp(f *tunnel.Frame) {
 	ip, ok := m.informPend[f.CorrID]
 	if ok {
 		delete(m.informPend, f.CorrID)
+		close(ip.ready)
 	}
 	m.informMu.Unlock()
 	if !ok {
@@ -689,6 +693,7 @@ func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 	}
 	flags := byte(0)
 	var corrID uint16
+	var ipReady <-chan struct{}
 	if info.PDUType == msg.PDUInformRequest {
 		// informs need the agent-side GetResponse relayed back to the
 		// device: track the pending inform by tunnel corrID.
@@ -698,10 +703,12 @@ func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 			community:   string(community),
 			clientReqID: info.RequestID,
 			addr:        m.lastInformAddr(),
+			ready:       make(chan struct{}),
 		}
 		m.informMu.Lock()
 		m.informPend[corrID] = ip
 		m.informMu.Unlock()
+		ipReady = ip.ready
 		flags = tunnel.FlagInform
 	}
 	if err := m.sess.Send(context.Background(), msgTypeNOTIF, flags, corrID, out); err != nil {
@@ -714,16 +721,18 @@ func (m *ManagerTranslator) handleClearTrap(dg []byte) {
 		return
 	}
 	if flags != 0 {
-		// timeout: drop the pending inform after 15s
-		go func(id uint16) {
+		// timeout: drop the pending inform after 15s, or as soon as the
+		// agent-side response is matched.
+		go func(id uint16, ready <-chan struct{}) {
 			select {
+			case <-ready:
 			case <-time.After(15 * time.Second):
 				m.informMu.Lock()
 				delete(m.informPend, id)
 				m.informMu.Unlock()
 			case <-m.stop:
 			}
-		}(corrID)
+		}(corrID, ipReady)
 	}
 	if m.met != nil {
 		m.met.NotifsRelayed.Inc()

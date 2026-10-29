@@ -37,8 +37,9 @@ type Session struct {
 	conn   net.Conn
 	closed bool
 
-	subsMu sync.Mutex
-	subs   map[uint8]map[chan *Frame]struct{} // frame type -> subscriber channels
+	subsMu     sync.Mutex
+	subsClosed bool                               // set by closeDone; no more subscribers
+	subs       map[uint8]map[chan *Frame]struct{} // frame type -> subscriber channels
 
 	readLoopOnce sync.Once
 	readStop     chan struct{}
@@ -193,9 +194,21 @@ func (s *Session) Done() <-chan struct{} {
 	return s.doneCh
 }
 
-// closeDone fires the Done channel once.
+// closeDone fires the Done channel once and closes every subscriber channel,
+// which is what ends the per-session translator loops.
 func (s *Session) closeDone() {
-	s.doneOnce.Do(func() { close(s.doneCh) })
+	s.doneOnce.Do(func() {
+		close(s.doneCh)
+		s.subsMu.Lock()
+		s.subsClosed = true
+		for _, m := range s.subs {
+			for ch := range m {
+				delete(m, ch)
+				close(ch)
+			}
+		}
+		s.subsMu.Unlock()
+	})
 }
 
 // readDeadline returns the per-read timeout: 3×keepalive, or 3× the default
@@ -259,21 +272,41 @@ func (s *Session) Connect(ctx context.Context) error {
 }
 
 // Subscribe registers a channel for frames of the given type. The
-// returned cancel function unregisters it.
+// returned cancel function unregisters it and is idempotent.
+//
+// The channel is CLOSED when the session shuts down (or when cancel runs),
+// so a `for f := range ch` consumer exits with the session instead of parking
+// forever. Consumers that select on the channel must therefore handle the
+// closed case (`f, ok := <-ch`). Without this, every accepted tunnel session
+// leaked its consumer goroutines — invisible in a functional test, one
+// goroutine set per reconnect on a flaky link, which is what the soak's
+// teardown count exposed.
 func (s *Session) Subscribe(ftype uint8) (<-chan *Frame, func()) {
 	ch := make(chan *Frame, 64)
 	s.subsMu.Lock()
+	if s.subsClosed {
+		close(ch)
+		s.subsMu.Unlock()
+		return ch, func() {}
+	}
 	if s.subs[ftype] == nil {
 		s.subs[ftype] = make(map[chan *Frame]struct{})
 	}
 	s.subs[ftype][ch] = struct{}{}
 	s.subsMu.Unlock()
+
+	var once sync.Once
 	cancel := func() {
-		s.subsMu.Lock()
-		defer s.subsMu.Unlock()
-		if m, ok := s.subs[ftype]; ok {
-			delete(m, ch)
-		}
+		once.Do(func() {
+			s.subsMu.Lock()
+			defer s.subsMu.Unlock()
+			if m, ok := s.subs[ftype]; ok {
+				if _, live := m[ch]; live {
+					delete(m, ch)
+					close(ch)
+				}
+			}
+		})
 	}
 	return ch, cancel
 }

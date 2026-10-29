@@ -267,6 +267,22 @@ Recorded so nobody "fixes" the proxy to match one vendor. Adapters normalize
   (translated and relayed); a vendor v1 receiver adds nothing the parser
   tests do not already pin.
 
+## Docker fixtures: let docker assign the host port
+
+Both container fixtures (`snmptrapd`, and the 5.9 `snmpd` v3 agent) used to
+probe a free UDP port, then publish it with `-p 127.0.0.1:<port>:…`. That is a
+TOCTOU race between our probe and the daemon's bind: a second fixture probing
+in the gap can be handed a port that docker is about to take. It surfaced
+once, under full-suite load, as `usm gateway: trap listener: listen udp
+0.0.0.0:<port>: bind: address already in use` — a product-looking failure
+caused entirely by the fixture.
+
+Both now publish `-p 127.0.0.1::<container-port>/udp` and read the assigned
+port back from `docker port <name> <port>/udp` (`publishedLoopback`, which
+fails loudly when the mapping is missing rather than letting a notification
+travel into the void). The kernel assigns the port at publish time, so no
+other fixture can have claimed it in between.
+
 ## What a green matrix means
 
 - Every peer's requests and notifications are accepted by the proxy, and the

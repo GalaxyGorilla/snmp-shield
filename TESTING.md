@@ -11,6 +11,7 @@ the less it can be fooled by our own encoders.
 | Unit | `internal/*/..._test.go` | hand-built vectors, RFC examples | ms | yes |
 | Wire e2e (Go) | `internal/usm`, `internal/tsm`, `internal/tunnel`, `internal/proxy`, `internal/access`, `internal/snmpmetrics` | gosnmp, raw datagrams, real UDP/DTLS loopback (IPv4 and `[::1]`) | seconds | yes |
 | Conformance | `internal/conformance` | five independent vendor stacks driving the real binary, a vendor v3 notification **receiver** (`snmptrapd` 5.9), net-snmp 5.9 over DTLS (TSM), and two real v3 agents (host `snmpd` 5.6.2.1 + image `snmpd` 5.9.3), Docker for the container peers | ~110s | yes |
+| Soak | `internal/access`, `internal/proxy` (`TestSoak*`) | the real binary's loops under continuous load: goroutine and live-heap graphs, a spoofed-source flood, a killed replica | 10 min | no (`make soak`, `SNMP_SHIELD_SOAK=1`) |
 | Interop scripts | `scripts/interop-*.sh` | net-snmp CLI / snmpd as the peer | minutes | no (`make interop ...`) |
 | Smoke | `scripts/smoke-cli.sh` | a hand-written Python v2c agent | seconds | no |
 | Fuzz | `internal/{msg,access,config,cache,notifyfilter}` | the Go fuzzer | bounded | corpus only |
@@ -29,6 +30,7 @@ make conformance     # the vendor matrix only (~45s, builds the CLI once)
 make conformance-required  # same matrix, but a missing toolchain FAILS (release gate)
 make peers           # pysnmp venv + node net-snmp + the Docker TSM image (idempotent)
 make interop         # two-proxy net-snmp interop (rc 77 without net-snmp)
+make soak            # 10-minute load soak (SOAK_DURATION=90s for a quick pass)
 
 go test ./internal/conformance -v -count=1          # see which peers ran/skipped
 go test ./internal/conformance -run TestUSMGatewayRequests -v
@@ -55,6 +57,63 @@ and compares the result field by field, so a flag that is registered but not
 copied into `flagsOpts` fails too. Conformance finding 1 (gateway
 access-policy flags dropped by an early return) is reproduced by the sweep if
 the early return is reintroduced — both halves were verified by mutation.
+
+## Soak tests
+
+`make soak` runs what a functional test cannot: minutes of traffic against
+the real loops, with the numbers that only a trend makes meaningful.
+
+| Test | Asserts |
+|---|---|
+| `TestSoakSteadyState` (`internal/proxy`) | one two-proxy chain, a request every 20 ms: **zero** unanswered requests, worst round trip logged, goroutines at baseline ± 8, live heap (post-GC) within 24 MiB of the start |
+| `TestSoakHAFailoverUnderLoad` (`internal/proxy`) | the manager polls through two replicas while the sticky one is killed at ⅓ of the budget: recovery ≤ 30 s, a green streak at the end, `snmp_shield_tunnel_reconnects_total` moved, tunnel-up gauge 1, goroutines back to baseline after teardown |
+| `TestSoakRateLimiterSpoofedSources` (`internal/access`) | a flood over the whole 10/8 space: the bucket table never exceeds `limitMaxBuckets`, a never-seen source is still refused afterwards (fail-closed survives the churn), goroutines and heap flat |
+
+They are gated behind `SNMP_SHIELD_SOAK=1` (with `SNMP_SHIELD_SOAK_DURATION`
+overriding the 10-minute default), because ten minutes inside `make test`
+would be ten minutes of edit loop. The gate is therefore a *release checklist
+item*, not a CI one — this repository has no CI by design.
+
+The budget is **per test**, so a full `make soak` takes about 30 minutes. A
+full run on 2026-10-29:
+
+```
+steady state   10m0s, 27386 requests, worst round trip 39ms,
+               goroutines 26 (baseline 26, peak 26), live heap 0.9MiB -> 1.1MiB
+HA failover    10m0s, failover after 8.092s (4 failures), 17177 answers after
+               the kill, final streak 17177, teardown back to baseline
+rate limiter   10m0s, 1036288 admitted / 4238498006 refused, table 4096/4096,
+               goroutines 2, heap flat
+```
+
+That is the shape the numbers should have: flat goroutines, a heap that does
+not track the request count, an outage measured in seconds, and a rate-limiter
+table that stops at its cap instead of following the flood.
+
+**They earn their keep.** The first runs found three real defects that every
+functional test had answered requests straight through:
+
+1. `passthrough.Agent.bgctx()` built a context **and a watcher goroutine per
+   send**, discarding the cancel: one goroutine leaked per request (and per
+   notification) until shutdown. 50 req/s is 4.3M goroutines a day.
+2. `passthrough.Agent.awaitAgentResp`/`awaitInformResp` waited out the full
+   15 s timeout even after the answer arrived, holding a goroutine and a
+   pending entry each — a steady state of rate × 15 s goroutines.
+3. `tunnel.Session` never closed its subscriber channels, so an accepted
+   session's `for f := range ch` loops (`reqLoop`, `notifRespLoop`,
+   `respLoop`, `sinkLoop`) parked forever: one goroutine set leaked **per
+   reconnect**, which a flaky WAN would turn into thousands over days.
+
+The fast regression net is `TestNoPerRequestGoroutines` (`internal/proxy`,
+not soak-gated): 200 requests must not add 10 goroutines, and teardown must
+return to baseline. Reverting the two passthrough fixes reproduces it as
+`goroutines 36 at steady state, 436 during 200 requests`.
+
+Scope limit: the goroutine net drives requests, and the soak's steady-state
+traffic is GETs — the **inform** pending maps (passthrough and the USM manager,
+both fixed here) are pinned functionally by their round-trip tests, not by a
+goroutine count. An inform leak would therefore still need a soak run with
+inform traffic to surface.
 
 ## Conformance conventions
 
@@ -140,6 +199,17 @@ stack immediately runs the whole matrix.
   embeds the test name).
 - **Close client connections before stopping a server**; a raw DTLS read
   blocks until the peer closes.
+- **Never assert on a clean close over UDP — assert the design's bound.** A
+  DTLS `close_notify` is a single datagram with no retransmission, so a test
+  that closes a client and waits for the server to notice is racing packet
+  loss: it passes a thousand times and then fails under load for no product
+  reason. The cap tests therefore shorten the fallback they actually rely on
+  (`frontIdleTimeout` via `SetFrontIdleTimeoutForTest`, `keepalive_secs: 1`
+  for the tunnel's 9×keepalive dead-peer window) and, in the TSM case, leave
+  the last client conn **open** so the idle bound is what must return the
+  slot. Without that, `TestTSMGatewaySessionCap` and
+  `TestRunAgentSessionCap` both failed in a full run while passing in
+  isolation.
 - **Test proxies log to a buffer** that is printed only when the test fails.
   Rerun a failing scenario with `-v` and add `--log-level debug` to the
   fixture when diagnosing a wire problem.
@@ -205,19 +275,25 @@ names what would close it.
   front, v4 device or the reverse), an **IPv6-only host** (where the
   `0.0.0.0`/`IPv4zero` binds rely on Go's dual-stack wildcard and would have
   to change), and scoped link-local addresses (`fe80::%en0`).
-- **No soak or load run.** The rate limiter's 4096-entry cap fails closed by
-  design, but nothing drives it with spoofed sources; goroutine stability is
-  proven over 30 connect/close cycles, not over hours; memory is never
-  measured. *Closer with:* a `make soak` (10 min, synthetic load, assert
-  goroutines and RSS flat, table bounded).
+- **The soak is opt-in, so `make test` still proves nothing about hours.**
+  `make soak` (10 min, `SNMP_SHIELD_SOAK=1`) now drives the two-proxy chain
+  under continuous polling, floods the rate limiter with spoofed sources and
+  kills a replica mid-poll; the first runs found three real defects (a
+  goroutine leak per send, a 15s goroutine per answered request, and
+  subscriber goroutines that outlived their session — see the findings below).
+  What it still does not show: days of uptime, a real WAN (loss/reorder/jumbo
+  MTU), RSS as opposed to live heap, and concurrent client fan-in rather than
+  one sequential poller.
 - **Fuzzing is burst-mode.** Targets are run 15–30 s when a parser changes;
   the corpus runs on every `go test`, which is the important half, but long
   sessions are not continuous.
-- **HA is covered as a state machine, not as an outage.** Sticky endpoint
-  walk, dead-peer detection and digest-verified engine-state adoption are
-  pinned; a failover while requests are in flight against two live replicas
-  is not. *Closer with:* two manager-side proxies with one killed
-  mid-request under continuous polling.
+- **HA is now pinned as an outage, but only one shape of it.**
+  `TestSoakHAFailoverUnderLoad` (soak-gated) polls continuously through a
+  manager with two agent-side replicas and kills the sticky one mid-run:
+  recovery must land within 30s (3 idle misses × 3×keepalive plus a redial),
+  the run must end in a green streak, and teardown must not strand
+  goroutines. Not covered: a replica dying during a *write* (a half-applied
+  SET), both replicas flapping, and a failover while informs are in flight.
 - **Vendor coverage means "the stacks on this host".** v1 traffic IS
   vendor-generated (`snmptrap -v 1`, `snmpget -v 1`, so v1 *translation* is
   judged by a real encoder), but no physical device is in the loop. The v3

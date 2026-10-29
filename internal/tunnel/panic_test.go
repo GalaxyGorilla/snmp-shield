@@ -135,6 +135,14 @@ func TestPanickingTunnelDownCallbackStillFiresDone(t *testing.T) {
 	core, logs := observer.New(zapcore.DebugLevel)
 	downDone := make(chan struct{})
 	addr, sessCh := listenerPair(t, zap.New(core), func(sess *Session) {
+		// Short keepalive so the server notices the vanished client on its
+		// own read deadline (3 idle misses × 3×200ms) instead of depending on
+		// the client's DTLS close_notify arriving: pion's server-side Read can
+		// park past the app deadline while the handshake FSM settles, which
+		// made this a 1-in-10 flake on macOS. Production does the same thing
+		// via SetTuning; the assertion is about the panic path, not about how
+		// fast a UDP peer is noticed.
+		sess.SetTuning(200*time.Millisecond, 0)
 		sess.SetEventFunc(func(ev Event) {
 			if ev.Kind == EventTunnelDown {
 				close(downDone)

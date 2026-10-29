@@ -2,15 +2,12 @@ package conformance
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/GalaxyGorilla/snmp-shield/internal/testkit"
 )
 
 // snmptrapd_test.go — a third-party v3 notification RECEIVER.
@@ -57,12 +54,13 @@ func startTrapd(t *testing.T, engineIDHex string) *trapdFixture {
 	t.Helper()
 	requireDocker(t, "snmptrapd receiver")
 
-	hostPort := testkit.FreeUDPPort(t, "")
-	_, port, err := net.SplitHostPort(hostPort)
-	if err != nil {
-		t.Fatalf("trapd: %v", err)
-	}
-	name := fmt.Sprintf("snmp-shield-trapd-%s", port)
+	// Let DOCKER pick the host port (-p 127.0.0.1::1162/udp), then ask it
+	// what it bound. Probing a free port and publishing it afterwards is a
+	// TOCTOU race: the probe closes the socket, docker binds the same number
+	// a moment later, and another fixture that probed in that window gets a
+	// port that is already taken. That surfaced as "bind: address already in
+	// use" on a gateway's trap listener during a full-suite run.
+	name := fmt.Sprintf("snmp-shield-trapd-%d-%d", os.Getpid(), time.Now().UnixNano())
 
 	dir := t.TempDir()
 	// The user is registered TWICE, because the two notification classes
@@ -90,7 +88,7 @@ disableAuthorization yes
 
 	_ = exec.Command("docker", "rm", "-f", name).Run()
 	out, err := exec.Command("docker", "run", "-d", "--rm", "--name", name,
-		"-p", "127.0.0.1:"+port+":1162/udp",
+		"-p", "127.0.0.1::1162/udp",
 		"-v", dir+":/cfg",
 		"-v", filepath.Join(dir, "persist")+":/var/lib/snmp",
 		dockerNetSNMPImage,
@@ -101,9 +99,31 @@ disableAuthorization yes
 	}
 	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", name).Run() })
 
-	f := &trapdFixture{Addr: "127.0.0.1:" + port, name: name}
+	pubOut, err := exec.Command("docker", "port", name, "1162/udp").Output()
+	if err != nil {
+		t.Fatalf("trapd: docker port: %v", err)
+	}
+	hostPort := publishedLoopback(t, strings.TrimSpace(string(pubOut)))
+
+	f := &trapdFixture{Addr: hostPort, name: name}
 	f.waitReady(t)
 	return f
+}
+
+// publishedLoopback picks the 127.0.0.1 entry out of `docker port` output
+// (it prints one line per address family) and fails loudly when the mapping
+// is missing entirely — an empty mapping would silently send notifications
+// into the void and turn every assertion into a timeout.
+func publishedLoopback(t *testing.T, out string) string {
+	t.Helper()
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "127.0.0.1:") {
+			return line
+		}
+	}
+	t.Fatalf("trapd: docker port printed no 127.0.0.1 mapping (%q)", out)
+	return ""
 }
 
 // waitReady blocks until snmptrapd announced itself. A container whose

@@ -45,6 +45,14 @@ type Agent struct {
 	nextID atomic.Uint32
 
 	stop chan struct{}
+
+	// bgOnce guards the single send context. It used to be built per send
+	// (fresh WithCancel + a watcher goroutine whose cancel was discarded),
+	// which leaked one goroutine per request and one per notification for
+	// the life of the process. The soak test found it at 50 req/s; on an
+	// appliance that is millions of goroutines a day.
+	bgOnce sync.Once
+	bgCtx  context.Context
 }
 
 // reqPend tracks one request sent to the real agent.
@@ -170,8 +178,20 @@ func (a *Agent) reqLoop(ch <-chan *tunnel.Frame) {
 }
 
 // awaitAgentResp drops a pending agent request after a timeout.
+//
+// It also watches the pending entry's ready channel: without that, every
+// answered request kept a goroutine (and its reqPend entry) for the full 15s,
+// so the process held rate x 15s goroutines at all times. The soak test's
+// goroutine graph is what made it visible.
 func (a *Agent) awaitAgentResp(corrID uint16) {
+	a.reqMu.Lock()
+	p := a.reqPend[corrID]
+	a.reqMu.Unlock()
+	if p == nil {
+		return // answered before this goroutine started
+	}
 	select {
+	case <-p.ready:
 	case <-time.After(15 * time.Second):
 		a.reqMu.Lock()
 		delete(a.reqPend, corrID)
@@ -321,9 +341,17 @@ func (a *Agent) handleClearTrap(payload []byte, raddr *net.UDPAddr) {
 	}
 }
 
-// awaitInformResp times out a pending inform after 15s.
+// awaitInformResp times out a pending inform after 15s, or returns as soon as
+// the manager-side confirmation arrives.
 func (a *Agent) awaitInformResp(corrID uint16) {
+	a.notifMu.Lock()
+	p := a.notifPend[corrID]
+	a.notifMu.Unlock()
+	if p == nil {
+		return // answered before this goroutine started
+	}
 	select {
+	case <-p.ready:
 	case <-time.After(15 * time.Second):
 		a.notifMu.Lock()
 		delete(a.notifPend, corrID)
@@ -346,15 +374,22 @@ func (a *Agent) notifRespLoop(ch <-chan *tunnel.Frame) {
 	}
 }
 
-// bgctx returns a context tied to the stop channel.
+// bgctx returns the one send context, cancelled when the agent stops.
+//
+// Built once: a context (and its watcher goroutine) per send is a leak, not a
+// style issue — the tunnel Send is called once per request and once per
+// notification.
 func (a *Agent) bgctx() context.Context {
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		select {
-		case <-a.stop:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-	return ctx
+	a.bgOnce.Do(func() {
+		ctx, cancel := context.WithCancel(context.Background())
+		a.bgCtx = ctx
+		go func() {
+			select {
+			case <-a.stop:
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	})
+	return a.bgCtx
 }

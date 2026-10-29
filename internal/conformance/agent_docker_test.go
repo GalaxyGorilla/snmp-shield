@@ -2,15 +2,13 @@ package conformance
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/GalaxyGorilla/snmp-shield/internal/testkit"
 )
 
 // A REAL v3 agent from the peer image, for the usm-manager-gateway scenarios.
@@ -89,11 +87,10 @@ func startDockerV3Snmpd(t *testing.T) v3AgentFixture {
 		t.Fatalf("conformance: write docker snmpd config: %v", err)
 	}
 
-	addr := testkit.FreeUDPPort(t, "127.0.0.1")
-	_, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		t.Fatalf("conformance: %q is not host:port: %v", addr, err)
-	}
+	// Docker assigns the host port and reports it (`-p 127.0.0.1::1161/udp`)
+	// instead of us probing a free port and publishing it afterwards: the
+	// probe/publish gap is a TOCTOU race that another fixture can lose a port
+	// to. See startTrapd for the failure it actually caused.
 	name := fmt.Sprintf("snmp-shield-snmpd-%d-%d", os.Getpid(), time.Now().UnixNano())
 
 	// -C: do not read the image's default config. The persistent dir must
@@ -101,7 +98,7 @@ func startDockerV3Snmpd(t *testing.T) v3AgentFixture {
 	// throwaway engineID is exactly right for a fixture.
 	args := []string{
 		"run", "-d", "--name", name,
-		"-p", "127.0.0.1:" + port + ":1161/udp",
+		"-p", "127.0.0.1::1161/udp",
 		"-v", dir + ":/peers:ro",
 		"-e", "SNMP_PERSISTENT_DIR=/home/peer/.snmp-persist",
 		dockerNetSNMPImage,
@@ -111,6 +108,11 @@ func startDockerV3Snmpd(t *testing.T) v3AgentFixture {
 	if err != nil {
 		skipOrFail(t, "docker snmpd cannot start (%s)", firstLine(string(out)))
 	}
+	pubOut, perr := exec.Command("docker", "port", name, "1161/udp").Output()
+	if perr != nil {
+		t.Fatalf("conformance: docker port: %v", perr)
+	}
+	addr := publishedLoopback(t, strings.TrimSpace(string(pubOut)))
 	agent := &dockerV3Snmpd{addr: addr, name: name}
 	t.Cleanup(func() { agent.Stop(t) })
 	waitV3Agent(t, addr)

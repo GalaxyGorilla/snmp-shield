@@ -42,7 +42,8 @@ type Manager struct {
 	nextID atomic.Uint32
 
 	socksMu    sync.Mutex // guards conn/trapConn/sink vs Close
-	baseCtx    context.Context
+	baseOnce   sync.Once  // guards the lazy send context
+	jobCtx     context.Context
 	baseCancel context.CancelFunc
 
 	stop chan struct{}
@@ -379,15 +380,16 @@ func (m *Manager) ctxPair() (context.Context, context.CancelFunc) {
 	return ctx, cancel
 }
 
+// reqCtx returns the one send context, created on first use.
+//
+// The lazy init is behind a sync.Once because two readers reach it
+// concurrently (the request leg and the trap leg), and an unsynchronised
+// double-initialisation is both a data race and a leaked watcher goroutine.
 func (m *Manager) reqCtx() context.Context {
-	// One shared context per call would leak goroutines; use a single
-	// long-lived context tied to stop instead.
-	if m.baseCtx == nil {
-		ctx, cancel := m.ctxPair()
-		m.baseCtx = ctx
-		m.baseCancel = cancel
-	}
-	return m.baseCtx
+	m.baseOnce.Do(func() {
+		m.jobCtx, m.baseCancel = m.ctxPair()
+	})
+	return m.jobCtx
 }
 
 func (m *Manager) trapCtx() context.Context {

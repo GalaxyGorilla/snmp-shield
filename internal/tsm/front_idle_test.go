@@ -29,6 +29,19 @@ func withFrontIdle(t *testing.T, d time.Duration) {
 	t.Cleanup(func() { frontIdleTimeout = old })
 }
 
+// SetFrontIdleTimeoutForTest is the export_test.go-style bridge for the
+// external (package tsm_test) session-cap test.
+//
+// That test waits for a closed session's slot to come back. On a lost DTLS
+// close_notify the only bound is frontIdleTimeout — two minutes in
+// production, far past any sane test wait — so the test shortens it and
+// asserts the real property: the slot is released by the idle bound, not
+// "eventually".
+func SetFrontIdleTimeoutForTest(t *testing.T, d time.Duration) {
+	t.Helper()
+	withFrontIdle(t, d)
+}
+
 // TestServeFrontReleasesIdleSession: a session that stops sending must end on
 // its own, so its cap slot is returned.
 func TestServeFrontReleasesIdleSession(t *testing.T) {

@@ -65,6 +65,15 @@ func tryDial(t *testing.T, front, ca, clientCrt, clientKey string, timeout time.
 // TestTSMGatewaySessionCap: with max_sessions=1, a second concurrent client
 // is refused, the refusal is counted, and the slot is reusable afterwards.
 func TestTSMGatewaySessionCap(t *testing.T) {
+	// A closed session's slot must come back promptly. The fast path is the
+	// DTLS close_notify; the guaranteed path is the front-leg idle bound,
+	// which is two minutes in production. Shorten it so this test asserts the
+	// bound instead of racing it — a lost close_notify (UDP has no
+	// retransmission for it) would otherwise keep the slot for the rest of
+	// the suite. 5s survives the refusal window below (the second dial spends
+	// up to 2s failing) while still being well inside the 15s waits.
+	tsm.SetFrontIdleTimeoutForTest(t, 5*time.Second)
+
 	ca, serverCrt, serverKey, clientCrt, clientKey := certFiles(t)
 	fake, agentAddr := fakeAgentOnFreePort(t)
 	defer fake.Close()
@@ -104,8 +113,9 @@ func TestTSMGatewaySessionCap(t *testing.T) {
 
 	// Releasing the slot must let the next client in (a cap that never
 	// recovers would be a self-inflicted outage). Teardown is asynchronous —
-	// the server notices the close on its next read — so wait on the
-	// occupancy gauge (the same instrument an operator watches) instead of
+	// a clean close is noticed on the server's next read, and a lost
+	// close_notify only on the (shortened) idle bound — so wait on the
+	// occupancy gauge, the same instrument an operator watches, instead of
 	// guessing with a sleep, and only then require a successful handshake.
 	_ = first.Close()
 	if !waitActive(t, met, 0, 15*time.Second) {
@@ -116,11 +126,17 @@ func TestTSMGatewaySessionCap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("no TSM session accepted after the slot was released: %v", err)
 	}
-	_ = third.Close()
+	// And the slot must come back from a peer that simply VANISHES: DTLS has
+	// no keepalive, so an abandoned conn never sends close_notify and the
+	// front-leg idle bound is the only thing that returns the slot. This is
+	// the attack the cap has to survive — 64 dead clients must not deny the
+	// service — so it is asserted with the client deliberately left open.
 	if !waitActive(t, met, 0, 15*time.Second) {
-		t.Fatalf("sessions_active did not return to 0 after teardown (got %v)",
-			gaugeValue(t, met.SessionsActive))
+		gauge := gaugeValue(t, met.SessionsActive)
+		_ = third.Close()
+		t.Fatalf("the idle bound never returned an abandoned session's slot (sessions_active=%v)", gauge)
 	}
+	_ = third.Close()
 }
 
 // waitActive polls an occupancy gauge until it equals want.

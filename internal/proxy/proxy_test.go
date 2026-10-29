@@ -1181,6 +1181,12 @@ func TestRunAgentSessionCap(t *testing.T) {
 	agentCfg.Tunnel.PSK = "text:testpsk"
 	agentCfg.Tunnel.PSKIdentity = "cap-test"
 	agentCfg.Tunnel.MaxSessions = 1
+	// A closed session's slot comes back on the DTLS close_notify, or — if
+	// that datagram is lost, which UDP allows — on the dead-peer window of
+	// 3 misses × 3×keepalive (90s at the default 10s). A test cannot wait
+	// 90s, and it should not: the deadline the product guarantees is the
+	// keepalive-derived one, so shrink it to 9s and assert against that.
+	agentCfg.Tunnel.KeepaliveSecs = 1
 	agentCfg.Agent.AgentAddr = agent.LocalAddr().String()
 
 	agCancel, agErr := startAgent(t, agentCfg, met)
@@ -1232,12 +1238,14 @@ func TestRunAgentSessionCap(t *testing.T) {
 	}
 
 	// Release the slot and confirm the listener is not wedged: the session
-	// teardown is asynchronous (the server notices the close on its next
-	// read), so wait for the occupancy gauge to drop — the same signal an
-	// operator watches — and only then require a successful handshake. A
-	// fixed sleep here flakes under load, where teardown can lag by seconds.
+	// teardown is asynchronous (a clean close is noticed on the server's next
+	// read, a lost close_notify only on the dead-peer window), so wait for the
+	// occupancy gauge to drop — the same signal an operator watches — and only
+	// then require a successful handshake. A fixed sleep here flakes under
+	// load, where teardown can lag by seconds. The wait is twice the shortened
+	// dead-peer bound (9s), so it fails only if the slot never comes back.
 	_ = first.Close()
-	if !waitSessionsActive(t, met, 0, 15*time.Second) {
+	if !waitSessionsActive(t, met, 0, 20*time.Second) {
 		t.Fatalf("the cap slot was never released after the session closed (sessions_active=%v)",
 			gaugeValue(t, met.SessionsActive))
 	}

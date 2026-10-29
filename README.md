@@ -396,6 +396,8 @@ make peers       # provision the third-party stacks for the conformance matrix
 make conformance # cross-vendor matrix: net-snmp (host + 5.9 container),
                   # pysnmp, node net-snmp, gosnmp, two real snmpd agents
 make conformance-required # same, but a missing peer FAILS (release gate)
+make soak        # load soak, 10 min per test (~30 min): flat goroutines/heap,
+                  # failover under load, spoofed-source flood
 make interop     # net-snmp CLI interop test (exit 77 = skip when missing)
 make sbom        # SPDX + CycloneDX SBOMs for the release binary (syft) into dist/
 make vulnscan    # match the SBOM against NVD/GHSA/OSV; fails on HIGH+ (grype)

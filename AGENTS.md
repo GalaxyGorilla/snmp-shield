@@ -43,6 +43,7 @@ a design property, not pending integration work.
 | Access policy | One `access` section everywhere: `allow` (client IP/CIDR allow-list), `rate_per_sec` (per-client token bucket), `read_only` XOR `write_policy {default, rules[{oid, action}]}`. Key names mirror modbus-shield so operators learn the policy once. Scope: manager clear leg + gateway front legs get all three; the **agent** role (tunnel ingress) gets the write policy only (defense in depth at the device), since tunnel frames carry no client address — `allow`/`rate_per_sec` there are warned as ignored. `passthrough` write policy sees v1/v2c only. Denials: off-list + over-rate are dropped **silently**; a write refusal is **answered** `notWritable` (v1 `noSuchName`) |
 | Write-policy semantics | Deny-overrides, allow-must-cover, evaluated as a set (order irrelevant): any matching deny rejects the whole SET; an allow wins only if one rule covers every requested OID; else `default` (deny unless configured). Undecodable/empty-varbind SET is denied; non-SET PDUs pass |
 | Testing | Independence-first: `internal/conformance` drives the **built CLI** with five third-party stacks (net-snmp 5.6 CLI, pysnmp, node net-snmp, gosnmp, net-snmp 5.9 in Docker) and a real `snmpd`, asserting on a JSON contract (`ok`/`error_kind`, never vendor prose); RFC 6353 (TSM) is driven by net-snmp 5.9 in that container, because a host net-snmp may have no TLS transport; the v3 notification **receiver** is `snmptrapd` 5.9 in the same image, because a sink written against our own encoder cannot judge our wrapping. Missing toolchains **skip**, never fail (no CI). Vendor disagreements are recorded in `CONFORMANCE.md`, never adapted away; adapters may only normalize presentation (type naming). Shared scaffolding lives in `internal/testkit`; layer map in `TESTING.md` |
+| Soak | `make soak` (10 min **per test**, ~30 min total) is opt-in via `SNMP_SHIELD_SOAK=1` and is a **release-checklist item, not a CI one** (no CI by design): a green `make test` says nothing about a goroutine per message. It asserts trends, not single requests — flat goroutines, a live heap that does not track the request count, a bounded failover, and a rate-limiter table that stops at `limitMaxBuckets`. The fast non-soak net for the same class is `TestNoPerRequestGoroutines` (200 requests, back to baseline at teardown) |
 | Reload | `SIGHUP` re-reads the YAML and swaps **only** the access policy (read per datagram, no rebind). Everything socket/crypto-bound is logged `(restart required)`, never silently ignored. An invalid file or uncompilable policy keeps the running policy. Flags mode: logged no-op |
 | Crash isolation | `internal/safego.Dispatch`/`Go` wrap every per-datagram/per-frame handler, every per-session goroutine, the tunnel event callback and the accept loops. A recovered panic is logged at error level with the value and stack and the loop keeps serving. This is a safety net, never a licence to leave a panic unfixed (fuzzing still owns parser robustness) |
 | Front-door bound | `tunnel.max_sessions` (`--max-sessions`, default 64) caps concurrent (D)TLS sessions on the agent tunnel listener and the TSM gateway front leg. At the cap the conn is closed immediately and `snmp_shield_sessions_denied_total` is incremented — never queued, because queueing moves the cost rather than removing it. Negative is a config error; 0 means default (there is no "unlimited"). Occupancy is exposed as the `snmp_shield_sessions_active` gauge (Prometheus only, not in the SNMP MIB), and the TSM front session arms a per-read idle deadline (`frontIdleTimeout`, 2 min) because DTLS has no keepalive: without it a vanished peer would hold its slot until restart, i.e. 64 dead clients would deny the service the cap exists to protect |
@@ -130,8 +131,11 @@ plus the short `/tmp` prefix hides it).
 | Cross-vendor conformance matrix (`internal/conformance`: peer contract `peer.go`, subprocess adapters `peers_exec.go`, in-process gosnmp peer, Docker clear-leg peer `peer_docker.go`, `harness_test.go` builds the CLI in TestMain; scenarios: usm-gateway requests/rejections/engine persistence/notification ingress/filter/access policy, two-proxy translate chain incl. device-side write policy, usm-manager-gateway against REAL snmpd incl. v3 traps and v3 informs, TSM gateway driven by net-snmp 5.9 over DTLS in Docker incl. a read-only refusal and a foreign-CA client, **vendor v3 notification receiver** (`trapd_test.go`, `snmptrapd` in Docker): trap content and inform confirmation judged by `snmptrapd` 5.9) + `internal/testkit` (fake device, PKI with extra SANs, trap sinks, V3 sink, frame-sink pipe, ports) + `test/peers/` adapters + `test/peers/netsnmp-docker/` image (net-snmp 5.9.3 CLI + `snmptrapd` + python3) + `scripts/peers-setup.sh` + `make peers`/`make conformance` | done (tested: all five stacks green, `go test -race ./...` green; six real bugs found and fixed — see §7 and CONFORMANCE.md) |
 | Second real v3 agent (`internal/conformance/agent_docker_test.go`): the manager-gateway matrix runs against the host `snmpd` (Apple 5.6.2.1) **and** net-snmp 5.9.3 in the Debian peer image (published on `127.0.0.1` only, random container name, force-removed at cleanup; `requireDockerSnmpd` capability check so a stale image says "rebuild" instead of timing out). 5.9 needs an explicit `rouser` access-control directive — without it every request is `AuthorizationError` — while 5.6 rejects `rouser` as an unknown token; the agent fixture's readiness probe now also requires `pkt.Error == NoError` because gosnmp returns `err == nil` for an error-status answer | done (tested: both fixtures × five peers × request/trap/inform scenarios green; readiness check verified by removing `rouser`, which now fails as "agent answered with error status AuthorizationError" instead of blaming the proxy) |
 | Address family (IPv6): every mode's ingress is pinned on `[::1]` — USM gateway request leg (`internal/usm/ipv6_e2e_test.go`), USM gateway inform round trip incl. the sink-discovery socket (`gateway_inform_engine_ipv6_test.go`), manager-gateway discovery+request sockets and the full two-proxy passthrough chain, TSM gateway raw-DTLS front leg (`internal/tsm/gateway_ipv6_test.go`). Harnesses gained an explicit-host variant (`buildGatewayOn`, `buildManagerGatewayAt`, `startFakeV3AgentOn`, `buildTSMGatewayOn`, `freeUDPPortOn`) instead of duplicated fixtures. The IPv6 inform pin is mutation-verified: forcing the sink-discovery probe to `udp4` makes discovery fail silently and the fallback wrap names our own engine, which the test names verbatim | done (tested, -race green; IPv6 is socket-level, not vendor-driven — no peer can be pointed at a v6 port through the contract) |
+| Docker fixtures let docker assign the host port (`-p 127.0.0.1::1162/udp` + `docker port`, via `publishedLoopback`) instead of probing a free port and publishing it: the probe→publish gap is a TOCTOU race that surfaced once under full-suite load as a product-looking `bind: address already in use` on a gateway trap listener | done (tested: `TestUSMGatewayVendorTrapReceiver`, `TestUSMGatewayVendorInformReceiver`, `TestManagerGatewayRealAgent` green on both agents; see CONFORMANCE.md "Docker fixtures") |
+| Soak suite (`make soak`, `SNMP_SHIELD_SOAK=1`, default 10 min, `SOAK_DURATION` overrides): `TestSoakSteadyState` (two-proxy chain, one request every 20 ms — zero unanswered, goroutines baseline ±8, post-GC live heap within 24 MiB), `TestSoakHAFailoverUnderLoad` (manager polls through two agent replicas, sticky one killed at ⅓ of the budget — recovery ≤30 s, green streak at the end, Reconnects moved, TunnelUp 1, goroutines back to baseline), `TestSoakRateLimiterSpoofedSources` (flood over 10/8 — table never exceeds `limitMaxBuckets`, a never-seen source still refused, heap flat). Fast non-soak net for the leak class: `TestNoPerRequestGoroutines` | done (tested: full 10-minute `make soak` green — steady state 27,386 requests / worst round trip 39 ms / goroutines flat at 26 / live heap 0.9→1.1 MiB; HA failover after 8.1 s with 17,177 answers and a 17,177-run green streak after it; rate limiter 1.04M admitted of 4.2B requests with the table pinned at 4096/4096; 200-request regression test fails loudly on mutation — see §7) |
+| Goroutine-per-message fixes found by the first soak runs: `passthrough.Agent.bgctx()` built a context + watcher goroutine per SEND and dropped the cancel (one leaked goroutine per request and per notification); `awaitAgentResp`/`awaitInformResp` waited the full 15 s even after the answer (rate × 15 s goroutines + pending entries); `tunnel.Session` never closed subscriber channels, so `for f := range ch` loops (`reqLoop`, `notifRespLoop`, `respLoop`, `sinkLoop`) outlived their session — one goroutine set per reconnect. Fixes: cached `bgOnce` context, select on the pend `ready` channel (usm manager inform path too), and `closeDone` now closes every subscriber channel (`Subscribe` closes immediately after shutdown and its cancel is idempotent; consumers must handle `ok == false`, which the usm/tsm translators already did) | done (tested: `TestNoPerRequestGoroutines` 26→26 goroutines over 200 requests on passthrough and usm-translate, back to baseline after teardown; reverting the two passthrough fixes reproduces 36→436; soak HA now passes its teardown check; full race suite green) |
 | Release gate + flags wiring sweep: `make conformance-required` (`CONFORMANCE_REQUIRED=1`) turns every environment skip in the matrix into a failure, so "all peers green" cannot mean gosnmp alone; `skipOrFail` is the only sanctioned route (`TestNoSkipBypassesRequiredGate` source-scans for bypassing `t.Skip`, `KindUnsupported` still skips), and `Unavailable()` now probes the peer runtime through PATH as well (`TestMissingRuntimeSkipsInsteadOfFailing` — a removed `node` used to look available because `node_modules` survived, then failed as an adapter error). `cmd/snmp-shield/flags_sweep_test.go` walks all eight role × mode paths with every flag set, twice (read-only + write policy), with completeness tripwires (`fullOpts` non-zero per field, `TestOptsWiresEveryFlag` parses `register()` and diffs `opts()`); reintroducing conformance finding 1 makes it fail (verified by mutation) | done (tested: sweep + gate unit tests green; gate proven both directions on a trimmed PATH; full race suite green) |
-| Front-door observability + idle bound (found while chasing a `TestTSMGatewaySessionCap` flake under full-suite load): `snmp_shield_sessions_active` gauge set at slot acquire/release in both capped accept loops, and a per-read idle deadline on every TSM front session — DTLS carries no keepalive, so a peer that crashes or loses its route pinned its cap slot until process restart. The cap tests now wait on the gauge instead of sleeping (`waitActive` / `waitSessionsActive`), which is deterministic under load and asserts the recovery property directly | done (tested: `TestTSMGatewaySessionCap`, `TestRunAgentSessionCap` on the gauge; `internal/tsm/front_idle_test.go` pins the idle bound over an in-memory conn — idle session ends, traffic re-arms the deadline; full race suite green ×3 after the fix) |
+| Front-door observability + idle bound (found while chasing a `TestTSMGatewaySessionCap` flake under full-suite load): `snmp_shield_sessions_active` gauge set at slot acquire/release in both capped accept loops, and a per-read idle deadline on every TSM front session — DTLS carries no keepalive, so a peer that crashes or loses its route pinned its cap slot until process restart. The cap tests now wait on the gauge instead of sleeping (`waitActive` / `waitSessionsActive`), which is deterministic under load and asserts the recovery property directly, and they assert the **bound** rather than a clean close: a lost DTLS `close_notify` (UDP does not retransmit it) used to leave the slot for the production idle bound, so the TSM test shortens `frontIdleTimeout` via `SetFrontIdleTimeoutForTest` (export_test-style bridge) and deliberately leaves its last client conn **open**, and the agent test sets `keepalive_secs: 1` so the dead-peer window is 9s instead of 90s | done (tested: `TestTSMGatewaySessionCap` (mutation-verified: removing the `SetReadDeadline` makes it fail with "the idle bound never returned an abandoned session's slot"), `TestRunAgentSessionCap` on the gauge; `internal/tsm/front_idle_test.go` pins the idle bound over an in-memory conn — idle session ends, traffic re-arms the deadline; full race suite green ×3 after the fix) |
 | Border hardening (`internal/safego`: `Dispatch` for per-datagram/frame handlers, `Go` for per-session goroutines; wired into the tunnel read loop, all six translator/trap read loops, both accept loops, the metrics MIB agent, the tunnel event callback) + front-door session cap (`tunnel.max_sessions`/`--max-sessions`, default 64, fail-fast close + `snmp_shield_sessions_denied_total`; agent tunnel listener + TSM gateway front leg) + `--engine-id` flags-mode support (HA replicas share one engine; also lets a receiver pre-register our engine) | done (tested: `safego` unit tests; `internal/tunnel/panic_test.go` (panicking TunnelUp keeps Connect+session usable, panicking TunnelDown still fires `Done()` so translators cannot leak); `TestRunAgentSessionCap` + `TestTSMGatewaySessionCap` (burst refused, counter moves, slot reusable); config + flags pins; hunting found nothing to fix — the panics were theoretical, the caps were not) |
 | Fuzz coverage for the new decoders (`msg.ParseVarbinds`, `access.WritePolicy.Allowed`, `config.Load`, `cache.LoadEngine`, `notifyfilter.Allowed/New`) | done (tested, each target fuzzed 15s green; corpus runs in every `go test`) |
 | SBOM + automated vuln-DB comparison (`make sbom` → syft SPDX+CycloneDX into `dist/`; `make vulnscan` → `grype db update` + `grype --fail-on high` vs NVD/GHSA/OSV; `scripts/sbom.sh --sbom-only`) + x/crypto v0.48.0 → v0.58.0 upgrade clearing all Critical/High advisories (go directive 1.24 → 1.26, mandatory for x/crypto ≥ 0.56) | done (tested, `make vulnscan` rc=0 — only residual GO-2026-5932 is Unknown severity/unfixed deprecated-openpgp advisory, below the gate; direct symbol-precise binary scan: 0 findings) |
@@ -408,6 +412,7 @@ go.mod declares minimum **1.24.0** (CI-free project — tests run manually).
 go build ./...
 go vet ./...
 go test ./... -race -timeout 180s
+make soak   # 10 min: load, spoofed-source flood, failover (release checklist)
 ```
 
 `make build` / `make test` / `make vet` / `make release` wrap the same
@@ -464,11 +469,13 @@ or set `-timeout` on `go test` (DTLS tests would hang without one).
 **What a green run does NOT prove** is inventoried explicitly in
 `TESTING.md` ("What a green run does not prove"): peers skip silently when
 their toolchain is absent, IPv6 is pinned per mode at the socket level but
-not by a vendor and not for mixed-family or IPv6-only hosts, there is no
-soak/load run, `cmd`/`observ` are the least-covered code, HA is pinned as a
-state machine rather than as a mid-request outage, and TSM notifications
-still have no vendor receiver. Read it before treating a green suite as a
-release gate.
+not by a vendor and not for mixed-family or IPv6-only hosts, `make soak` is
+opt-in so a plain green run says nothing about hours of uptime (and even the
+soak says nothing about days, a lossy WAN, RSS rather than live heap, or
+concurrent fan-in), `cmd`/`observ` are the least-covered code, HA is pinned
+as a state machine plus one failover shape rather than as a mid-write outage,
+and TSM notifications still have no vendor receiver. Read it before treating
+a green suite as a release gate.
 
 ### No-YAML CLI mode (plug-and-play deployment)
 
@@ -1322,6 +1329,59 @@ wire behaviour. Findings live in `CONFORMANCE.md`, layering in `TESTING.md`.
   "Cannot adopt OID" lines. Readiness = "NET-SNMP version" in the log; an
   exited container means the config was rejected, which must fail loudly
   rather than skip.
+
+### Soak: what it found, and the shutdown contract it changed
+
+The soak suite exists because every functional test in this repository could
+pass while the proxy leaked a goroutine per message. The first runs found
+three defects of exactly that shape, all now fixed and pinned:
+
+1. **`passthrough.Agent.bgctx()` built a context per send.** A fresh
+   `WithCancel` plus a watcher goroutine, with the cancel discarded: one
+   goroutine leaked per request and one per notification, forever. On an
+   appliance at 50 req/s that is ~4.3M goroutines a day. Fixed with a cached
+   `sync.Once` context cancelled from `Close()`. The same pattern in
+   `passthrough.Manager.reqCtx` was merely *lucky* (it cached), but the lazy
+   init was unsynchronised while both the request leg and the trap leg call
+   it — now behind a `sync.Once` too.
+2. **A pending-request wait that only watched a timer.** `awaitAgentResp`
+   selected on `time.After(15s)` and the stop channel, never on the pending
+   entry's `ready` channel, so every *answered* request still held a
+   goroutine and a map entry for 15 s (steady state: rate × 15 s). Same in
+   `awaitInformResp`, and in the USM manager's inform timeout. Fixed by
+   selecting on `ready` first; the usm `informPending` gained a `ready`
+   channel of its own. (USM/TSM agent request paths already watched a
+   completion channel — only passthrough and the usm manager inform had the
+   gap.)
+3. **Subscriber channels outlived their session.** `Session.Subscribe`
+   returned a channel that nothing ever closed, so `for f := range ch`
+   (`reqLoop`, `notifRespLoop`, `respLoop`, `sinkLoop`) parked forever after
+   the session ended: one goroutine set leaked **per reconnect**, the exact
+   thing a flaky WAN produces by the thousand over days.
+   `Session.closeDone` now closes every subscriber channel, `Subscribe`
+   returns an already-closed channel after shutdown, and `cancel` is
+   idempotent. **Contract change**: a consumer of a subscription channel must
+   handle `f, ok := <-ch` (the usm/tsm translators already did; the
+   passthrough loops use `range`). Without this rule a closed channel is a
+   busy loop, so any new subscriber has to be written that way.
+
+Harness lessons:
+- **Measure at teardown, not only at steady state.** Two of the three bugs
+  kept every request *answered*; only the counts at steady state and after
+  shutdown exposed them. The steady-state check compares against a warm
+  baseline (lazy loops started), and the teardown check waits a bounded 15 s
+  before failing with a full stack dump.
+- **`TestNoPerRequestGoroutines` is the fast net** (not soak-gated): 200
+  requests may not add 10 goroutines, and the count must return to baseline
+  after stop. Both passthrough bugs reproduce as `36 at steady state, 436
+  during 200 requests` when reverted.
+- `TestPanickingTunnelDownCallbackStillFiresDone` now sets a 200 ms keepalive
+  on the server session. Without it the test depended on the client's DTLS
+  `close_notify` arriving to make the server's read loop notice the dead
+  peer; pion's server-side Read can park past the app deadline while the FSM
+  settles (the same macOS quirk noted for the leak test), which made it a
+  ~1-in-10 flake. The assertion is about the panic path, not about how fast a
+  silent UDP peer is noticed.
 
 ### Address family (IPv6)
 

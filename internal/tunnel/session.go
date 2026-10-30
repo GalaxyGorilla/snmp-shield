@@ -479,6 +479,17 @@ func (s *Session) failoverChanged() bool {
 
 // readLoop reads frames from the connection and dispatches them.
 func (s *Session) readLoop() {
+	// Whatever ends this loop, the session is over for its consumers: it is
+	// the only reader and startReadLoop is once-only, so no frame can ever
+	// be delivered again. Firing Done here — rather than at each return
+	// site — makes that true on the paths that do NOT drop the connection
+	// themselves, which is where it used to be lost: a PONG send that fails
+	// calls dropConn from inside the loop (TunnelDown fires), the loop
+	// continues, finds no connection and returned silently. The per-session
+	// translator was then never cancelled — one goroutine set leaked per
+	// client that vanished while a PING was being answered. A deferred call
+	// also covers a panic unwinding out of the loop.
+	defer s.closeDone()
 	hdr := make([]byte, frameHeaderLen)
 	for {
 		conn := s.current()
@@ -507,8 +518,7 @@ func (s *Session) readLoop() {
 					}
 					s.dropConn(errors.New("peer idle: dead peer detected"))
 					if s.dial == nil {
-						s.closeDone()
-						return
+						return // the deferred closeDone ends the session
 					}
 				}
 				if s.dial != nil {
@@ -521,8 +531,7 @@ func (s *Session) readLoop() {
 			}
 			s.dropConn(err)
 			if s.dial == nil {
-				s.closeDone()
-				return
+				return // the deferred closeDone ends the session
 			}
 			continue
 		}
@@ -533,8 +542,7 @@ func (s *Session) readLoop() {
 			}
 			s.dropConn(err)
 			if s.dial == nil {
-				s.closeDone()
-				return
+				return // the deferred closeDone ends the session
 			}
 			continue
 		}
@@ -544,8 +552,7 @@ func (s *Session) readLoop() {
 			if _, err := readFull(conn, payload); err != nil {
 				s.dropConn(err)
 				if s.dial == nil {
-					s.closeDone()
-					return
+					return // the deferred closeDone ends the session
 				}
 				continue
 			}
@@ -562,8 +569,7 @@ func (s *Session) readLoop() {
 		case TypeGOAWAY:
 			s.dropConn(errors.New("peer sent GOAWAY"))
 			if s.dial == nil {
-				s.closeDone()
-				return
+				return // the deferred closeDone ends the session
 			}
 			continue
 		}

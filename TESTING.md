@@ -21,6 +21,16 @@ frame-sink pipe, free ports). The conformance layer uses the same scaffolding
 but drives the **built CLI**, so flag parsing, defaults and validation are
 covered too.
 
+**Every privacy protocol that ships is driven by an independent stack**, not
+just the one modern devices negotiate: AES-CFB (RFC 3826) throughout, and DES
+(RFC 3414 §8.1.1.1) in `internal/usm/des_e2e_test.go` — a gosnmp DES client
+for the request leg and a gosnmp `TrapListener` for the notification leg,
+plus `internal/msg/des_test.go` for the primitive (padding, pre-IV,
+malformed input). DES is the legacy protocol old devices still require, and
+until that test existed **no scenario used it at all** (`EncryptDES`,
+`DecryptDES` and `padBlock` measured 0%): a protocol nobody exercised against
+a second implementation is a protocol that works only in theory.
+
 ## Commands
 
 ```bash
@@ -103,11 +113,29 @@ functional test had answered requests straight through:
    session's `for f := range ch` loops (`reqLoop`, `notifRespLoop`,
    `respLoop`, `sinkLoop`) parked forever: one goroutine set leaked **per
    reconnect**, which a flaky WAN would turn into thousands over days.
+4. `tunnel.Session.readLoop` fired `Done()` only on the exits that dropped
+   the connection themselves. A server answering a PING whose PONG write
+   fails drops the conn *inside* the loop (`dropConn`, TunnelDown fires),
+   then finds no connection and returned **silently** — `Done()` never
+   fired, so the per-session translator was never cancelled and the
+   goroutine kept its `max_sessions` slot and the active-session gauge
+   forever. That is the failure mode the session cap exists to prevent: a
+   handful of clients that vanish mid-exchange would deny the service.
+   Fixed with a `defer s.closeDone()` in the loop (the loop is the only
+   reader and is started once, so its exit *means* the session is over);
+   the now-redundant per-exit calls were removed so the invariant has one
+   home. Pinned deterministically by
+   `TestReadLoopExitFiresDoneAfterFailedPong` (`internal/tunnel`), which
+   feeds a PING over a fake conn whose writes fail. Found by running the
+   panic test under `-coverpkg=./...`: the instrumentation slowed the loop
+   enough to reach the PING branch, which the normal suite never did.
 
 The fast regression net is `TestNoPerRequestGoroutines` (`internal/proxy`,
 not soak-gated): 200 requests must not add 10 goroutines, and teardown must
 return to baseline. Reverting the two passthrough fixes reproduces it as
-`goroutines 36 at steady state, 436 during 200 requests`.
+`goroutines 36 at steady state, 436 during 200 requests`. Finding 4 is the
+complement: a goroutine count cannot see a session that *never ended*, so
+the session's own exit invariant is pinned directly rather than by counting.
 
 Scope limit: the goroutine net drives requests, and the soak's steady-state
 traffic is GETs — the **inform** pending maps (passthrough and the USM manager,
@@ -207,6 +235,15 @@ stack immediately runs the whole matrix.
   testable half and is pinned by `TestAwaitFrontFailsFastWhenTheProcessExited`
   — a hand-built dead `proxyProc`, because a UDP dial to a non-local address
   reports "bound" (UDP has no connect handshake to fail).
+- **A readiness budget must exceed the production startup budget.** The
+  manager eagerly dials the tunnel with a 10 s timeout *before* it starts the
+  translator that binds the clear leg (`runManager`: a failed connect is only
+  a warning, the translator starts anyway). A fixture that waits 10 s for that
+  leg therefore collides exactly with the design: under full-suite load one
+  DTLS handshake took the whole budget and the failure read "manager never
+  bound …", which looks like a bind bug. `frontReadyTimeout` is 30 s for that
+  reason. Whenever a role gains a startup timeout, check the fixtures that
+  wait on it.
 - **Wait for a real answer, not for a bound socket.** A bound UDP port does
   not prove the tunnel behind it works: `waitV2cReady` polls an end-to-end
   GET.

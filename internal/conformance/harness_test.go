@@ -201,10 +201,21 @@ func (p *proxyProc) waitExit(t *testing.T, timeout time.Duration) int {
 // address already in use" says what actually happened.
 func (p *proxyProc) waitFront(t *testing.T, addr string) {
 	t.Helper()
-	if err := p.awaitFront(addr, 10*time.Second); err != nil {
+	if err := p.awaitFront(addr, frontReadyTimeout); err != nil {
 		t.Fatalf("%v; output:\n%s", err, p.log.String())
 	}
 }
+
+// frontReadyTimeout is how long a fixture waits for a front leg to bind.
+//
+// It must stay comfortably above the manager's production dial timeout
+// (`runManager` uses `Timeout: 10s` for the eager tunnel connect and only
+// then starts the translator, which binds the clear leg). With a 10s budget
+// the two collide exactly: under full-suite load a slow DTLS handshake made
+// the manager miss the deadline and the failure read "manager never bound
+// …", which looks like a bind bug. The proxy is designed to spend up to 10s
+// dialing before it serves, so the harness has to allow more than that.
+const frontReadyTimeout = 30 * time.Second
 
 // awaitFront is waitFront without the *testing.T: the error names the cause,
 // so a caller (or a test of this helper) can tell "exited" from "slow".

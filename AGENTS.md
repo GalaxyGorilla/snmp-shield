@@ -135,6 +135,8 @@ plus the short `/tmp` prefix hides it).
 | Address family (IPv6): every mode's ingress is pinned on `[::1]` — USM gateway request leg (`internal/usm/ipv6_e2e_test.go`), USM gateway inform round trip incl. the sink-discovery socket (`gateway_inform_engine_ipv6_test.go`), manager-gateway discovery+request sockets and the full two-proxy passthrough chain, TSM gateway raw-DTLS front leg (`internal/tsm/gateway_ipv6_test.go`). Harnesses gained an explicit-host variant (`buildGatewayOn`, `buildManagerGatewayAt`, `startFakeV3AgentOn`, `buildTSMGatewayOn`, `freeUDPPortOn`) instead of duplicated fixtures. The IPv6 inform pin is mutation-verified: forcing the sink-discovery probe to `udp4` makes discovery fail silently and the fallback wrap names our own engine, which the test names verbatim | done (tested, -race green; IPv6 is socket-level, not vendor-driven — no peer can be pointed at a v6 port through the contract) |
 | Docker fixtures let docker assign the host port (`-p 127.0.0.1::1162/udp` + `docker port`, via `publishedLoopback`) instead of probing a free port and publishing it: the probe→publish gap is a TOCTOU race that surfaced once under full-suite load as a product-looking `bind: address already in use` on a gateway trap listener | done (tested: `TestUSMGatewayVendorTrapReceiver`, `TestUSMGatewayVendorInformReceiver`, `TestManagerGatewayRealAgent` green on both agents; see CONFORMANCE.md "Docker fixtures") |
 | Soak suite (`make soak`, `SNMP_SHIELD_SOAK=1`, default 10 min, `SOAK_DURATION` overrides): `TestSoakSteadyState` (two-proxy chain, one request every 20 ms — zero unanswered, goroutines baseline ±8, post-GC live heap within 24 MiB), `TestSoakHAFailoverUnderLoad` (manager polls through two agent replicas, sticky one killed at ⅓ of the budget — recovery ≤30 s, green streak at the end, Reconnects moved, TunnelUp 1, goroutines back to baseline), `TestSoakRateLimiterSpoofedSources` (flood over 10/8 — table never exceeds `limitMaxBuckets`, a never-seen source still refused, heap flat). Fast non-soak net for the leak class: `TestNoPerRequestGoroutines` | done (tested: full 10-minute `make soak` green — steady state 27,386 requests / worst round trip 39 ms / goroutines flat at 26 / live heap 0.9→1.1 MiB; HA failover after 8.1 s with 17,177 answers and a 17,177-run green streak after it; rate limiter 1.04M admitted of 4.2B requests with the table pinned at 4096/4096; 200-request regression test fails loudly on mutation — see §7) |
+| `tunnel.Session` read-loop exit invariant (found while re-running the panic test under `-coverpkg`): `readLoop` fired `Done()` only on the exits that dropped the connection themselves, so a server answering a PING whose PONG write fails (peer vanished mid-exchange) called `dropConn` inside the loop, then found no conn and returned **silently** — `Done()` never fired, the per-session translator was never cancelled, and that goroutine held its `max_sessions` slot and the `sessions_active` gauge forever, so a handful of such clients could deny the service the cap protects. Fixed with `defer s.closeDone()` in the loop (only reader, started once ⇒ its exit means the session is over) and the redundant per-exit calls removed | done (tested: `TestReadLoopExitFiresDoneAfterFailedPong` over a fake conn whose writes fail, mutation-verified — removing the `defer` fails it with "Done() never fired … the per-session translator would leak"; `-count 10` stable; full `internal/tunnel` race suite green) |
+| DES privacy on the wire (`msg.EncryptDES`/`DecryptDES`, RFC 3414 §8.1.1.1) was reached by **no test at all** — every scenario used AES, so the protocol kept for old devices that speak nothing else was never checked against an independent implementation. Now: `internal/usm/des_e2e_test.go` drives the gateway with a **gosnmp DES** client (discovery + authPriv GET, relayed to the device, second request after discovery) and validates our DES-wrapped v3 trap in a gosnmp TrapListener; `internal/msg/des_test.go` pins the primitive (zero padding to the block boundary, pre-IV = key[8:16] XOR salt, malformed ciphertext/short key refused instead of panicking). Two guards added while writing it: `EncryptDES`/`DecryptDES` now reject a key shorter than 16 bytes or salt shorter than 8 (slicing `key[:8]` panicked), and `encryptScoped` turns a nil ciphertext into `ErrUnsupportedSec` instead of emitting an empty scopedPDU | done (tested: both directions green; mutation-verified twice — taking the IV from `key[0:8]` makes the gosnmp GET fail with "invalid packet length", and dropping the `DecryptDES` guard panics the unit test; `EncryptDES` 92%, `DecryptDES` 83%, `padBlock` 100%) |
 | Goroutine-per-message fixes found by the first soak runs: `passthrough.Agent.bgctx()` built a context + watcher goroutine per SEND and dropped the cancel (one leaked goroutine per request and per notification); `awaitAgentResp`/`awaitInformResp` waited the full 15 s even after the answer (rate × 15 s goroutines + pending entries); `tunnel.Session` never closed subscriber channels, so `for f := range ch` loops (`reqLoop`, `notifRespLoop`, `respLoop`, `sinkLoop`) outlived their session — one goroutine set per reconnect. Fixes: cached `bgOnce` context, select on the pend `ready` channel (usm manager inform path too), and `closeDone` now closes every subscriber channel (`Subscribe` closes immediately after shutdown and its cancel is idempotent; consumers must handle `ok == false`, which the usm/tsm translators already did) | done (tested: `TestNoPerRequestGoroutines` 26→26 goroutines over 200 requests on passthrough and usm-translate, back to baseline after teardown; reverting the two passthrough fixes reproduces 36→436; soak HA now passes its teardown check; full race suite green) |
 | Release gate + flags wiring sweep: `make conformance-required` (`CONFORMANCE_REQUIRED=1`) turns every environment skip in the matrix into a failure, so "all peers green" cannot mean gosnmp alone; `skipOrFail` is the only sanctioned route (`TestNoSkipBypassesRequiredGate` source-scans for bypassing `t.Skip`, `KindUnsupported` still skips), and `Unavailable()` now probes the peer runtime through PATH as well (`TestMissingRuntimeSkipsInsteadOfFailing` — a removed `node` used to look available because `node_modules` survived, then failed as an adapter error). `cmd/snmp-shield/flags_sweep_test.go` walks all eight role × mode paths with every flag set, twice (read-only + write policy), with completeness tripwires (`fullOpts` non-zero per field, `TestOptsWiresEveryFlag` parses `register()` and diffs `opts()`); reintroducing conformance finding 1 makes it fail (verified by mutation) | done (tested: sweep + gate unit tests green; gate proven both directions on a trimmed PATH; full race suite green) |
 | Front-door observability + idle bound (found while chasing a `TestTSMGatewaySessionCap` flake under full-suite load): `snmp_shield_sessions_active` gauge set at slot acquire/release in both capped accept loops, and a per-read idle deadline on every TSM front session — DTLS carries no keepalive, so a peer that crashes or loses its route pinned its cap slot until process restart. The cap tests now wait on the gauge instead of sleeping (`waitActive` / `waitSessionsActive`), which is deterministic under load and asserts the recovery property directly, and they assert the **bound** rather than a clean close: a lost DTLS `close_notify` (UDP does not retransmit it) used to leave the slot for the production idle bound, so the TSM test shortens `frontIdleTimeout` via `SetFrontIdleTimeoutForTest` (export_test-style bridge) and deliberately leaves its last client conn **open**, and the agent test sets `keepalive_secs: 1` so the dead-peer window is 9s instead of 90s | done (tested: `TestTSMGatewaySessionCap` (mutation-verified: removing the `SetReadDeadline` makes it fail with "the idle bound never returned an abandoned session's slot"), `TestRunAgentSessionCap` on the gauge; `internal/tsm/front_idle_test.go` pins the idle bound over an in-memory conn — idle session ends, traffic re-arms the deadline; full race suite green ×3 after the fix) |
@@ -968,6 +970,25 @@ snmp.conf with `clientCert`/`trustCert` sha256 fingerprints). Needs
   x/crypto v0.48.0 → v0.58.0 cleared all Critical/High advisories;
   x/crypto ≥ 0.56 requires `go 1.26.0`, so the module go directive
   moved 1.24.0 → 1.26.0 (mandatory, not cosmetic).
+- **DES privacy** (RFC 3414 §8.1.1.1): `msg.EncryptDES`/`DecryptDES` are
+  DES-CBC with the pre-IV = `key[8:16]` XOR the 8-byte salt and zero padding.
+  Two things to know before touching it:
+  (a) **`padBlock` always adds 1..8 bytes**, so a plaintext that is already a
+  multiple of 8 gets a whole block of zeros. RFC 3414 only requires padding
+  when it is *not* a multiple, but gosnmp does exactly the same
+  (`pad = blocksize - len%blocksize`) and the extra bytes are immaterial on
+  the wire because the receiver parses the scopedPDU by its BER length. Do
+  not "fix" it to spec-exact without a vendor that rejects the extra block —
+  it would change ciphertext for ~1 in 8 messages for no gain.
+  (b) The decryptor returns the **padded** plaintext; the caller parses the
+  scopedPDU out of it by declared length (`V3Message.UnwrapScopedPDU`), so
+  trailing zeros are ignored rather than stripped.
+  Both directions are now vendor-pinned by `internal/usm/des_e2e_test.go`
+  (a gosnmp DES client for requests, a gosnmp TrapListener for notifications).
+  The DES primitive is `internal/msg/des_test.go`; its length guards exist
+  because `key[:8]` on a short key is a panic, and these functions take keys
+  and ciphertext that a misconfigured profile or a hostile peer controls.
+
 - **Notification filtering** (`internal/notifyfilter`, `notifications.filter`):
   one filter (action allow|deny + dotted OID prefixes) applies at the
   **clear-notification ingress points only** (the 6 `handleClearTrap`/
@@ -1411,6 +1432,23 @@ three defects of exactly that shape, all now fixed and pinned:
    handle `f, ok := <-ch` (the usm/tsm translators already did; the
    passthrough loops use `range`). Without this rule a closed channel is a
    busy loop, so any new subscriber has to be written that way.
+4. **`readLoop`'s exit did not always fire `Done()`.** It fired only on the
+   exits that dropped the connection themselves. A server answering a PING
+   whose PONG write fails drops the conn *inside* the loop (TunnelDown fires
+   correctly), then finds no connection and returned silently: `Done()`
+   never fired, the per-session translator was never cancelled, and that
+   goroutine kept its `max_sessions` slot and the `sessions_active` gauge
+   forever — i.e. a handful of clients that vanish mid-exchange could deny
+   the service, which is the exact failure the cap exists to prevent. Fixed
+   with `defer s.closeDone()` in the loop: the loop is the only reader and
+   `startReadLoop` is once-only, so its exit *means* the session is over for
+   its consumers. The per-exit calls are gone, so the invariant lives in one
+   place. Pinned by `TestReadLoopExitFiresDoneAfterFailedPong`
+   (`internal/tunnel/readloop_done_test.go`) over a fake conn whose writes
+   fail — deterministic, no timing. It surfaced only when the panic test ran
+   under `-coverpkg`, whose slowdown made the PING branch reachable: a
+   goroutine *count* cannot see a session that never ended, so this class
+   needs the exit invariant pinned directly.
 
 Harness lessons:
 - **Measure at teardown, not only at steady state.** Two of the three bugs

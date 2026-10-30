@@ -150,6 +150,15 @@ func buildTSMGatewayOn(t *testing.T, host, ca, serverCrt, serverKey string, agen
 }
 
 // dialFront dials the gateway front leg with the client certificate.
+// dialFront dials the TSM front leg, retrying once.
+//
+// The retry is harness robustness, not product leniency: a DTLS handshake on
+// loopback takes milliseconds, but this package runs alongside the conformance
+// matrix (Docker, snmpd, four CLI peers) under -race, and a goroutine starved
+// for a whole 5s handshake budget fails the dial with "timeout after 5s" —
+// which reads like a product defect while the gateway was merely not
+// scheduled. A real TSM client retries too. A gateway that genuinely does not
+// answer still fails, just after the second attempt.
 func dialFront(t *testing.T, front, ca, clientCrt, clientKey string) net.Conn {
 	t.Helper()
 	d := &tunnel.Dialer{
@@ -159,13 +168,18 @@ func dialFront(t *testing.T, front, ca, clientCrt, clientKey string) net.Conn {
 		KeyFile:  clientKey,
 		Timeout:  5 * time.Second,
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	conn, err := d.Dial(ctx, front)
-	if err != nil {
-		t.Fatalf("dtls dial: %v", err)
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		conn, err := d.Dial(ctx, front)
+		cancel()
+		if err == nil {
+			return conn
+		}
+		lastErr = err
 	}
-	return conn
+	t.Fatalf("dtls dial: %v", lastErr)
+	return nil
 }
 
 // buildTSMGet builds a TSM v3 GET request (secModel=4, empty security

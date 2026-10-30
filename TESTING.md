@@ -159,6 +159,12 @@ inform traffic to surface.
   with that SAN (`testkit.NewPKIWithNames`).
 - Every scenario starts its own proxy process on ephemeral ports and its own
   fake device; nothing is shared between subtests.
+- **The process lifecycle lives here too** (`lifecycle_test.go`), even though
+  it involves no vendor. It is the only place a real signal can be delivered
+  without firing into the test binary's own process, and `systemctl reload` /
+  `systemctl restart` are the operator's actual interface. These tests never
+  skip — no peer, no Docker — so a bare host's green run still says something
+  about shutdown and reload.
 
 ## Adding a scenario
 
@@ -191,6 +197,16 @@ stack immediately runs the whole matrix.
   loopback ports flake under `-race` because packages run in parallel.
 - **`FreeUDPPort` is a probe, not a reservation.** Use it only where a config
   must name an address before anything binds; retry through a real request.
+  The port can be taken between the probe and the bind — seen once under full
+  suite load (plus a second suite running on the same host, which is why you
+  should run one at a time) as a product-looking
+  `bind: address already in use` on a gateway trap listener. Readiness now
+  goes through `(*proxyProc).waitFront`, which stops the moment the process
+  exits and prints its log, so that failure says "exited before binding …
+  address already in use" instead of a 10 s timeout. `awaitFront` is the
+  testable half and is pinned by `TestAwaitFrontFailsFastWhenTheProcessExited`
+  — a hand-built dead `proxyProc`, because a UDP dial to a non-local address
+  reports "bound" (UDP has no connect handshake to fail).
 - **Wait for a real answer, not for a bound socket.** A bound UDP port does
   not prove the tunnel behind it works: `waitV2cReady` polls an end-to-end
   GET.
@@ -262,26 +278,38 @@ names what would close it.
   enforces running it: there is no CI by design, so the gate is only as good
   as the release checklist that calls it. Vendor limitations
   (`KindUnsupported`) still skip, correctly, even under the gate.
-- **`cmd`'s process lifecycle is only partly covered** (measured 2026-10-29:
-  `cmd/snmp-shield` 86.0%, `internal/observ` 100%, overall 67.5% excluding
-  the conformance package). Assembly coverage is structural rather than
+- **The signal edge is covered on a real process, but only for the shapes
+  listed** (`internal/conformance/lifecycle_test.go`, measured 2026-10-30:
+  `cmd/snmp-shield` 86.0%, `internal/observ` 100%, overall 67.5% excluding the
+  conformance package). Assembly coverage is structural rather than
   incidental: the flags wiring sweep (above) exercises every role × mode with
   every flag, which closes the class conformance finding 1 lived in. The
-  `selftest` probes are now driven against real wire peers (`selftest_test.go`:
-  a live testkit device, a silent one, a malformed answer, a real PSK-DTLS
-  listener per endpoint, a fake USM agent for discovery + authPriv, expired /
-  expiring / missing certificates) and the SIGHUP path runs end to end from a
-  YAML file to the wire (`internal/proxy/reload_e2e_test.go`). What is still
-  uncovered is the *signal* edge and `Run` itself: `runRole`'s success path
-  blocks in `proxy.Run`, which installs the process-wide SIGINT/SIGTERM and
-  SIGHUP handlers, and a test cannot deliver those without firing into the
-  test binary's own process. Everything from the SIGHUP handler inwards is
-  covered (`reloadLoop` → `reloadConfig` → `config.Load` → the next
-  datagram); the handler registration and shutdown-by-signal are not.
-  *Closer with:* a harness that starts the **built binary** per role, sends a
-  real SIGHUP and SIGTERM, and asserts the reload and the clean exit — the
-  conformance harness already builds and supervises the CLI, so it is the
-  natural home.
+  `selftest` probes are driven against real wire peers (`selftest_test.go`)
+  and the reload path runs from a YAML file to the wire twice — in-process
+  (`internal/proxy/reload_e2e_test.go`, which can call `reloadConfig`
+  directly) and on the **built binary** (`TestProcessSIGHUPReloadsAccessPolicy`:
+  real SIGHUP, read-only takes effect on the next SET with no restart,
+  SIGTERM exits 0; `TestProcessSIGHUPIsNotShutdown`: SIGHUP in flags mode is a
+  logged no-op and the process keeps serving). Both are mutation-verified —
+  adding SIGHUP to the shutdown context fails the second, dropping `h.Store`
+  fails the first. `TestProcessBindFailureIsLoud` pins the other half of the
+  startup contract: a front leg that cannot bind exits non-zero with the
+  cause logged (a unit that looks healthy while serving nothing is worse than
+  a failed start). It binds TEST-NET-1 rather than an in-use port, because
+  UDP `SO_REUSEADDR` lets a second bind through on macOS — the same test
+  would pass for the wrong reason on one platform and fail on the other.
+  A request in flight when the signal lands is covered too
+  (`TestProcessShutdownUnderLoad`: a device that holds the request for 400 ms,
+  SIGTERM mid-flight, exit 0 well inside the 15 s pending-request timer, no
+  panic in the log, and the client's call returns rather than hanging) — that
+  is the shape a join-instead-of-cancel shutdown would fail. What remains
+  uncovered: *draining* (a request accepted before the signal is deliberately
+  dropped, so nothing asserts it is answered), a peer that keeps sending
+  while the process stops, the systemd watchdog's STOPPING notification (no
+  systemd in a test), and `manager`/`agent` role signals — only `gateway` is
+  driven here, though the wiring is shared, so that is one code path, not
+  three. *Closer with:* a `systemctl stop` contract that drains in-flight
+  work, if that is ever wanted.
 - **IPv6 is covered at the socket level, not by a vendor.** One scenario per
   mode now binds `[::1]`: the USM gateway's request leg, its inform round trip
   (including the sink-discovery socket, which is separate from the request

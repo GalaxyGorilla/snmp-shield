@@ -151,7 +151,7 @@ func startManagerGateway(t *testing.T, p Peer, agentAddr string) (front, trapLis
 	bindFront, front := peerFront(t, p)
 	bindTrap, trapListen := peerFront(t, p)
 	sink = testkit.NewAnsweringTrapSink(t)
-	startProxy(t, "manager-gateway", "gateway",
+	proc := startProxy(t, "manager-gateway", "gateway",
 		"--security", "usm-manager-gateway",
 		"--listen", bindFront,
 		"--agent", agentAddr,
@@ -162,8 +162,8 @@ func startManagerGateway(t *testing.T, p Peer, agentAddr string) (front, trapLis
 		"--trap-sink", sink.Addr(),
 		"--log-level", "debug",
 	)
-	waitFront(t, front)
-	waitFront(t, trapListen)
+	proc.waitFront(t, front)
+	proc.waitFront(t, trapListen)
 	return front, trapListen, sink
 }
 

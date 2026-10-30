@@ -155,10 +155,10 @@ func startTSMGateway(t *testing.T, pki *testkit.PKI, agent *testkit.Agent, extra
 		"--key-file", pki.ServerKey,
 	}
 	args = append(args, extra...)
-	startProxy(t, "tsm-gateway", args...)
+	proc := startProxy(t, "tsm-gateway", args...)
 	// The port came from a probe, not from a socket the proxy handed us, so
 	// wait for the listener: an empty datagram to a closed UDP port is
 	// refused, which is enough to tell "not bound yet" from "bound".
-	waitFront(t, fmt.Sprintf("127.0.0.1:%d", port))
+	proc.waitFront(t, fmt.Sprintf("127.0.0.1:%d", port))
 	return fmt.Sprintf("dtls:%s:%d", dockerHost, port)
 }

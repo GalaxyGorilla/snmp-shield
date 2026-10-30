@@ -48,8 +48,8 @@ func startUSMGateway(t *testing.T, p Peer) *usmGatewayFixture {
 		"--auth-pass", authPass, "--priv-pass", privPass,
 		"--engine-store", store,
 	)
-	waitFront(t, front)
-	waitFront(t, trapAddr)
+	proc.waitFront(t, front)
+	proc.waitFront(t, trapAddr)
 	return &usmGatewayFixture{
 		Front: front, TrapAddr: trapAddr, BindFront: bindFront, BindTrap: bindTrap,
 		Device: dev, Sink: sink, Store: store, Proc: proc,
@@ -261,7 +261,7 @@ func TestUSMGatewayEnginePersistence(t *testing.T) {
 			"--auth-pass", authPass, "--priv-pass", privPass,
 			"--engine-store", f.Store,
 		)
-		waitFront(t, f.Front)
+		f.Proc.waitFront(t, f.Front)
 
 		second := readEngineStore(t, f.Store)
 		if second.EngineID != first.EngineID {
@@ -360,7 +360,7 @@ func TestUSMGatewayNotifyFilterWire(t *testing.T) {
 		sink := testkit.NewV3Sink(t, testkit.V3SinkOptions{
 			User: gatewayUsr, AuthPass: authPass, PrivPass: privPass,
 		})
-		startProxy(t, "usm-gateway-filtered",
+		proc := startProxy(t, "usm-gateway-filtered",
 			"gateway", "--security", "usm-gateway",
 			"--listen", front, "--agent", dev.Addr(), "--community", community,
 			"--trap-listen", trapAddr, "--trap-sink", sink.Addr,
@@ -368,8 +368,8 @@ func TestUSMGatewayNotifyFilterWire(t *testing.T) {
 			"--filter-action", "deny", "--filter-oid", "1.3.6.1.4.1.99.7",
 			"--engine-store", filepath.Join(t.TempDir(), "engine.json"),
 		)
-		waitFront(t, front)
-		waitFront(t, trapAddr)
+		proc.waitFront(t, front)
+		proc.waitFront(t, trapAddr)
 
 		res := mustRun(t, p, Request{
 			Verb: VerbTrap, Version: "2c", Community: community,

@@ -62,10 +62,10 @@ func startChain(t *testing.T, p Peer, device testkit.AgentOptions, opts ...chain
 	for _, opt := range opts {
 		opt(&agentArgs)
 	}
-	startProxy(t, "agent", agentArgs...)
-	waitFront(t, tunnelAddr)
+	agentProc := startProxy(t, "agent", agentArgs...)
+	agentProc.waitFront(t, tunnelAddr)
 
-	startProxy(t, "manager",
+	mgrProc := startProxy(t, "manager",
 		"manager",
 		"--tunnel-addr", tunnelAddr, "--psk", psk,
 		"--auth-pass", authPass, "--priv-pass", privPass,
@@ -74,8 +74,8 @@ func startChain(t *testing.T, p Peer, device testkit.AgentOptions, opts ...chain
 		"--trap-listen", bindTrap,
 		"--engine-store", filepath.Join(t.TempDir(), "manager-engine.json"),
 	)
-	waitFront(t, front)
-	waitFront(t, trapAddr)
+	mgrProc.waitFront(t, front)
+	mgrProc.waitFront(t, trapAddr)
 	// A bound port is not a working tunnel: wait for an answer end to end.
 	waitV2cReady(t, front)
 

@@ -126,6 +126,7 @@ plus the short `/tmp` prefix hides it).
 | `validate` subcommand (`--role` + same flags/`--config`; `--json` for tooling; pre-flights cert keypairs, CA files, engine-store writability) + `selftest` subcommand (validate + probes: tunnel handshake per endpoint (manager), SNMP GET sysDescr.0 to the real agent (agent/gateway), front-cert expiry (tsm-gateway); `--probe=false`) | done (tested, unit tests + manual live-agent/tunnel/dead-addr verification) |
 | `validate --json` exit-code fix (rc mirrors `ok` in both output modes; previously `validate --json` returned 0 on invalid configs while `selftest --json` always honored rc 1 — README/AGENTS "Exit 0/1" only held for text mode) | done (tested, unit + live rc verification; full race suite re-run green) |
 | `selftest` probes + reload + observ covered, and the probe's GET fixed: the probes behind the appliance's "test connection" button had **no tests at all** (0%), and driving them against a *validating* peer found the reason they could lie — `sysDescrVarbinds` emitted a **double-wrapped varbind** (a SEQUENCE where the varbind list expects an OID) with **no NULL value** (RFC 3416 §4.2.1 requires one), so a lenient agent answered and a strict one dropped the request: `selftest` reported a healthy device as "no response". Also fixed: an expired selftest budget blamed a *write* timeout for the second attempt, and an HA endpoint list whose first entries are dead reported the live ones as failed because all per-endpoint budgets come out of one deadline (now "not probed: selftest deadline reached") | done (tested: `cmd/snmp-shield/selftest_test.go` — live/silent/malformed v2c device, retry-once, per-endpoint PSK-DTLS handshakes, a fake USM agent for discovery+authPriv incl. a tampered answer, expired/expiring/missing certs, community precedence, `runRole` exit codes, and the whole `selftest --role agent` subcommand end to end; `internal/proxy/reload_e2e_test.go` drives SIGHUP from a YAML file to the wire (lock writes → `notWritable` with 0 SETs at the device → invalid file keeps the policy → restart-required change reported, listener untouched → flags mode a logged no-op) and mutation-verified by dropping `h.Store`; `internal/observ/observ_test.go` pins log levels, the scrape page, the SNMP MIB counter row ORDER, `/metrics`-only routing, port release on shutdown and a logged bind error; cmd coverage 53.6% → 86.0%, observ 0% → 100%) |
+| Process lifecycle on the built binary (`internal/conformance/lifecycle_test.go`): the **signal edge**, which no in-process test can reach — `TestProcessSIGHUPReloadsAccessPolicy` sends a real SIGHUP to the CLI (edit `access.read_only` → next SET is `notWritable` with no restart, device sees no extra write, reads keep working, SIGTERM exits 0) and `TestProcessSIGHUPIsNotShutdown` pins the trap the reload code warns about (flags-mode SIGHUP is a logged no-op and the process keeps serving; SIGINT exits 0); `TestProcessShutdownUnderLoad` sends SIGTERM with a request held by a slow device and requires exit 0 inside the 15 s pending-request timer, no panic, and a client call that returns (a join-instead-of-cancel shutdown fails it); `TestProcessBindFailureIsLoud` pins a front leg that cannot bind exiting non-zero with the cause logged (it binds TEST-NET-1, not an in-use port — UDP `SO_REUSEADDR` lets a second bind through on macOS, so the in-use-port form would differ per platform). Vendor-free on purpose (no peer, no Docker, never skips), so a bare host's green run still says something about reload and shutdown; `proxyProc` gained `signal`/`waitExit` (the exit status is what "clean shutdown" means) | done (tested: both mutation-verified — adding `syscall.SIGHUP` to `signal.NotifyContext` fails the second with "SIGHUP terminated the proxy", dropping `h.Store` in `applyReload` fails the first with "SIGHUP did not install the read-only policy"; `-count 5` stable; full race suite + `make conformance-required` green) |
 | Makefile (`make build/test/vet/release/release-all/interop`), systemd units (`deploy/*.service`: hardening, CAP_NET_BIND_SERVICE, StateDirectory, Type=notify + WatchdogSec=30), examples directory (6 copy-paste walkthroughs), README rewrite | done |
 | README decision guidance (native SNMPv3, WireGuard/IPsec, and `snmpfwd` alternatives; snmp-shield's DTLS/TSM and appliance-operations fit) | done |
 | Goroutine-leak regression test (`internal/tunnel/leak_test.go`: 30 connect/exchange/close cycles over real PSK-DTLS loopback, goroutine count must return to baseline; server side keyed on `Session.Done()` + production `SetTuning` so there is no test-end accounting noise) | done (tested, -race -count 8 stable: before=after=5) |
@@ -1334,6 +1335,34 @@ wire behaviour. Findings live in `CONFORMANCE.md`, layering in `TESTING.md`.
   (`clientCert` is deprecated in 5.9 but is what feeds the identity lookup).
   The port comes from `testkit.FreeUDPPort`, so wait for the listener with
   `waitFront` before the first vendor call.
+- **Process lifecycle belongs in the conformance package**
+  (`lifecycle_test.go`), even though it involves no vendor: it is the only
+  place a **real signal** can be delivered. `internal/proxy` can test
+  `reloadLoop`/`reloadConfig` directly (it does, from a YAML file to the
+  wire), but `proxy.Run` installs the process-wide handlers, and
+  `signal.NotifyContext` in a test binary would fire into the test's own
+  process. The tests are vendor-free and never skip, so a bare host's green
+  run still covers `systemctl reload`/`restart`. `proxyProc` gained
+  `signal()` and `waitExit()` — the **exit status** is the difference between
+  "shut down cleanly" and "disappeared", and only a real process has one.
+  Assertion shape matters: a SET already in flight when SIGHUP lands is
+  legitimately allowed (the reload is asynchronous), so the device-side
+  baseline is taken **after** the policy is visibly in force, not before the
+  signal — asserting "exactly one SET ever" is a flake, asserting "no further
+  SET after the policy is in force" is the property.
+  A front leg that cannot bind must exit non-zero with the cause logged
+  (`TestProcessBindFailureIsLoud` binds TEST-NET-1, not an in-use port: UDP
+  `SO_REUSEADDR` lets a second bind through on macOS, so the in-use form is
+  platform-dependent).
+  **Port-probe races are diagnosed, not hidden**: `FreeUDPPort` is a probe,
+  not a reservation, and a full-suite run (or two suites on one host) can lose
+  a probed port before the proxy binds it. All conformance fixtures now wait
+  through `(*proxyProc).waitFront`, which returns as soon as the process exits
+  and prints its log — the difference between "the proxy is broken" and
+  "exited before binding … address already in use". `awaitFront` is the
+  testable half (`TestAwaitFrontFailsFastWhenTheProcessExited`, using a
+  hand-built dead `proxyProc`: a UDP dial to a non-local address reports
+  "bound", so a real unbindable address cannot pin this).
 - **Deliberate gap**: no third-party TSM *receiver*. net-snmp 5.9's
   `snmptrapd` in `dtls:` mode never reads its socket (it works over UDP —
   that is exactly how the USM receiver above runs), so TSM notification

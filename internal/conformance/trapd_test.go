@@ -187,14 +187,14 @@ func requireDocker(t *testing.T, what string) {
 func startNotifyGateway(t *testing.T, p Peer, engineIDHex, sinkAddr string) (trapAddr string) {
 	t.Helper()
 	bindTrap, trapAddr := peerFront(t, p)
-	startProxy(t, "usm-gateway-notify",
+	proc := startProxy(t, "usm-gateway-notify",
 		"gateway", "--security", "usm-gateway",
 		"--trap-listen", bindTrap, "--trap-sink", sinkAddr,
 		"--auth-pass", authPass, "--priv-pass", privPass,
 		"--engine-id", engineIDHex,
 		"--engine-store", filepath.Join(t.TempDir(), "engine.json"),
 	)
-	waitFront(t, trapAddr)
+	proc.waitFront(t, trapAddr)
 	return trapAddr
 }
 

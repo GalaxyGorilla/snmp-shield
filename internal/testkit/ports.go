@@ -29,6 +29,35 @@ func FreeUDPPort(t testing.TB, host string) string {
 	return addr
 }
 
+// UDPBound reports whether something is bound on addr right now. It is the
+// non-fatal half of WaitUDPBound, for callers that want to decide what a
+// missing listener means (for example: fail fast because the process they
+// started has already exited).
+//
+// It is a loopback/liveness probe, not a proof of a listener: a UDP "dial" to
+// an address with no route reports success, so a non-local address looks
+// bound (there is no connect handshake to fail). For a local address the
+// kernel's ICMP port-unreachable does the work.
+func UDPBound(addr string) bool {
+	conn, err := net.Dial("udp", addr)
+	if err != nil {
+		return false
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte{0x00}); err != nil {
+		return false
+	}
+	// A write to a closed UDP port surfaces on the *next* operation.
+	buf := make([]byte, 1)
+	_ = conn.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
+	_, rerr := conn.Read(buf)
+	var nerr net.Error
+	if rerr != nil && !(asTimeout(rerr, &nerr) && nerr.Timeout()) {
+		return false // ECONNREFUSED (or similar): nothing is bound yet
+	}
+	return true
+}
+
 // WaitUDPBound blocks until something answers on addr (or the deadline
 // passes).
 //
@@ -43,27 +72,9 @@ func WaitUDPBound(t testing.TB, addr string, timeout time.Duration) {
 	}
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		conn, err := net.Dial("udp", addr)
-		if err != nil {
-			time.Sleep(10 * time.Millisecond)
-			continue
-		}
-		if _, err := conn.Write([]byte{0x00}); err == nil {
-			// A write to a closed UDP port surfaces on the *next* operation.
-			buf := make([]byte, 1)
-			_ = conn.SetReadDeadline(time.Now().Add(20 * time.Millisecond))
-			_, rerr := conn.Read(buf)
-			var nerr net.Error
-			if rerr != nil && !(asTimeout(rerr, &nerr) && nerr.Timeout()) {
-				// ECONNREFUSED (or similar): nothing is bound yet.
-				_ = conn.Close()
-				time.Sleep(10 * time.Millisecond)
-				continue
-			}
-			_ = conn.Close()
+		if UDPBound(addr) {
 			return
 		}
-		_ = conn.Close()
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("testkit: %s not bound within %s", addr, timeout)

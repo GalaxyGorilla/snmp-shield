@@ -3,6 +3,7 @@ package conformance
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -108,6 +109,12 @@ type proxyProc struct {
 	log  *lockedBuffer
 	done chan struct{}
 	once sync.Once
+
+	// mu guards waitErr, which is set by the waiter goroutine just before
+	// done closes. It is the process's exit status — the only way to assert
+	// "shut down cleanly" rather than "disappeared".
+	mu      sync.Mutex
+	waitErr error
 }
 
 // startProxy runs the built binary and registers a clean shutdown. Output is
@@ -124,7 +131,10 @@ func startProxy(t *testing.T, name string, args ...string) *proxyProc {
 	}
 	p := &proxyProc{name: name, cmd: cmd, log: lb, done: make(chan struct{})}
 	go func() {
-		_ = cmd.Wait()
+		err := cmd.Wait()
+		p.mu.Lock()
+		p.waitErr = err
+		p.mu.Unlock()
 		close(p.done)
 	}()
 	t.Cleanup(func() { p.Stop(t) })
@@ -150,10 +160,73 @@ func (p *proxyProc) Stop(t *testing.T) {
 	}
 }
 
-// waitFront blocks until the proxy's UDP front leg is bound.
-func waitFront(t *testing.T, addr string) {
+// signal sends sig to the running proxy (SIGHUP/SIGTERM are the operator's
+// interface; the in-process tests can only exercise the handlers).
+func (p *proxyProc) signal(t *testing.T, sig os.Signal) {
 	t.Helper()
-	testkit.WaitUDPBound(t, addr, 10*time.Second)
+	if err := p.cmd.Process.Signal(sig); err != nil {
+		t.Fatalf("%s: send %v: %v", p.name, sig, err)
+	}
+}
+
+// waitExit waits for the process to exit on its own and returns its exit
+// code. A process that has to be killed fails the test instead, because
+// "did not exit" is exactly the shutdown bug this asserts against.
+func (p *proxyProc) waitExit(t *testing.T, timeout time.Duration) int {
+	t.Helper()
+	select {
+	case <-p.done:
+	case <-time.After(timeout):
+		t.Fatalf("%s did not exit within %s after the signal", p.name, timeout)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.waitErr == nil {
+		return 0
+	}
+	var exit *exec.ExitError
+	if errors.As(p.waitErr, &exit) {
+		return exit.ExitCode()
+	}
+	return -1
+}
+
+// waitFront blocks until the proxy's UDP front leg is bound, and stops as
+// soon as the process exits instead — reporting the process's own output.
+//
+// That distinction matters: a probed port can be lost to another process
+// between the probe and the bind (FreeUDPPort is a probe, not a reservation,
+// see TESTING.md), and a plain 10s timeout turns that into a message that
+// reads like a proxy defect. Failing fast with "exited before binding … bind:
+// address already in use" says what actually happened.
+func (p *proxyProc) waitFront(t *testing.T, addr string) {
+	t.Helper()
+	if err := p.awaitFront(addr, 10*time.Second); err != nil {
+		t.Fatalf("%v; output:\n%s", err, p.log.String())
+	}
+}
+
+// awaitFront is waitFront without the *testing.T: the error names the cause,
+// so a caller (or a test of this helper) can tell "exited" from "slow".
+func (p *proxyProc) awaitFront(addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		select {
+		case <-p.done:
+			p.mu.Lock()
+			err := p.waitErr
+			p.mu.Unlock()
+			return fmt.Errorf("%s exited before binding %s (%v)", p.name, addr, err)
+		default:
+		}
+		if testkit.UDPBound(addr) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("%s never bound %s within %s", p.name, addr, timeout)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // --- device ----------------------------------------------------------------

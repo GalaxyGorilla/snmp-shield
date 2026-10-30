@@ -156,28 +156,3 @@ func ParsePrivProtocol(s string) (PrivProtocol, error) {
 		return 0, fmt.Errorf("usm: unknown privacy protocol %q (use none, des, aes, aes192, aes256, aes192c or aes256c)", s)
 	}
 }
-
-// Level describes the security level a user profile provides:
-// 0 = noAuthNoPriv, 1 = authNoPriv, 2 = authPriv.
-func Level(a AuthProtocol, p PrivProtocol) int {
-	switch {
-	case a != AuthNone && p != PrivNone:
-		return 2
-	case a != AuthNone:
-		return 1
-	default:
-		return 0
-	}
-}
-
-// LevelName renders a level for logs and validation messages.
-func LevelName(level int) string {
-	switch level {
-	case 2:
-		return "authPriv"
-	case 1:
-		return "authNoPriv"
-	default:
-		return "noAuthNoPriv"
-	}
-}

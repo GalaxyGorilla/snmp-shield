@@ -218,31 +218,6 @@ func (m *V3Message) UnwrapScopedPDU(plain []byte) error {
 	return nil
 }
 
-// ParseScopedPDU splits a plaintext scopedPDU SEQUENCE content into
-// context engine ID/name and raw PDU TLV.
-func ParseScopedPDU(content []byte) (ctxEngineID, ctxName, pdu []byte, err error) {
-	rest := content
-	if ctxEngineID, rest, err = berOctetString(rest); err != nil {
-		return nil, nil, nil, err
-	}
-	if ctxName, rest, err = berOctetString(rest); err != nil {
-		return nil, nil, nil, err
-	}
-	if len(rest) < 2 {
-		return nil, nil, nil, errBadV3
-	}
-	pduLen, ra, err := berLen(rest[1:])
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	if len(ra) < pduLen {
-		return nil, nil, nil, errBadV3
-	}
-	nLen := len(rest) - 1 - len(ra)
-	pdu = rest[:1+nLen+pduLen]
-	return ctxEngineID, ctxName, pdu, nil
-}
-
 // ParseUSM parses USM security parameters. content is the OCTET STRING
 // content (the USM SEQUENCE TLV); the SEQUENCE is entered first.
 func ParseUSM(content []byte) (USMParams, error) {
@@ -370,6 +345,13 @@ func DecryptAES(cipherText, key, boots, timeBytes, salt []byte) ([]byte, error) 
 // EncryptDES encodes plaintext into an OCTET STRING TLV of DES-CBC
 // ciphertext with zero padding (RFC 3414 8.1.1.1): IV = key[8:16] XOR salt.
 func EncryptDES(plain, key, salt []byte) []byte {
+	if len(key) < 16 || len(salt) < 8 {
+		// A DES key is 16 bytes (key || pre-IV) and the salt is 8; a shorter
+		// one is a caller bug, and slicing it would panic. Keys reach here
+		// from LocalizedPrivKey, which validates the protocol's length, so
+		// this is belt-and-braces for a future caller.
+		return nil
+	}
 	block, err := des.NewCipher(key[:8])
 	if err != nil {
 		return nil
@@ -389,6 +371,9 @@ func EncryptDES(plain, key, salt []byte) []byte {
 
 // DecryptDES decodes DES-CBC ciphertext content.
 func DecryptDES(cipherText, key, salt []byte) ([]byte, error) {
+	if len(key) < 16 || len(salt) < 8 {
+		return nil, errShortPriv
+	}
 	block, err := des.NewCipher(key[:8])
 	if err != nil {
 		return nil, err

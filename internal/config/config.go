@@ -289,21 +289,6 @@ type Config struct {
 	Metrics       MetricsRole   `yaml:"metrics"`
 }
 
-// ValidateMetrics checks the SNMP metrics interface configuration.
-func (c *Config) ValidateMetrics() error {
-	m := c.Metrics
-	if m.ListenAddr == "" && m.TrapSinkAddr == "" {
-		return nil
-	}
-	if m.TrapSinkAddr != "" && m.ListenAddr == "" {
-		// Traps only: no listener needed, but the source socket is the
-		// trap listener... traps are sent from a dedicated socket in
-		// that case; valid without ListenAddr.
-		return nil
-	}
-	return nil
-}
-
 // TrapFilter builds the notification filter from the configuration. It
 // returns nil (allow everything) when no filter is configured.
 func (c *Config) TrapFilter() (*notifyfilter.Filter, error) {

@@ -42,6 +42,26 @@ func buildGateway(t *testing.T, front, agent int, trapListen, trapSink string, f
 // makes an IPv6 scenario possible without a second harness.
 func buildGatewayOn(t *testing.T, frontAddr, agentAddr, trapListen, trapSink string, filt ...*notifyfilter.Filter) (stop func()) {
 	t.Helper()
+	return buildGatewayProfiles(t, frontAddr, agentAddr, trapListen, trapSink, defaultGatewayUsers(), filt...)
+}
+
+// defaultGatewayUsers is the SHA/AES authPriv profile every scenario uses
+// unless it is deliberately testing another protocol.
+func defaultGatewayUsers() []usm.Profile {
+	return []usm.Profile{{
+		Name:           "proxy",
+		AuthProtocol:   usm.AuthSHA,
+		AuthPassphrase: "authpass",
+		PrivProtocol:   usm.PrivAES,
+		PrivPassphrase: "privpass",
+		Community:      "realcomm",
+	}}
+}
+
+// buildGatewayProfiles is buildGatewayOn with an explicit user database, so a
+// scenario can pin a privacy protocol other than AES.
+func buildGatewayProfiles(t *testing.T, frontAddr, agentAddr, trapListen, trapSink string, users []usm.Profile, filt ...*notifyfilter.Filter) (stop func()) {
+	t.Helper()
 
 	store, err := cache.Open("")
 	if err != nil {
@@ -61,15 +81,6 @@ func buildGatewayOn(t *testing.T, frontAddr, agentAddr, trapListen, trapSink str
 		cfg.ListenAddr = frontAddr
 		cfg.AgentAddr = agentAddr
 	}
-	users := []usm.Profile{{
-		Name:           "proxy",
-		AuthProtocol:   usm.AuthSHA,
-		AuthPassphrase: "authpass",
-		PrivProtocol:   usm.PrivAES,
-		PrivPassphrase: "privpass",
-		Community:      "realcomm",
-	}}
-
 	tr, err := usm.NewGatewayTranslator(cfg, users, clock, zap.NewNop(), nil, filt...)
 	if err != nil {
 		t.Fatal(err)

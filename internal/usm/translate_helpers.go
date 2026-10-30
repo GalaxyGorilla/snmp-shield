@@ -313,12 +313,23 @@ func encryptScoped(p PrivProtocol, key []byte, boots, etime uint32, privParams, 
 		binary.BigEndian.PutUint32(iv[0:4], boots)
 		binary.BigEndian.PutUint32(iv[4:8], etime)
 		copy(iv[8:16], privParams[:8])
-		return msg.EncryptAES(plain, key, iv[0:4], iv[4:8], iv[8:16]), nil
+		return encrypted(msg.EncryptAES(plain, key, iv[0:4], iv[4:8], iv[8:16]))
 	case PrivDES:
-		return msg.EncryptDES(plain, key, privParams), nil
+		return encrypted(msg.EncryptDES(plain, key, privParams))
 	default:
 		return nil, ErrUnsupportedSec
 	}
+}
+
+// encrypted turns a nil ciphertext from the msg encryptors into an error.
+// They return nil when the key length does not match the protocol; a profile
+// built from config cannot reach that, but emitting an empty scopedPDU would
+// look like a wire problem at the peer instead of the local bug it is.
+func encrypted(out []byte) ([]byte, error) {
+	if out == nil {
+		return nil, ErrUnsupportedSec
+	}
+	return out, nil
 }
 
 // EncryptScoped is the exported form of encryptScoped: encrypts a

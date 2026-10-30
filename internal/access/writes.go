@@ -91,9 +91,6 @@ func (p *WritePolicy) Len() int {
 	return len(p.rules)
 }
 
-// DefaultAllow reports the verdict for writes no rule covers.
-func (p *WritePolicy) DefaultAllow() bool { return p != nil && p.defaultAllow }
-
 // Allowed reports whether the request PDU may be relayed to the device.
 // pdus that are not SET requests are always allowed: reads are governed by
 // the client allow-list and rate limit, not by this policy.

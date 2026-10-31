@@ -6,8 +6,13 @@ to the legacy manager and re-issues everything as authenticated,
 encrypted SNMPv3 USM authPriv toward the real agent — no second proxy,
 no tunnel, and the legacy manager never needs to learn SNMPv3.
 
-```
-[legacy v2c manager] --clear v1/v2c--> [gateway] --SNMPv3 USM authPriv--> [real v3 agent]
+```mermaid
+flowchart LR
+    M["Legacy SNMPv1/v2c manager"]
+    G["snmp-shield gateway<br/>holds the agent's v3 credentials"]
+    A["SNMPv3-capable agent"]
+    M <-->|"existing clear SNMP"| G
+    G <-->|"SNMPv3 authPriv"| A
 ```
 
 This is the deployment when you cannot touch the manager (it cannot do

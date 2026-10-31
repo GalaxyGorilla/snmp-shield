@@ -5,10 +5,16 @@ side dials a **list** of agent-side proxies (most preferred first) and
 redundant replicas share one engine identity so USM clients never reset
 their engine clocks after a failover.
 
-```
-                 ┌── [agent-side proxy A] --clear--> [agent]
-[manager-side] ──┤                === replica ===
-                 └── [agent-side proxy B] --clear--> [agent]
+```mermaid
+flowchart LR
+    M["Manager-side proxy<br/>ordered endpoint list"]
+    A["Agent-side proxy A<br/>preferred"]
+    B["Agent-side proxy B<br/>standby"]
+    D["Legacy agent"]
+    M <-->|"active tunnel"| A
+    M -.->|"automatic failover"| B
+    A <-->|"local SNMP"| D
+    B <-->|"local SNMP"| D
 ```
 
 ## 1. Configure the failover list

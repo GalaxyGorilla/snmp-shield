@@ -5,10 +5,15 @@ segment uses RFC 5591 TSM: the (D)TLS handshake **is** the SNMP
 authentication. No PSK, no USM user — the peer certificate (leaf CN) is
 the securityName, and the agent side allow-lists identities.
 
-```
-[manager] --clear v2c/v3--> [manager-side proxy]
-       === TSM over cert-DTLS ===
-       [agent-side proxy] --clear v2c/v3--> [real agent]
+```mermaid
+flowchart LR
+    M["Existing manager"]
+    P1["Manager-side proxy<br/>certificate identity"]
+    P2["Agent-side proxy<br/>identity allow-list"]
+    A["Existing agent"]
+    M <-->|"existing local SNMP"| P1
+    P1 <-->|"certificate-authenticated<br/>(D)TLS tunnel"| P2
+    P2 <-->|"existing local SNMP"| A
 ```
 
 ## 1. PKI

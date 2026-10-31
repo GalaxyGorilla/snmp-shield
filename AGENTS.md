@@ -77,6 +77,15 @@ confirmations from the wrong socket, inform responses with a fresh msgID,
 responses carrying the Reportable flag, and missing authoritative-engine
 support for compliant informs). Findings and vendor divergences are in
 `CONFORMANCE.md`; the test layering is in `TESTING.md`.
+
+**Approachability pass (2026-10-31):** the README now starts with the common
+one-box shape and a four-question mode picker instead of a dense all-modes
+diagram. Every user-facing deployment walkthrough uses the same small Mermaid
+vocabulary (existing endpoint, proxy, protected leg), and the deployment table
+answers "your situation" / "what changes" rather than compressing another
+topology into one line. Keep future diagrams task-oriented and readable before
+introducing protocol names.
+
 Every role also enforces a request-leg **access policy** (client
 allow-list, per-client rate limit, read-only / OID-scoped write policy;
 the device-facing agent box enforces the write half itself) with SIGHUP

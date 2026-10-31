@@ -4,8 +4,13 @@ A single proxy in front of a legacy v2c-only agent. Standard SNMPv3
 managers (net-snmp, Zabbix, PRTG, anything that speaks USM) authenticate
 directly to the gateway — no second proxy, no tunnel.
 
-```
-[any standard v3 manager] --SNMPv3 USM authPriv--> [gateway] --clear v2c--> [legacy agent]
+```mermaid
+flowchart LR
+    M["Standard SNMPv3 manager"]
+    G["snmp-shield gateway<br/>USM authentication + policy"]
+    A["Legacy SNMPv2c agent"]
+    M <-->|"SNMPv3 authPriv"| G
+    G <-->|"clear v2c<br/>short local leg"| A
 ```
 
 This is the deployment for one box per site: the gateway **is** the

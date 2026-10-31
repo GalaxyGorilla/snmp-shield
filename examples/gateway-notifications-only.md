@@ -7,8 +7,15 @@ SNMPv3 USM notification toward the manager's real trap receiver. Informs
 are confirmed end-to-end: the manager's acknowledgment flows back through
 the proxy to the device.
 
-```
-[manager's trap receiver] <--SNMPv3 USM authPriv-- [proxy] <--clear v2c/v1 traps/informs-- [legacy devices]
+```mermaid
+flowchart RL
+    D["Legacy devices"]
+    G["snmp-shield gateway<br/>notification-only"]
+    M["Manager trap receiver"]
+    D -->|"clear v1/v2c traps + informs"| G
+    G -->|"SNMPv3 authPriv"| M
+    M -.->|"inform confirmation"| G
+    G -.->|"confirmation"| D
 ```
 
 Use when the devices are too old for v3 but the manager side must only

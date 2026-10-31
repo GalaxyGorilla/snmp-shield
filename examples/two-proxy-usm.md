@@ -5,10 +5,15 @@ legs stay plain SNMP (whatever the endpoints already speak); the
 long-haul segment between the proxies is upgraded to SNMPv3 authPriv
 (SHA auth + AES privacy).
 
-```
-[manager] --clear v2c/v3--> [manager-side proxy]
-       === v3 authPriv over PSK-DTLS ===
-       [agent-side proxy] --clear v2c/v3--> [real agent]
+```mermaid
+flowchart LR
+    M["Existing manager"]
+    P1["Manager-side proxy"]
+    P2["Agent-side proxy"]
+    A["Existing agent"]
+    M <-->|"existing local SNMP"| P1
+    P1 <-->|"authenticated + encrypted<br/>PSK-DTLS tunnel"| P2
+    P2 <-->|"existing local SNMP"| A
 ```
 
 End devices are untouched: the manager still points at "an agent" (the

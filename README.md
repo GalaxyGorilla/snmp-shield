@@ -8,13 +8,28 @@ shapes of deployment: two proxies around a secured line, or a single
 gateway box in front of an agent or a manager. End devices keep speaking
 plain SNMP; the proxy does all the security work.
 
+The most common one-box deployment looks like this:
+
+```mermaid
+flowchart LR
+    M["Existing SNMPv3 manager"]
+    S["snmp-shield<br/>authentication · encryption · policy"]
+    A["Legacy SNMPv1/v2c agent<br/>unchanged"]
+    M <-->|"SNMPv3 authPriv"| S
+    S <-->|"existing clear SNMP"| A
 ```
-                 clear SNMP (v1/v2c/v3)           secured segment (v3)            clear SNMP (v1/v2c)
-  ┌─────────┐   ─────────────────────►   ┌───────────────────────────┐   ────────────────────►   ┌─────────┐
-  │ manager │                            │  proxy A ═══════ proxy B  │                           │  agent  │
-  └─────────┘   ◄─────────────────────   └───────────────────────────┘   ◄────────────────────   └─────────┘
-                 responses                        (D)TLS over IP                 traps → manager
-```
+
+**Choose your starting point:**
+
+- Legacy **agent**, manager supports SNMPv3 → [one-box USM gateway](examples/gateway-usm.md).
+- Legacy **manager**, agent supports SNMPv3 → [manager-side gateway](examples/manager-gateway.md).
+- Both endpoints stay unchanged, or a long link must be protected →
+  [two-proxy walkthrough](examples/two-proxy-usm.md).
+- Only traps/informs need protection →
+  [notification-only gateway](examples/gateway-notifications-only.md).
+
+If you are unsure, start with the USM gateway. Certificate-based TSM is a
+specialized option for net-snmp environments, not a prerequisite.
 
 ## Why
 
@@ -86,13 +101,14 @@ appliance-level orchestration remains outside this repository.
 
 ## Deployment shapes
 
-| Shape | Topology | Use when |
+| Start here | Your situation | What changes |
 |---|---|---|
-| [Two-proxy USM](examples/two-proxy-usm.md) / [TSM](examples/two-proxy-tsm.md) | `[manager] ⇄ proxy ⇄ secured line ⇄ proxy ⇄ [agent]` | You control both ends; choose USM passphrases or TSM certificates |
-| [Gateway (agent side) USM](examples/gateway-usm.md) / [TSM](examples/gateway-tsm.md) | `[v3 managers] ⇄ gateway ⇄ clear ⇄ [legacy agent]` | One box; the **agent** is the asset to protect (usm-gateway; tsm-gateway = RFC 6353 DTLS front leg with certificate clients) |
-| [Gateway (manager side) USM](examples/manager-gateway.md) | `[legacy manager] ⇄ clear ⇄ gateway ⇄ v3 authPriv ⇄ [real v3 agent]` | One box; the **agent** is v3-capable but the manager is not — requests are re-issued as authenticated v3 toward the agent (usm-manager-gateway) |
-| [Gateway (notifications only) USM](examples/gateway-notifications-only.md) | `[manager] ⇄ v3 ⇄ gateway ⇄ clear ⇄ [legacy devices]` | One box; the **manager** must only accept authenticated notifications (usm-gateway, notification-only — traps/informs, no polling path) |
-| [HA two-proxy](examples/ha-two-proxy.md) | Two-proxy + redundant agent side | Failover matters |
+| [One-box USM gateway](examples/gateway-usm.md) | Managers support SNMPv3; the agent is legacy | Managers point at the gateway; the agent stays unchanged |
+| [One-box TSM gateway](examples/gateway-tsm.md) | net-snmp clients use certificates | Same placement, with SNMP-over-DTLS instead of USM |
+| [Manager-side gateway](examples/manager-gateway.md) | The manager is legacy; the agent supports SNMPv3 | The manager points at the gateway; the agent receives authPriv |
+| [Notification-only gateway](examples/gateway-notifications-only.md) | Only traps and informs need protection | Devices send notifications to the gateway; the manager receives v3 |
+| [Two-proxy USM](examples/two-proxy-usm.md) / [TSM](examples/two-proxy-tsm.md) | Both endpoints stay unchanged, or the long link is untrusted | One proxy is placed beside each endpoint |
+| [HA two-proxy](examples/ha-two-proxy.md) | The agent-side proxy needs failover | Add a second agent-side proxy and shared engine identity |
 
 ## Security modes
 

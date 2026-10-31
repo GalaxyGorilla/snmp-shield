@@ -6,8 +6,20 @@ front leg. The `access` section governs that leg — **who** may talk to the
 proxy, **how fast**, and **what may be written** — and it is the one block
 that `SIGHUP` can swap without a restart.
 
-```
-[client] --request--> [snmp-shield: allow-list -> rate limit -> write policy] --> [device]
+```mermaid
+flowchart LR
+    C["Client request"]
+    A{"Client allowed?"}
+    R{"Within rate?"}
+    W{"Write permitted?"}
+    D["Device"]
+    C --> A
+    A -->|"no: silent drop"| X1["stop"]
+    A -->|"yes"| R
+    R -->|"no: silent drop"| X2["stop"]
+    R -->|"yes"| W
+    W -->|"no: protocol error"| X3["answer client"]
+    W -->|"yes"| D
 ```
 
 This walkthrough applies the same policy to a single-box gateway; the

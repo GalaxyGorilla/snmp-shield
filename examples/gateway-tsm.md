@@ -5,8 +5,13 @@ SNMP-over-DTLS per RFC 6353: the (D)TLS handshake with a client
 certificate **is** the authentication. One SNMP datagram per DTLS
 record, no frame layer — 100% standard SNMP on the wire.
 
-```
-[standard TSM client] --SNMP-over-DTLS (RFC 6353)--> [gateway] --clear v2c--> [legacy agent]
+```mermaid
+flowchart LR
+    M["net-snmp TSM client<br/>client certificate"]
+    G["snmp-shield gateway<br/>certificate identity + policy"]
+    A["Legacy SNMPv2c agent"]
+    M <-->|"SNMP over DTLS<br/>RFC 6353"| G
+    G <-->|"clear v2c<br/>short local leg"| A
 ```
 
 Caveat: few mainstream managers speak TSM (net-snmp does; Zabbix/PRTG do

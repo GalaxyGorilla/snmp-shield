@@ -14,6 +14,10 @@ shapes of deployment: two proxies around a secured line, or a single
 gateway box in front of an agent or a manager. End devices keep speaking
 plain SNMP; the proxy does all the security work.
 
+**Status:** production-ready for the documented software scope. Physical-device
+validation and site commissioning are still required; see
+[Production readiness](#production-readiness).
+
 The most common one-box deployment looks like this:
 
 ```mermaid
@@ -80,23 +84,25 @@ static binaries, hardened systemd units, configuration validation and
 self-tests, tunnel failover, persistent USM engine state, Prometheus
 and SNMP health metrics, and SBOM/vulnerability tooling.
 
-## Hardware-pilot readiness
+## Production readiness
 
-The documented proxy and gateway modes are feature-complete for their stated
-scope and ready for testing with real managers, agents and appliances. Before
-hardware, the laptop conformance gate drives the built binary with five
-independent manager stacks, two net-snmp agent releases on both the secure-v3
-and clear-device legs, a real `snmptrapd` receiver, and net-snmp over
-DTLS/TSM. Traps, informs, request types, writes, policy failures, process
-signals, failover and malformed inputs are covered in addition to the race
-suite.
+The documented proxy and gateway modes are feature-complete and
+production-ready for their stated software scope. The release gate drives the
+built binary with five independent manager stacks, two net-snmp agent releases
+on both the secure-v3 and clear-device legs, a real `snmptrapd` receiver, and
+net-snmp over DTLS/TSM. Traps, informs, request types, writes, policy failures,
+process signals, failover and malformed inputs are covered in addition to the
+race suite. The repository also supplies hardened service units, health
+metrics, configuration validation, self-tests and operational diagnostics.
 
-That evidence removes a large amount of self-consistency risk, but it is not
-field certification. Hardware pilots still need to expose appliance-specific
-SNMP behavior, sustained plant traffic, WAN loss/reordering, target-host
-networking, persistent engine-state handling across power loss, and operational
-certificate/key management. External review and regulatory certification
-remain separate work; [`TESTING.md`](TESTING.md) records the exact remaining
+**Known validation boundary:** the project has not yet completed testing
+against physical vendor appliances. Before relying on a specific installation,
+commission it with its real managers and agents and validate sustained plant
+traffic, WAN loss/reordering, target-host networking, engine-state persistence
+across power loss, and operational certificate/key management. This is
+deployment validation, not unfinished functionality in the documented scope.
+External review and regulatory certification remain separate work;
+[`TESTING.md`](TESTING.md) records the exact test coverage and remaining
 limits.
 
 The commercial value is the same retrofit boundary across several SNMP

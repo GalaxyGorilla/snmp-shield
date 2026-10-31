@@ -59,6 +59,31 @@ static binaries, hardened systemd units, configuration validation and
 self-tests, tunnel failover, persistent USM engine state, Prometheus
 and SNMP health metrics, and SBOM/vulnerability tooling.
 
+## Hardware-pilot readiness
+
+The documented proxy and gateway modes are feature-complete for their stated
+scope and ready for testing with real managers, agents and appliances. Before
+hardware, the laptop conformance gate drives the built binary with five
+independent manager stacks, two net-snmp agent releases on both the secure-v3
+and clear-device legs, a real `snmptrapd` receiver, and net-snmp over
+DTLS/TSM. Traps, informs, request types, writes, policy failures, process
+signals, failover and malformed inputs are covered in addition to the race
+suite.
+
+That evidence removes a large amount of self-consistency risk, but it is not
+field certification. Hardware pilots still need to expose appliance-specific
+SNMP behavior, sustained plant traffic, WAN loss/reordering, target-host
+networking, persistent engine-state handling across power loss, and operational
+certificate/key management. External review and regulatory certification
+remain separate work; [`TESTING.md`](TESTING.md) records the exact remaining
+limits.
+
+The commercial value is the same retrofit boundary across several SNMP
+generations: operators can protect legacy monitoring and control paths without
+replacing the asset or management platform. snmp-shield can therefore serve as
+the SNMP module in a broader multi-protocol critical-infrastructure appliance;
+appliance-level orchestration remains outside this repository.
+
 ## Deployment shapes
 
 | Shape | Topology | Use when |
@@ -396,7 +421,8 @@ make release     # stripped static binary for deployment
 make release-all # cross-builds: linux-amd64, linux-arm64, linux-armv7 into dist/
 make peers       # provision the third-party stacks for the conformance matrix
 make conformance # cross-vendor matrix: net-snmp (host + 5.9 container),
-                  # pysnmp, node net-snmp, gosnmp, two real snmpd agents
+                  # pysnmp, node net-snmp, gosnmp, two real snmpd releases
+                  # as secure agents and clear devices, plus real snmptrapd
 make conformance-required # same, but a missing peer FAILS (release gate)
 make soak        # load soak, 10 min per test (~30 min): flat goroutines/heap,
                   # failover under load, spoofed-source flood

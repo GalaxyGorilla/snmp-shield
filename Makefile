@@ -5,7 +5,7 @@
 BINARY := snmp-shield
 GO     ?= go
 
-.PHONY: all build test fmt-check vet staticcheck govulncheck race peers conformance conformance-required soak interop release release-all sbom vulnscan clean
+.PHONY: all build test fmt-check vet staticcheck govulncheck race verify acceptance security peers conformance conformance-required soak interop release release-all sbom vulnscan clean
 
 all: build
 
@@ -33,6 +33,17 @@ govulncheck:
 	~/go/bin/govulncheck ./...
 
 race: test
+
+# Shared quality gates across the Shield projects.
+verify: build test vet
+
+# Acceptance requires every independent SNMP peer instead of silently
+# degrading to the in-process implementation.
+acceptance: verify conformance-required
+
+# Release security gate. Requires staticcheck, govulncheck, syft and grype;
+# unlike individual optional tooling probes, a missing tool fails this target.
+security: verify staticcheck govulncheck vulnscan
 
 # peers provisions the independent SNMP stacks used by the conformance
 # suite (net-snmp CLI, pysnmp in a venv, node net-snmp in node_modules, and

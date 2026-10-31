@@ -439,6 +439,9 @@ with `validate --json`, and offer a "test connection" button backed by
 make build       # bin/snmp-shield
 make test        # gofmt gate + go test ./... -race -timeout 180s
 make vet         # go vet ./...
+make verify      # shared baseline: build + race suite + vet
+make acceptance  # verify + required cross-vendor conformance matrix
+make security    # verify + staticcheck + govulncheck + SBOM HIGH+ scan
 make release     # stripped static binary for deployment
 make release-all # cross-builds: linux-amd64, linux-arm64, linux-armv7 into dist/
 make peers       # provision the third-party stacks for the conformance matrix

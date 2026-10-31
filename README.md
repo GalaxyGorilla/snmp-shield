@@ -1,4 +1,4 @@
-<h1><a href="https://saschakattelmann.de"><img src="docs/assets/sascha-kattelmann-logo.png" alt="" height="42" align="absmiddle"></a> snmp-shield</h1>
+<h1><a href="https://saschakattelmann.de"><img src="docs/assets/sascha-kattelmann-logo.png" alt="" height="42" align="absmiddle"></a>&#8202; snmp-shield</h1>
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/GalaxyGorilla/snmp-shield.svg)](https://pkg.go.dev/github.com/GalaxyGorilla/snmp-shield)
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)

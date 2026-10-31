@@ -35,6 +35,17 @@ type usmGatewayFixture struct {
 func startUSMGateway(t *testing.T, p Peer) *usmGatewayFixture {
 	t.Helper()
 	dev := newDevice(t, testkit.AgentOptions{})
+	f := startUSMGatewayOn(t, p, dev.Addr())
+	f.Device = dev
+	return f
+}
+
+// startUSMGatewayOn is startUSMGateway with a caller-chosen device: the real
+// snmpd scenarios need the back leg pointed at a third-party agent instead of
+// testkit's, and Device stays nil there (nothing may assert on a fake that is
+// not in the loop).
+func startUSMGatewayOn(t *testing.T, p Peer, agentAddr string) *usmGatewayFixture {
+	t.Helper()
 	bindFront, front := peerFront(t, p)
 	bindTrap, trapAddr := peerFront(t, p)
 	sink := testkit.NewV3Sink(t, testkit.V3SinkOptions{
@@ -43,7 +54,7 @@ func startUSMGateway(t *testing.T, p Peer) *usmGatewayFixture {
 	store := filepath.Join(t.TempDir(), "engine.json")
 	proc := startProxy(t, "usm-gateway",
 		"gateway", "--security", "usm-gateway",
-		"--listen", bindFront, "--agent", dev.Addr(), "--community", community,
+		"--listen", bindFront, "--agent", agentAddr, "--community", community,
 		"--trap-listen", bindTrap, "--trap-sink", sink.Addr,
 		"--auth-pass", authPass, "--priv-pass", privPass,
 		"--engine-store", store,
@@ -52,7 +63,7 @@ func startUSMGateway(t *testing.T, p Peer) *usmGatewayFixture {
 	proc.waitFront(t, trapAddr)
 	return &usmGatewayFixture{
 		Front: front, TrapAddr: trapAddr, BindFront: bindFront, BindTrap: bindTrap,
-		Device: dev, Sink: sink, Store: store, Proc: proc,
+		Sink: sink, Store: store, Proc: proc,
 	}
 }
 

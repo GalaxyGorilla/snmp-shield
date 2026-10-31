@@ -296,8 +296,18 @@ async def run(opts):
     elif opts["verb"] == "walk":
         # walk_cmd is an async generator (one row per iteration), not an
         # awaitable; awaiting it is the classic pysnmp 7 migration error.
+        #
+        # lexicographicMode=False makes the walk STOP when it leaves the
+        # requested subtree. pysnmp defaults it to True, which walks the
+        # entire MIB — every other stack's walk (`snmpbulkwalk`, node's
+        # `session.subtree`, gosnmp's `BulkWalkAll`) honours the subtree
+        # boundary, so leaving the default in place made this adapter the
+        # only one that returned hundreds of thousands of varbinds for
+        # `walk 1.3.6.1.2.1.1`. That is adapter presentation, not vendor
+        # behaviour: it must not look like a peer disagreement.
         rows = []
-        async for ei, es, eidx, vbs in walk_cmd(engine, auth, target, ctx, *objects[0:1]):
+        async for ei, es, eidx, vbs in walk_cmd(
+                engine, auth, target, ctx, *objects[0:1], lexicographicMode=False):
             if ei:
                 fail(classify_indication(str(ei)), str(ei))
             if es:

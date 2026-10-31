@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -39,9 +40,23 @@ func mustRun(t *testing.T, p Peer, req Request) Result {
 	if res.ErrorKind == KindUsage {
 		t.Fatalf("%s: scenario bug (adapter usage error): %s", p.Name(), res.Error)
 	}
-	t.Logf("%s %s %s -> ok=%v kind=%q varbinds=%v", p.Name(), req.Verb,
-		strings.Join(req.OIDs, ","), res.OK, res.ErrorKind, res.Varbinds)
+	// Summarize long varbind lists: a walk over a real MIB returns hundreds
+	// of rows, and a single Logf of all of them buries every other line of
+	// the test log (a peer that walked the whole tree instead of the
+	// requested subtree produced a 650 KB log line). The count is always
+	// printed, so a truncation cannot hide "it returned far too much".
+	t.Logf("%s %s %s -> ok=%v kind=%q varbinds=%s", p.Name(), req.Verb,
+		strings.Join(req.OIDs, ","), res.OK, res.ErrorKind, summarizeVarbinds(res.Varbinds))
 	return res
+}
+
+// summarizeVarbinds renders at most eight varbinds plus the total count.
+func summarizeVarbinds(vbs []Varbind) string {
+	const maxShown = 8
+	if len(vbs) <= maxShown {
+		return fmt.Sprintf("%v", vbs)
+	}
+	return fmt.Sprintf("%v ... (%d total)", vbs[:maxShown], len(vbs))
 }
 
 // skipUnsupported converts a documented vendor limitation into a skip. The

@@ -23,10 +23,11 @@ about, and what cannot be verified on this host.
 | `netsnmp-docker` | net-snmp CLI over **DTLS/TSM** | 5.9.3 (Debian) | Docker daemon (`make peers` builds the image) |
 | `snmptrapd` | net-snmp v3 notification **receiver** | 5.9.3 (Debian, Docker) | Docker daemon (`make peers` builds the image) |
 
-Two net-snmp **agents** back the manager-gateway scenarios: the host's
-`snmpd` (Apple 5.6.2.1) and the `snmpd` in the Debian image (5.9.3). Both run
-the same suite, so a proxy behaviour that only one release accepts is a
-finding rather than an assumption. They are not interchangeable fixtures:
+Two net-snmp **agents** back both the manager-gateway v3-agent scenarios and
+the USM gateway's clear-device scenarios: the host's `snmpd` (Apple 5.6.2.1)
+and the `snmpd` in the Debian image (5.9.3). Both run the same suite, so a
+proxy behaviour that only one release accepts is a finding rather than an
+assumption. They are not interchangeable fixtures:
 5.9 refuses every request with `AuthorizationError` until an access-control
 directive (`rouser`) exists, while 5.6 rejects `rouser` as an unknown token
 and grants the created user access implicitly — see the divergences below.
@@ -60,6 +61,8 @@ express the operation) still skips, and a source-scan test fails if a new
 | `TestUSMGatewayNotificationIngress` (v2c trap, v1 trap translation, v2c inform confirmation) | Clear notifications are wrapped into v3 authPriv messages a vendor receiver accepts; informs are confirmed end-to-end |
 | `TestUSMGatewayNotifyFilterWire` | A filtered trap is dropped on the wire, not merely logged |
 | `TestUSMGatewayAccessPolicyWire` | `--read-only` refuses a SET on the wire while reads pass |
+| `TestUSMGatewayRealDevice` (real snmpd, 5.6.2.1 and 5.9.3) | The clear device leg is judged outside our `msg` package: rebuilt v2c GET/GETNEXT/GETBULK/WALK/SET requests are accepted, writes land in a real MIB, and real responses and exceptions survive the return path |
+| `TestUSMGatewayRealDeviceNotifications` | A real `snmpd` originates coldStart traps and informs through the gateway to real `snmptrapd`; an inform appears once, proving the vendor receiver's confirmation reached the vendor sender |
 | `TestTranslateChainRequests` (v1 + v2c × get/getnext/set/trap, getbulk, inform) | Two-proxy chain: an untouched legacy manager keeps working across the PSK-DTLS tunnel; traps come out clear v2c on the far side; inform confirmation survives four hops |
 | `TestTranslateChainAgentWritePolicy` | Device-side policy refuses a write and the refusal travels back through the tunnel instead of timing out; the device sees no SET |
 | `TestPassthroughChainNotifications` (both directions × trap + inform, five peers) | The opaque mode's notification legs, which no vendor had ever exercised: a vendor's trap/inform crosses the PSK-DTLS tunnel and the far-side sink receives it, and the inform's confirmation travels all the way back to the vendor's own sender socket |
@@ -71,8 +74,9 @@ express the operation) still skips, and a source-scan test fails if a new
 | `TestUSMGatewayVendorInformReceiver` | The wrapped inform is **confirmed by a vendor receiver** and the confirmation travels back to the device: the sender's own `snmpinform`/`inform` exits successfully |
 
 Docker scenarios: the TSM client, the 5.9 clear-leg peer, the 5.9 **agent**
-and the `snmptrapd` receiver. A host whose net-snmp has no TLS (Apple's does not)
-would otherwise leave RFC 6353 verified only against our own DTLS stack —
+(as both a v3 agent and a clear v2c device), and the `snmptrapd` receiver. A
+host whose net-snmp has no TLS (Apple's does not) would otherwise leave RFC
+6353 verified only against our own DTLS stack —
 which is exactly the self-consistency trap this layer exists to avoid. The
 same trap applies to notifications: without `snmptrapd`, every "did the
 manager accept our v3 trap?" assertion ran through `testkit.V3Sink`, which

@@ -1,3 +1,9 @@
+<p align="center">
+  <a href="https://saschakattelmann.de">
+    <img src="docs/assets/sascha-kattelmann-logo.png" alt="Sascha Kattelmann" width="96">
+  </a>
+</p>
+
 # snmp-shield
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/GalaxyGorilla/snmp-shield.svg)](https://pkg.go.dev/github.com/GalaxyGorilla/snmp-shield)

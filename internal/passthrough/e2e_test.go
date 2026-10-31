@@ -322,7 +322,7 @@ func TestEndToEndTrapPath(t *testing.T) {
 	}
 
 	// Device sends a trap datagram to the agent-side clear trap listener.
-	trap := buildV2cResponse(0, "1.3.6.1.6.3.1.1.5.1", "cold-start")
+	trap := mustBuildV2cTrap(t, "1.3.6.1.6.3.1.1.5.1")
 	device, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 	if err != nil {
 		t.Fatalf("device socket: %v", err)
@@ -340,6 +340,33 @@ func TestEndToEndTrapPath(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("trap did not reach sink in time")
+	}
+
+	// A trap listener carries notifications, nothing else. A GetResponse on
+	// that port (a misdirected request, a port scanner, a stray byte) must
+	// not be forwarded: passthrough would hand the sink a datagram the
+	// device never sent as an event. The listener must also stay alive for
+	// the next real trap.
+	if _, err := device.WriteToUDP(buildV2cResponse(7, "1.3.6.1.2.1.1.1.0", "not-a-notification"), taddr); err != nil {
+		t.Fatalf("device send (non-notification): %v", err)
+	}
+	select {
+	case got := <-sinkCh:
+		t.Fatalf("a non-notification datagram (%d bytes) was relayed to the sink as a notification", len(got))
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	second := mustBuildV2cTrap(t, "1.3.6.1.6.3.1.1.5.2")
+	if _, err := device.WriteToUDP(second, taddr); err != nil {
+		t.Fatalf("device send (second trap): %v", err)
+	}
+	select {
+	case got := <-sinkCh:
+		if !bytes.Equal(got, second) {
+			t.Fatalf("sink got %d bytes after the dropped datagram, want the second trap (%d bytes)", len(got), len(second))
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the trap listener stopped relaying after a non-notification datagram")
 	}
 }
 

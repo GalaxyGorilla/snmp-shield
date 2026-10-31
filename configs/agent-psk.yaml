@@ -19,6 +19,10 @@ agent:
   agent_addr: "127.0.0.1:161"
   # Optional: local devices send traps here; relayed over the tunnel.
   trap_listen_addr: ":10163"
+  # Optional: the other direction — notifications the manager side accepted
+  # (manager.trap_listen_addr) are delivered here as clear v1/v2c datagrams,
+  # byte for byte, and informs are confirmed back to the sending device.
+  # trap_sink_addr: "127.0.0.1:10164"
 
 # Optional notification filtering at the relay ingress: notifications
 # whose trap OID does not pass the filter are dropped before they are

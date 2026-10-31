@@ -22,7 +22,8 @@ import (
 // tunnel REQ frames; tunnel RESP frames -> the originating manager.
 // Device notifications arriving over the tunnel are delivered to the
 // configured trap sink. Local devices may also send notifications to
-// TrapListenAddr; those ship across the tunnel.
+// TrapListenAddr; those ship across the tunnel and are delivered at the
+// agent side's trap sink, with informs confirmed back to the device.
 type Manager struct {
 	cfg   config.ManagerRole
 	sess  *tunnel.Session
@@ -41,6 +42,9 @@ type Manager struct {
 	pend   map[uint16]*pending // corrID -> pending request
 	nextID atomic.Uint32
 
+	informMu sync.Mutex
+	inform   map[uint16]*informPend // corrID -> inform awaiting confirmation
+
 	socksMu    sync.Mutex // guards conn/trapConn/sink vs Close
 	baseOnce   sync.Once  // guards the lazy send context
 	jobCtx     context.Context
@@ -56,16 +60,36 @@ type pending struct {
 	resp  []byte
 }
 
+// informPend tracks one inform in flight between the two proxies: registered on
+// whichever side accepted it from the device, released by the confirmation
+// that comes back over the tunnel. It carries what the device's confirmation
+// has to echo — request-id, version, community and the request's varbinds
+// (RFC 3416 §4.2.1: a Response repeats them) — and where to send it.
+//
+// `ready` is the agent side's completion signal: it is closed when the
+// confirmation arrives, which releases the 15s timeout wait instead of
+// leaving it to expire (the soak work removed exactly that shape of
+// rate × timeout goroutine).
+type informPend struct {
+	addr      *net.UDPAddr
+	ver       int
+	community []byte
+	reqID     int32
+	varbinds  []byte
+	ready     chan struct{}
+}
+
 // NewManager creates the manager-side forwarder.
 func NewManager(cfg config.ManagerRole, sess *tunnel.Session, log *zap.Logger, met *observ.Metrics, filt ...*notifyfilter.Filter) *Manager {
 	return &Manager{
-		cfg:   cfg,
-		sess:  sess,
-		log:   log,
-		met:   met,
-		filtr: notifyfilter.From(filt...),
-		pend:  make(map[uint16]*pending),
-		stop:  make(chan struct{}),
+		cfg:    cfg,
+		sess:   sess,
+		log:    log,
+		met:    met,
+		filtr:  notifyfilter.From(filt...),
+		pend:   make(map[uint16]*pending),
+		inform: make(map[uint16]*informPend),
+		stop:   make(chan struct{}),
 	}
 }
 
@@ -141,8 +165,10 @@ func (m *Manager) Run(ctx context.Context) error {
 
 	errCh := make(chan error, 2)
 	go func() { errCh <- m.serveClearRequests() }()
-	if m.trapConn != nil {
-		go func() { errCh <- m.serveClearTraps() }()
+	if trapConn != nil {
+		// Pass the local: m.trapConn is cleared under socksMu when Run
+		// returns, and a serve loop that re-read the field raced that write.
+		go func() { errCh <- m.serveClearTraps(trapConn) }()
 	}
 
 	select {
@@ -279,9 +305,14 @@ func (m *Manager) awaitResponse(corrID uint16, p *pending) {
 	m.pendMu.Unlock()
 }
 
-// respLoop delivers tunnel RESP frames to the pending request map.
+// respLoop delivers tunnel RESP frames to the pending request map, and
+// inform confirmations to the device that sent the inform.
 func (m *Manager) respLoop(ch <-chan *tunnel.Frame) {
 	for f := range ch {
+		if f.Flags&tunnel.FlagInform != 0 {
+			m.handleInformResp(f)
+			continue
+		}
 		m.pendMu.Lock()
 		if p, ok := m.pend[f.CorrID]; ok && p.resp == nil {
 			p.resp = append([]byte(nil), f.Payload...)
@@ -295,8 +326,13 @@ func (m *Manager) respLoop(ch <-chan *tunnel.Frame) {
 // configured trap sink.
 func (m *Manager) sinkLoop(ch <-chan *tunnel.Frame) {
 	for f := range ch {
-		m.met.NotifsRelayed.Inc()
-		if m.sink == nil {
+		if m.met != nil {
+			m.met.NotifsRelayed.Inc()
+		}
+		m.socksMu.Lock()
+		sink := m.sink
+		m.socksMu.Unlock()
+		if sink == nil {
 			if m.cfg.TrapSinkAddr == "" {
 				continue
 			}
@@ -311,20 +347,33 @@ func (m *Manager) sinkLoop(ch <-chan *tunnel.Frame) {
 				}
 				continue
 			}
+			m.socksMu.Lock()
 			m.sink = s
+			m.socksMu.Unlock()
+			sink = s
 		}
-		if _, err := m.sink.Write(f.Payload); err != nil && m.log != nil {
-			m.log.Warn("trap sink write", zap.Error(err))
+		_, werr := sink.Write(f.Payload)
+		if werr != nil && m.log != nil {
+			m.log.Warn("trap sink write", zap.Error(werr))
+		}
+		// An inform is confirmed only after the sink accepted it: the agent
+		// side waits for this frame and relays it to the device, and a
+		// confirmation for a notification that was never delivered would be
+		// a lie the device cannot detect.
+		if f.Flags&tunnel.FlagInform != 0 && werr == nil {
+			if serr := m.sess.Send(m.trapCtx(), tunnel.TypeRESP, tunnel.FlagInform, f.CorrID, nil); serr != nil && m.log != nil {
+				m.log.Warn("send inform confirmation", zap.Error(serr))
+			}
 		}
 	}
 }
 
 // serveClearTraps reads notifications from local devices and ships them
 // across the tunnel as NOTIF frames.
-func (m *Manager) serveClearTraps() error {
+func (m *Manager) serveClearTraps(conn *net.UDPConn) error {
 	buf := make([]byte, 65536)
 	for {
-		n, raddr, err := m.trapConn.ReadFromUDP(buf)
+		n, raddr, err := conn.ReadFromUDP(buf)
 		if err != nil {
 			select {
 			case <-m.stop:
@@ -342,28 +391,122 @@ func (m *Manager) serveClearTraps() error {
 // handleClearTrap ships one clear notification from a local device over
 // the tunnel toward the manager side.
 func (m *Manager) handleClearTrap(payload []byte, raddr *net.UDPAddr) {
+	info, perr := msg.Peek(payload)
+	if perr != nil || !(msg.IsTrap(info.PDUType) || msg.IsInform(info.PDUType)) {
+		// Same ingress rule as the agent side: a notification port carries
+		// notifications. Without this, a port probe or a misdirected request
+		// would be forwarded over the tunnel and delivered to the sink as if
+		// the device had sent it.
+		if m.met != nil {
+			m.met.DropTotal.Inc()
+		}
+		if m.log != nil {
+			m.log.Debug("notification ingress: not a notification; dropped",
+				zap.Int("bytes", len(payload)), zap.String("addr", raddr.String()))
+		}
+		return
+	}
+	isInform := msg.IsInform(info.PDUType)
 	if m.filtr != nil {
-		if info, perr := msg.Peek(payload); perr == nil && (msg.IsTrap(info.PDUType) || msg.IsInform(info.PDUType)) {
-			oid, ok := msg.TrapOID(payload)
-			if !ok || !m.filtr.Allowed(oid) {
-				if m.met != nil {
-					m.met.NotifsFiltered.Inc()
-				}
-				m.log.Debug("notification filtered",
-					zap.String("trap_oid", oid), zap.String("addr", raddr.String()))
-				return
+		oid, ok := msg.TrapOID(payload)
+		if !ok || !m.filtr.Allowed(oid) {
+			if m.met != nil {
+				m.met.NotifsFiltered.Inc()
 			}
+			m.log.Debug("notification filtered",
+				zap.String("trap_oid", oid), zap.String("addr", raddr.String()))
+			return
 		}
 	}
 
 	corrID := uint16(m.nextID.Add(1))
+	if isInform {
+		// Remember what the device's confirmation must echo. Registration
+		// requires the parse to succeed: a confirmation built from zero
+		// values would be worse than none, because the device would accept
+		// it as its answer.
+		if p, ok := parseInformPend(payload, raddr); ok {
+			m.informMu.Lock()
+			m.inform[corrID] = p
+			m.informMu.Unlock()
+			go m.awaitInform(corrID)
+		} else if m.log != nil {
+			m.log.Warn("inform from a device is undecodable; forwarding it but it cannot be confirmed",
+				zap.String("addr", raddr.String()))
+		}
+	}
 	if m.met != nil {
 		m.met.NotifsRelayed.Inc()
 	}
-	if err := m.sess.Send(m.trapCtx(), tunnel.TypeNOTIF, 0, corrID, payload); err != nil {
+	flags := uint8(0)
+	if isInform {
+		flags = tunnel.FlagInform
+	}
+	if err := m.sess.Send(m.trapCtx(), tunnel.TypeNOTIF, flags, corrID, payload); err != nil {
 		if m.met != nil {
 			m.met.DropTotal.Inc()
 		}
+		if isInform {
+			m.informMu.Lock()
+			delete(m.inform, corrID)
+			m.informMu.Unlock()
+		}
+	}
+}
+
+// parseInformPend captures the fields a device's confirmation has to echo.
+func parseInformPend(payload []byte, raddr *net.UDPAddr) (*informPend, bool) {
+	ver, comm, pdu, err := msg.SplitV1V2c(payload)
+	if err != nil {
+		return nil, false
+	}
+	typ, f, err := msg.ParsePDU(pdu)
+	if err != nil || !msg.IsInform(typ) {
+		return nil, false
+	}
+	return &informPend{addr: raddr, ver: ver, community: comm, reqID: f.ReqID, varbinds: f.Varbinds}, true
+}
+
+// awaitInform drops an inform pending entry that was never confirmed, so a
+// dead tunnel or a vanished sink cannot grow the map.
+func (m *Manager) awaitInform(corrID uint16) {
+	select {
+	case <-time.After(15 * time.Second):
+	case <-m.stop:
+	}
+	m.informMu.Lock()
+	delete(m.inform, corrID)
+	m.informMu.Unlock()
+}
+
+// handleInformResp turns an agent-side confirmation into the clear GetResponse
+// the device expects, and sends it FROM the socket that received the inform.
+//
+// Both halves matter: an unconfirmed inform is retransmitted until the device
+// gives up, and a connected UDP sender (gosnmp, net-snmp's default) drops an
+// answer that arrives from a different source port.
+func (m *Manager) handleInformResp(f *tunnel.Frame) {
+	m.informMu.Lock()
+	p := m.inform[f.CorrID]
+	delete(m.inform, f.CorrID)
+	m.informMu.Unlock()
+	if p == nil {
+		return // already timed out, or not ours
+	}
+	resp := msg.BuildPDU(msg.PDUGetResponse, p.reqID, 0, 0, p.varbinds)
+	out, err := msg.BuildV1V2c(p.ver, p.community, resp)
+	if err != nil {
+		m.log.Warn("build inform confirmation", zap.Error(err))
+		return
+	}
+	m.socksMu.Lock()
+	conn := m.trapConn
+	m.socksMu.Unlock()
+	if conn == nil {
+		return
+	}
+	if _, werr := conn.WriteToUDP(out, p.addr); werr != nil && m.log != nil {
+		m.log.Warn("deliver inform confirmation", zap.Error(werr))
 	}
 }
 

@@ -62,6 +62,8 @@ express the operation) still skips, and a source-scan test fails if a new
 | `TestUSMGatewayAccessPolicyWire` | `--read-only` refuses a SET on the wire while reads pass |
 | `TestTranslateChainRequests` (v1 + v2c × get/getnext/set/trap, getbulk, inform) | Two-proxy chain: an untouched legacy manager keeps working across the PSK-DTLS tunnel; traps come out clear v2c on the far side; inform confirmation survives four hops |
 | `TestTranslateChainAgentWritePolicy` | Device-side policy refuses a write and the refusal travels back through the tunnel instead of timing out; the device sees no SET |
+| `TestPassthroughChainNotifications` (both directions × trap + inform, five peers) | The opaque mode's notification legs, which no vendor had ever exercised: a vendor's trap/inform crosses the PSK-DTLS tunnel and the far-side sink receives it, and the inform's confirmation travels all the way back to the vendor's own sender socket |
+| `TestPassthroughChainKeepsTheWireFormat` | The sink gets the device's own community and varbind values, not a re-encoding — the property that separates passthrough from the translating modes |
 | `TestManagerGatewayRealAgent` (real snmpd, 5.6.2.1 and 5.9.3) | v3 **request generation**: RFC 3414 discovery, signed+encrypted requests, and parsing a real agent's answer — against both a 2010 host build and a current release; v3 trap and v3 inform reception, including the authoritative-inform handshake |
 | `TestTSMGatewayVendorClient` (net-snmp 5.9 in Docker) | RFC 6353 **TSM**: a third-party client completes the DTLS handshake, presents a client certificate, and accepts our responses over `dtls:` — GET, GETNEXT, WALK, SET, plus a foreign-CA client being refused before anything reaches the device |
 | `TestTSMGatewayVendorClientReadOnly` | A locally generated `notWritable` reaches the vendor client as an answer, not a timeout, and the device sees no SET |
@@ -282,6 +284,23 @@ port back from `docker port <name> <port>/udp` (`publishedLoopback`, which
 fails loudly when the mapping is missing rather than letting a notification
 travel into the void). The kernel assigns the port at publish time, so no
 other fixture can have claimed it in between.
+
+## Fixture gotcha: a readiness probe writes a byte
+
+`waitFront`/`UDPBound` decides whether a UDP leg is bound by writing a single
+`0x00` byte and watching for `ECONNREFUSED` (a closed UDP port only reports the
+error on the *next* operation). On a request leg the proxy answers or ignores
+it; on a **notification** leg that byte is a datagram arriving at the trap
+listener. With `passthrough` forwarding bytes verbatim it reached the far-side
+sink as an undecodable "notification", which made the first
+`TestPassthroughChainNotifications` runs look like a relay bug.
+
+The fix is in the product, not the harness: a trap listener carries
+notifications and nothing else, so both passthrough ingresses now drop a
+datagram that does not parse as a trap or inform (the translating modes always
+did). The probe byte is harmless — and the check is worth having anyway,
+because a misdirected request or a scanner datagram on the trap port would
+otherwise be handed to the sink as an event the device never fired.
 
 ## What a green matrix means
 

@@ -31,6 +31,36 @@ until that test existed **no scenario used it at all** (`EncryptDES`,
 `DecryptDES` and `padBlock` measured 0%): a protocol nobody exercised against
 a second implementation is a protocol that works only in theory.
 
+**Every notification direction that a config knob advertises is pinned end to
+end.** The trap/inform paths are the easiest place for a feature to be
+half-built, because a dropped notification is silent: the listener accepts it,
+nothing errors, and the event simply never exists. `passthrough` shipped in
+exactly that state — `manager.trap_listen_addr` accepted clear notifications
+and shipped them across the tunnel, but the agent side had no `TypeNOTIF`
+subscriber, so every one was discarded; the agent-side inform path forwarded
+correctly but never confirmed the device, which retransmitted until it gave up.
+`internal/passthrough/e2e_reverse_notif_test.go` now drives all four
+notification shapes (device→manager and manager→device, trap and inform) and
+asserts delivery **byte for byte**, the confirmation's PDU type, request-id and
+error-status, and that it comes from the socket the inform was sent to
+(connected UDP senders drop anything else) — and by **gosnmp** as an
+independent inform sender (`TestEndToEndInformConfirmedToGosnmp`): it waits for
+the confirmation on a connected socket, so a wrong request-id, community or
+error-status, or an answer from another source port, is a timeout. Our own
+parser would accept all four. Writing it also exposed a framing bug: `Chunker.Accept` returned `append([]byte(nil), payload...)`, which is nil
+for an empty payload, and the read loop uses nil to mean "still waiting for
+fragments" — so any single frame with a zero-length payload was dropped. The
+passthrough inform confirmation is precisely such a frame.
+
+The ingress has a matching rule, because the far side cannot tell a
+notification from anything else: a trap listener accepts notifications only,
+and `passthrough` — which never re-parses what it forwards — has to enforce
+that itself (`TestEndToEndTrapPath`, `TestEndToEndManagerIngressRejectsNonNotifications`:
+a GetResponse on the trap port is dropped and the listener keeps serving). The
+vendor matrix then runs the same four shapes with five real stacks
+(`internal/conformance/passthrough_test.go`), which is the only way to know the
+legs work against something that is not our own encoder.
+
 ## Commands
 
 ```bash

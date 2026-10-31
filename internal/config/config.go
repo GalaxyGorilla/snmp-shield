@@ -107,11 +107,14 @@ type AgentRole struct {
 	// TrapListenAddr is the clear notification listener for devices.
 	TrapListenAddr string `yaml:"trap_listen_addr"`
 	// TrapSinkAddr, when set, receives notifications that arrive over the
-	// tunnel (manager-side traps) as v2c datagrams. Used in USM translate
-	// mode for the reverse trap direction.
+	// tunnel (accepted on the manager side's trap_listen_addr) as v2c
+	// datagrams — the reverse notification direction, in every mode.
+	// `passthrough` forwards the datagram byte for byte; the translating
+	// modes re-wrap it and use TrapSinkCommunity.
 	TrapSinkAddr string `yaml:"trap_sink_addr"`
 	// TrapSinkCommunity is the community used in v2c notifications
-	// delivered to TrapSinkAddr.
+	// delivered to TrapSinkAddr (usm-translate and tsm only: passthrough
+	// has no community of its own to impose).
 	TrapSinkCommunity string `yaml:"trap_sink_community"`
 	// AgentCommunity is the v1/v2c community used toward the real agent
 	// (TSM mode).

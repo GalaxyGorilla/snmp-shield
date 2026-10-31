@@ -151,7 +151,14 @@ func (c *Chunker) Accept(f *Frame, now time.Time) ([]byte, error) {
 		if len(f.Payload) > c.max {
 			return nil, ErrTooLarge
 		}
-		return append([]byte(nil), f.Payload...), nil
+		// Copy even when the payload is empty: `append([]byte(nil), …)`
+		// returns nil for an empty slice, and the read loop uses nil to mean
+		// "still waiting for fragments" — so a single frame with a
+		// zero-length payload (an inform confirmation, for example) was
+		// silently discarded instead of dispatched.
+		out := make([]byte, len(f.Payload))
+		copy(out, f.Payload)
+		return out, nil
 	}
 	if f.FragIdx >= f.FragTotal {
 		return nil, ErrBadSequence

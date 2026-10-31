@@ -88,9 +88,11 @@ the mix-up has already happened once at planning time.
 
 All two-proxy modes carry the full operation set in both directions:
 `GET`, `GETNEXT`, `SET`, `GETBULK`, plus **traps and informs** both ways
-(inform confirmations relayed end-to-end). Gateway modes confirm informs
-the same way: the manager's acknowledgment flows back through the
-gateway to the device in every gateway mode.
+(inform confirmations relayed end-to-end). `passthrough` forwards each
+notification datagram byte for byte, so it keeps the sending device's own
+community; the translating modes re-wrap it with `agent.trap_sink_community`.
+Gateway modes confirm informs the same way: the manager's acknowledgment
+flows back through the gateway to the device in every gateway mode.
 
 **About the "v3" labels**: SNMPv3 alone is not a security guarantee —
 RFC 3414 defines three security levels, and only **authPriv** (digest

@@ -34,14 +34,27 @@ import (
 type fakeConn struct {
 	r      io.Reader
 	closed chan struct{}
+	start  chan struct{} // closed when Read may serve the buffered bytes
 	once   sync.Once
 }
 
 func newFakeConn(feed []byte) *fakeConn {
-	return &fakeConn{r: bytes.NewReader(feed), closed: make(chan struct{})}
+	start := make(chan struct{})
+	close(start)
+	return &fakeConn{r: bytes.NewReader(feed), closed: make(chan struct{}), start: start}
 }
 
+// newGatedFakeConn is newFakeConn whose first Read blocks until release().
+// The read loop starts inside NewServerSession, so a test that must subscribe
+// before the frame is dispatched needs the gate.
+func newGatedFakeConn(feed []byte) *fakeConn {
+	return &fakeConn{r: bytes.NewReader(feed), closed: make(chan struct{}), start: make(chan struct{})}
+}
+
+func (c *fakeConn) release() { c.once.Do(func() { close(c.start) }) }
+
 func (c *fakeConn) Read(p []byte) (int, error) {
+	<-c.start
 	n, err := c.r.Read(p)
 	if err == io.EOF {
 		// A real peer that vanished mid-exchange leaves the read blocking
@@ -70,6 +83,46 @@ type fakeAddr string
 
 func (a fakeAddr) Network() string { return "fake" }
 func (a fakeAddr) String() string  { return string(a) }
+
+// TestEmptyPayloadFrameIsDispatched pins the other half of the read loop's
+// contract: a frame with a zero-length payload must reach its subscriber.
+//
+// It did not. `Chunker.Accept` returned `append([]byte(nil), payload...)`,
+// which is nil for an empty payload, and the read loop treats nil as "still
+// waiting for fragments" — so any single frame with an empty payload was
+// dropped in silence. The passthrough inform confirmation is exactly such a
+// frame (the manager side rebuilds the clear answer from the inform it
+// forwarded, so the frame itself needs no bytes), which is how this surfaced:
+// a device's inform was delivered and never confirmed.
+func TestEmptyPayloadFrameIsDispatched(t *testing.T) {
+	// Flags and CorrID must survive too: the confirmation is recognized by
+	// FlagInform, not by its (absent) payload.
+	want := &Frame{Type: TypeRESP, Flags: FlagInform, CorrID: 7, FragTotal: 1}
+	conn := newGatedFakeConn(want.Marshal())
+
+	sess := NewServerSession(conn, 65536, 1200, zap.NewNop())
+	defer func() { _ = sess.Close() }()
+
+	ch, cancel := sess.Subscribe(TypeRESP)
+	defer cancel()
+	conn.release()
+
+	select {
+	case f, ok := <-ch:
+		if !ok {
+			t.Fatal("subscriber channel closed instead of delivering the empty frame")
+		}
+		if f.CorrID != want.CorrID || f.Flags != want.Flags {
+			t.Fatalf("got corrID=%d flags=%#x, want corrID=%d flags=%#x",
+				f.CorrID, f.Flags, want.CorrID, want.Flags)
+		}
+		if len(f.Payload) != 0 {
+			t.Fatalf("payload = %d bytes, want empty", len(f.Payload))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a single frame with an empty payload was never dispatched")
+	}
+}
 
 // TestReadLoopExitFiresDoneAfterFailedPong drives the exact path: a PING
 // arrives, answering it fails, the loop finds no connection and returns.

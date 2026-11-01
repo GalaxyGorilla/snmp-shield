@@ -37,3 +37,19 @@ turnkey integration into a managed appliance with a web UI.
 Completion means an unprivileged management UI can safely configure and
 operate every supported deployment mode without duplicating undocumented
 daemon behavior.
+
+## Open — scope
+
+- **S1 Multiple agents per instance:** like the sibling Shield projects,
+  snmp-shield binds **one** agent (or manager) target per instance: an
+  instance has a single `agent.agent_addr` / `gateway.agent_addr`, and
+  `usm-manager-gateway` names one agent user. Protecting several agents means
+  one process + config + unit per agent, or one two-proxy pair per endpoint.
+  modbus-shield already co-hosts N listener↔device pairs in one process
+  (`devices: []`, `internal/proxy/runner.go`): one config, one process, one
+  metrics endpoint with a per-device label. Consider the same shape here — one
+  instance in front of several agents, each entry a front listener/target with
+  its own policy, allow-list and rate limit — so an appliance does not need a
+  process per agent. Decide deliberately: this is a scaling/ops convenience,
+  **not** a new security capability, and it must not become protocol
+  translation or request routing between agents.

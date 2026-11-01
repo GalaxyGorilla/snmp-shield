@@ -476,3 +476,68 @@ func TestGatewayFollowsSinkRestartFromResponse(t *testing.T) {
 		t.Fatalf("sink probed %d times, want exactly 1 (adoption must replace re-discovery)", n)
 	}
 }
+
+// TestInformSinkProbeDoesNotStallTheTrapReader pins that the trap listener
+// keeps reading while an inform waits for the sink's discovery answer.
+//
+// The conformant inform wrap probes the sink first (RFC 3414 §4) with a 1s
+// deadline, and it repeats on every inform when the receiver does not answer
+// — gosnmp's TrapListener, and plenty of appliances, never do. That probe
+// used to run on the single trap-socket reader, so for one second the
+// listener read nothing at all: the device's retransmission queued behind
+// the probe, and so did the sink's answer to an inform already sent. A trap
+// that arrives during the probe was delayed by it.
+//
+// The sink here answers nothing on purpose (it is the slow case), and the
+// assertion is on a trap's delivery latency, measured from the moment it is
+// sent: ~1ms when the reader is free, ~1s when it is not.
+func TestInformSinkProbeDoesNotStallTheTrapReader(t *testing.T) {
+	// A silent sink: it records what arrives and never answers, so the
+	// discovery probe burns its whole 1s deadline.
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	traps := make(chan []byte, 8)
+	go func() {
+		buf := make([]byte, 65536)
+		for {
+			n, _, rerr := conn.ReadFrom(buf)
+			if rerr != nil {
+				return
+			}
+			dg := append([]byte{}, buf[:n]...)
+			// Skip the discovery probe: it is the one v3 datagram with no
+			// engine and no user. The wrapped notifications are v3 too.
+			if m, perr := msg.ParseV3(dg); perr == nil &&
+				m.Header.SecModel == msg.SecurityModelUSM && len(m.USM.EngineID) == 0 {
+				continue
+			}
+			select {
+			case traps <- dg:
+			default:
+			}
+		}
+	}()
+
+	trapAddr, _ := notifyGateway(t, conn.LocalAddr().String())
+
+	// An inform starts the sink probe (and blocks the wrap, never the
+	// reader). Give the reader a moment to receive it.
+	sendClearInform(t, trapAddr, msg.PDUInformRequest)
+	time.Sleep(100 * time.Millisecond)
+
+	sent := time.Now()
+	sendClearInform(t, trapAddr, msg.PDUSNMPv2Trap)
+	select {
+	case <-traps:
+		if elapsed := time.Since(sent); elapsed > 700*time.Millisecond {
+			t.Fatalf("a trap took %v to reach the sink while an inform's sink probe was running: "+
+				"the probe blocks the single trap reader, so every device retransmission and every "+
+				"sink answer queues behind it", elapsed)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the trap never reached the sink")
+	}
+}

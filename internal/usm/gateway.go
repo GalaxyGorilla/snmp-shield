@@ -657,8 +657,22 @@ func (g *GatewayTranslator) readTraps() {
 		dg := append([]byte{}, buf[:n]...)
 		// v3 from the manager (inform responses) vs clear v1/v2c from
 		// devices: Peek distinguishes them cheaply.
-		if info, perr := msg.Peek(dg); perr == nil && info.Version == msg.Version3 {
+		info, perr := msg.Peek(dg)
+		if perr == nil && info.Version == msg.Version3 {
 			safego.Dispatch(g.log, "usm gateway inform response", func() { g.handleSinkResponse(dg) })
+			continue
+		}
+		if perr == nil && msg.IsInform(info.PDUType) {
+			// Wrapping an inform may include an RFC 3414 discovery probe
+			// against the sink (up to 1s, and it repeats whenever the sink
+			// does not answer — a lenient gosnmp receiver never does).
+			// This is the single reader for the trap socket, so doing it
+			// inline stops the listener from reading *anything* meanwhile:
+			// the device's retransmission queues up, and so does the
+			// sink's answer to the inform already sent. Traps are
+			// fire-and-forget and never probe, so only informs move off
+			// the loop.
+			safego.Go(g.log, "usm gateway clear inform", func() { g.handleClearTrap(addr, dg) })
 			continue
 		}
 		safego.Dispatch(g.log, "usm gateway clear trap", func() { g.handleClearTrap(addr, dg) })

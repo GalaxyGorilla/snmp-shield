@@ -53,3 +53,33 @@ daemon behavior.
   process per agent. Decide deliberately: this is a scaling/ops convenience,
   **not** a new security capability, and it must not become protocol
   translation or request routing between agents.
+
+  **Confirmed shape (review of the three projects):** the 1-to-1 limit is on
+  the *upstream target*, not on clients. A single instance serves any number
+  of managers and trap senders; they all reach the one agent. The other
+  listeners and lists are not multi-agent:
+
+  - `gateway.listen_addr` (requests) and `gateway.trap_listen_addr`
+    (notifications) are different directions/roles, not two front doors for
+    one target. The same is true for `manager.*` and `agent.*`.
+  - `tunnel.dial_addrs` is a **failover list for the same logical agent-side
+    tunnel**, not a set of different agents. It walks the list; it never routes
+    a request to a different agent.
+  - `security.users` / `security.tsm_identities` are several managers'
+    credentials for the **same** agent, not agent selectors.
+  - There is no `extra_listen` equivalent: the same request path cannot be
+    bound on a second address in one instance.
+
+  Current parity:
+
+  | Capability | modbus-shield | bacnet-shield | snmp-shield |
+  |---|---|---|---|
+  | Upstream targets per instance | N (`devices:`) | N (`devices:`) | **1** |
+  | Front listeners per target | 1 + `extra_listen` | 1 + `extra_listen` | 1 per role/direction; no extras |
+  | Per-target policy/metrics | yes | yes | N/A (one target) |
+
+  If S1 is implemented, decide the entry name (`agents:` is more honest than
+  `devices:` for SNMP), whether each entry gets its own request + trap
+  listeners, and whether an `extra_listen`-style list is needed at all. The
+  reference implementations are modbus-shield's `devices:` +
+  `internal/proxy/runner.go` and bacnet-shield's `devices:` + `extra_listen`.

@@ -21,6 +21,7 @@
 package conformance
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -49,6 +50,33 @@ type passthroughChain struct {
 
 func startPassthroughChain(t *testing.T, p Peer) *passthroughChain {
 	t.Helper()
+	var last error
+	for attempt := 0; attempt < 3; attempt++ {
+		f, err := tryStartPassthroughChain(t, p)
+		if err == nil {
+			// A bound port is not a working tunnel: wait for an answer
+			// end to end only after the chain exists.
+			waitV2cReady(t, f.Front)
+			return f
+		}
+		last = err
+		if !strings.Contains(err.Error(), "address already in use") {
+			t.Fatalf("%v", err)
+		}
+		// FreeUDPPort is a probe, not a reservation: another fixture can
+		// take the port between the probe and the bind. Retry with fresh
+		// ports; a real bind bug will still fail every attempt.
+		t.Logf("passthrough chain lost a probed port (attempt %d): %v", attempt+1, err)
+	}
+	t.Fatalf("passthrough chain startup failed after retries: %v", last)
+	return nil
+}
+
+// tryStartPassthroughChain is startPassthroughChain without the fatal
+// waits, so a probed-port collision can be retried instead of failing the
+// vendor matrix for an environment race.
+func tryStartPassthroughChain(t *testing.T, p Peer) (*passthroughChain, error) {
+	t.Helper()
 	dev := newDevice(t, testkit.AgentOptions{})
 	// Both sinks answer informs: the confirmation then has to travel the
 	// whole chain, which is the property that was broken.
@@ -74,7 +102,10 @@ func startPassthroughChain(t *testing.T, p Peer) *passthroughChain {
 	// (passthrough forwards raw datagrams, so the reader lives with the
 	// session). So wait for it AFTER the manager has dialed, not before —
 	// before the first session exists there is nothing to bind.
-	agentProc.waitFront(t, tunnelAddr)
+	if err := agentProc.awaitFront(tunnelAddr, frontReadyTimeout); err != nil {
+		agentProc.Stop(t)
+		return nil, err
+	}
 
 	mgrProc := startProxy(t, "manager",
 		"manager", "--security", "passthrough",
@@ -84,17 +115,19 @@ func startPassthroughChain(t *testing.T, p Peer) *passthroughChain {
 		"--trap-sink", mgrSideSink.Addr(),
 		"--log-level", "debug",
 	)
-	mgrProc.waitFront(t, front)
-	mgrProc.waitFront(t, mgrTrap)
-	agentProc.waitFront(t, agentTrap)
-	// A bound port is not a working tunnel: wait for an answer end to end.
-	waitV2cReady(t, front)
+	for _, addr := range []string{front, mgrTrap, agentTrap} {
+		if err := mgrProc.awaitFront(addr, frontReadyTimeout); err != nil {
+			mgrProc.Stop(t)
+			agentProc.Stop(t)
+			return nil, err
+		}
+	}
 
 	return &passthroughChain{
 		Front: front, MgrTrap: mgrTrap, AgentTrap: agentTrap,
 		MgrSideSink: mgrSideSink, AgentSideSink: agentSideSink,
 		Device: dev,
-	}
+	}, nil
 }
 
 // TestPassthroughChainNotifications pins both notification directions through

@@ -10,8 +10,11 @@ func TestSessionLimiter(t *testing.T) {
 	if got := l.Max(); got != 2 {
 		t.Fatalf("Max = %d, want 2", got)
 	}
-	if !l.Acquire() || !l.Acquire() {
-		t.Fatal("two acquires below the cap failed")
+	if !l.Acquire() {
+		t.Fatal("first acquire below the cap failed")
+	}
+	if !l.Acquire() {
+		t.Fatal("second acquire below the cap failed")
 	}
 	if l.Acquire() {
 		t.Fatal("acquire above the cap succeeded")

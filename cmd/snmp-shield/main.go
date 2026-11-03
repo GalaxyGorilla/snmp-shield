@@ -18,7 +18,7 @@ import (
 	"go.uber.org/zap"
 )
 
-const version = "0.1.0"
+var version = "1.0.3"
 
 func main() {
 	os.Exit(run())

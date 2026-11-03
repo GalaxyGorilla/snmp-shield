@@ -4,8 +4,10 @@
 
 BINARY := snmp-shield
 GO     ?= go
+VERSION ?= 1.0.3
+LDFLAGS := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build test fmt-check vet staticcheck govulncheck race verify acceptance security peers conformance conformance-required soak interop cover release release-all sbom vulnscan clean
+.PHONY: all build test fmt-check vet staticcheck govulncheck race verify acceptance security peers conformance conformance-required soak interop cover release release-all release-assets sbom vulnscan clean
 
 all: build
 
@@ -97,17 +99,30 @@ cover:
 
 # release builds a stripped static binary for appliance deployment.
 release:
-	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "-s -w" -o bin/$(BINARY) ./cmd/snmp-shield
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o bin/$(BINARY) ./cmd/snmp-shield
 
 # release-all cross-builds stripped static binaries for the appliance
 # platforms (amd64 + arm64 + armv7) into dist/. The project is pure Go
 # with CGO disabled, so cross-compiling is exact — no ports, no ifdef.
 release-all:
 	@mkdir -p dist
-	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -ldflags "-s -w" -o dist/$(BINARY)-linux-amd64 ./cmd/snmp-shield
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -trimpath -ldflags "-s -w" -o dist/$(BINARY)-linux-arm64 ./cmd/snmp-shield
-	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 $(GO) build -trimpath -ldflags "-s -w" -o dist/$(BINARY)-linux-armv7 ./cmd/snmp-shield
-	@echo "release binaries written to dist/ ($(BINARY)-linux-{amd64,arm64,armv7})"
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-linux-amd64 ./cmd/snmp-shield
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm64 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-linux-arm64 ./cmd/snmp-shield
+	CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o dist/$(BINARY)-linux-armv7 ./cmd/snmp-shield
+	@echo "release binaries written to dist/ ($(BINARY)-linux-{amd64,arm64,armv7}) version $(VERSION)"
+
+# release-assets produces exactly what the GitHub release carries: the three
+# Linux binaries, a per-binary SPDX + CycloneDX SBOM, and SHA256SUMS.
+# Requires syft (https://github.com/anchore/syft); exits 77 when missing.
+release-assets: release-all
+	@command -v syft >/dev/null 2>&1 || { echo "syft not installed (GOBIN=$$HOME/go/bin go install github.com/anchore/syft/cmd/syft@latest)"; exit 77; }
+	@for bin in dist/$(BINARY)-linux-amd64 dist/$(BINARY)-linux-arm64 dist/$(BINARY)-linux-armv7; do \
+		syft "$$bin" -o spdx-json="$$bin.spdx.json" -o cyclonedx-json="$$bin.cdx.json"; \
+	done
+	@cd dist && shasum -a 256 $(BINARY)-linux-amd64 $(BINARY)-linux-amd64.cdx.json $(BINARY)-linux-amd64.spdx.json \
+		$(BINARY)-linux-arm64 $(BINARY)-linux-arm64.cdx.json $(BINARY)-linux-arm64.spdx.json \
+		$(BINARY)-linux-armv7 $(BINARY)-linux-armv7.cdx.json $(BINARY)-linux-armv7.spdx.json > SHA256SUMS
+	@echo "release assets in dist/ (binaries, SBOMs, SHA256SUMS)"
 
 # interop drives the built binary with the real net-snmp CLI against the
 # two-proxy chain (snmpget/snmpset/snmptrap ...). Exit 77 when net-snmp

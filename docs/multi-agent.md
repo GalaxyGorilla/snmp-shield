@@ -171,7 +171,7 @@ server certificate/key) and `security.tsm_identities`; the top-level
 | `trap_sink_community` | no | clear v2c community toward the sink |
 | `security` | no | per-entry override of users, engine ID/store, TSM identities and trap community; the top-level `security` block is the default. `mode` stays process-wide in Phase 1 |
 | `tls` | no | per-entry CA/cert/key for `tsm-gateway`; falls back to the top-level `tunnel` block |
-| `notifications` | no | per-entry notification filter (Phase 2; global today) |
+| `notifications` | no | per-entry notification filter |
 
 Phase 1 requires a request path per entry. Trap legs are optional and
 per-entry. The existing notification-only shape (a single `gateway` block
@@ -416,15 +416,15 @@ something else. No communities, USM secrets, PSKs, or key material.
   a two-entry conformance scenario across all available peers, and a
   two-entry TSM vendor-client scenario over DTLS.
 
-### Phase 2 — follow-ups
+### Remaining optional follow-ups
 
 - Shared trap listener (optional; needs source→entry mapping with
   per-entry security).
 
 ## 12. Test plan
 
-Phase 1 implemented the unit and E2E items below; conformance, mutation
-and dedicated soak additions remain Phase 2.
+Phase 1 and the Phase 2 core items below are implemented; the remaining
+follow-ups are optional rather than required for the gateway shape.
 
 - **Unit**
   - config: mutual exclusion, unique names/listeners/stores, per-entry
@@ -462,7 +462,7 @@ and dedicated soak additions remain Phase 2.
 
 ## 13. Open questions
 
-1. Shared trap listener (Phase 2; needs source→entry mapping with
+1. Shared trap listener (optional; needs source→entry mapping with
    per-entry security).
 
 ## 14. Decision log

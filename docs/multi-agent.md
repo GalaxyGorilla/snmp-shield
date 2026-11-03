@@ -5,8 +5,8 @@ list for the gateway role, per-entry access/security/TLS/notifications,
 per-entry trap legs, per-agent Prometheus labels and SNMP MIB table,
 one process-wide TSM session cap, per-entry `validate`/`selftest` and
 SIGHUP reload, a `/status` JSON document, and a two-entry conformance
-scenario. A shared trap listener and TSM conformance/mutation/soak
-coverage remain follow-ups (§11).
+scenario, plus a two-entry TSM vendor-client scenario. A shared trap
+listener and mutation/soak coverage remain follow-ups (§11).
 **Decision:** only the gateway part of backlog item S1 is implemented.
 The two-proxy tunnel stays one pair per agent.
 
@@ -390,14 +390,15 @@ PSKs, or key material.
 - Tests: two-entry USM e2e (independent policies, no cross-entry traffic,
   per-agent metrics), per-entry trap delivery and filtering, SIGHUP access
   reload, TSM/manager-gateway bind smoke tests, config validation,
-  per-entry selftest, MIB table GET/GETNEXT, shared session limiter, and
-  a two-entry conformance scenario across all available peers.
+  per-entry selftest, MIB table GET/GETNEXT, shared session limiter,
+  a two-entry conformance scenario across all available peers, and a
+  two-entry TSM vendor-client scenario over DTLS.
 
 ### Phase 2 — follow-ups
 
 - Shared trap listener (optional; needs source→entry mapping with
   per-entry security).
-- Two-entry TSM conformance scenario; mutation/soak coverage.
+- Mutation/soak coverage for the multi-agent shape.
 
 ## 12. Test plan
 
@@ -423,7 +424,8 @@ and dedicated soak additions remain Phase 2.
   - implemented: `TestUSMGatewayAgents` drives a two-entry `agents:`
     config with every available peer (gosnmp, net-snmp 5.6/5.9, pysnmp,
     node); each front listener returns its own device.
-  - Phase 2: a two-entry `tsm-gateway` scenario.
+  - implemented: `TestTSMGatewayAgentsVendorClient` drives a two-entry
+    `tsm-gateway` config with net-snmp over DTLS in the peer container.
 - **Mutation checks**
   - removing the per-entry access holder makes the cross-policy test
     fail;
@@ -436,8 +438,7 @@ and dedicated soak additions remain Phase 2.
 
 1. Shared trap listener (Phase 2; needs source→entry mapping with
    per-entry security).
-2. Two-entry TSM conformance scenario; mutation/soak coverage for the
-   multi-agent shape (Phase 2).
+2. Mutation/soak coverage for the multi-agent shape (Phase 2).
 
 ## 14. Decision log
 

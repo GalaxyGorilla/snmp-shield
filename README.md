@@ -495,6 +495,14 @@ exit 77 (skip) when syft/grype are not installed.
 - [`deploy/`](deploy/) — systemd unit files.
 - [`AGENTS.md`](AGENTS.md) — architecture, wire-level quirks
   (pion/dtls, gosnmp, net-snmp, BER) and the maintenance rules.
+- [`TESTING.md`](TESTING.md) — test layers, soak coverage and the release
+  gates.
+- [`CONFORMANCE.md`](CONFORMANCE.md) — independent-peer results, vendor
+  divergences and deliberate limits.
+- [`BACKLOG.md`](BACKLOG.md) — the appliance-management items that remain,
+  and the scope decisions kept for reference.
+- [`docs/multi-agent.md`](docs/multi-agent.md) — the `agents:` co-hosting
+  design, per-entry security and the S1a/S1b decision.
 - [`docs/security-hardening.md`](docs/security-hardening.md) — review
   notes for the security-level and access-policy hardening: what was
   broken, what fixed it, and what was deliberately left out.

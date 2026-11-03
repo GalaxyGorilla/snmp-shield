@@ -437,8 +437,9 @@ names what would close it.
   goroutine leak per send, a 15s goroutine per answered request, and
   subscriber goroutines that outlived their session — see the findings below).
   What it still does not show: days of uptime, a real WAN (loss/reorder/jumbo
-  MTU), RSS as opposed to live heap, and concurrent client fan-in rather than
-  one sequential poller.
+  MTU), and RSS as opposed to live heap. The soak still uses one sequential
+  poller per entry; concurrent manager fan-in is covered separately by
+  `TestUSMGatewayConcurrentManagers` (not soak-gated).
 - **Network faults are deterministic on the USM gateway device leg.**
   `internal/testkit.FaultyUDPRelay` sits between the proxy and the fake
   device and drops/duplicates/delays one datagram at a time.
@@ -463,9 +464,10 @@ names what would close it.
 - **Vendor coverage means "the stacks on this host".** v1 traffic IS
   vendor-generated (`snmptrap -v 1`, `snmpget -v 1`, so v1 *translation* is
   judged by a real encoder), but no physical device is in the loop. The v3
-  agent leg runs against two real agents — Apple's `snmpd` 5.6.2.1 and the
-  5.9.3 in the Debian image — so a current-release divergence is visible; a
-  third release (or an appliance vendor's build) is still not. TSM
+  agent leg runs against three real agents — Apple's `snmpd` 5.6.2.1, the
+  5.9.3 in the Debian image, and the independent pysnmp agent — so a
+  current-release divergence is visible and the wire stack is not net-snmp
+  only; a fourth release (or an appliance vendor's build) is still not. TSM
   notifications have no vendor receiver at all (`CONFORMANCE.md`,
   "Deliberate limits").
 - **No CI.** Regressions are caught when someone runs the suite. The

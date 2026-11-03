@@ -6,7 +6,7 @@ per-entry trap legs, per-agent Prometheus labels and SNMP MIB table,
 one process-wide TSM session cap, per-entry `validate`/`selftest` and
 SIGHUP reload, a `/status` JSON document, and a two-entry conformance
 scenario, plus a two-entry TSM vendor-client scenario. A shared trap
-listener and mutation/soak coverage remain follow-ups (§11).
+listener and a long multi-agent soak remain optional follow-ups (§11).
 **Decision:** only the gateway part of backlog item S1 is implemented.
 The two-proxy tunnel stays one pair per agent.
 
@@ -398,7 +398,8 @@ PSKs, or key material.
 
 - Shared trap listener (optional; needs source→entry mapping with
   per-entry security).
-- Mutation/soak coverage for the multi-agent shape.
+- Long multi-agent soak (optional; the fast goroutine regression is in
+  the normal suite).
 
 ## 12. Test plan
 
@@ -432,7 +433,9 @@ and dedicated soak additions remain Phase 2.
   - sharing one front listener fails validation;
   - removing an entry from the runner makes that agent unreachable.
 - **Race/soak**
-  - N entries, goroutines return to baseline; no per-request leak.
+  - implemented: `TestGatewayAgentsNoPerRequestGoroutines` (100 requests
+    to each of two entries; flat goroutines, back to baseline).
+  - optional: a long multi-agent soak.
 
 ## 13. Open questions
 

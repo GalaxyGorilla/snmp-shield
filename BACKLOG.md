@@ -63,7 +63,8 @@ daemon behavior.
   per-entry trap delivery/filtering, SIGHUP access reload,
   TSM/manager-gateway bind smoke tests, config validation, per-entry
   selftest, MIB table GET/GETNEXT, two-entry USM conformance across all
-  available peers, and two-entry TSM vendor-client conformance over DTLS.
+  available peers, two-entry TSM vendor-client conformance over DTLS,
+  and a fast multi-agent goroutine regression.
 
   The two-proxy shape stays one pair per agent: the custom tunnel frame has
   no agent selector, and adding one would turn the security tunnel into a

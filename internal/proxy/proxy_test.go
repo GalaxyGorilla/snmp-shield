@@ -1267,18 +1267,65 @@ func TestRunAgentSessionCap(t *testing.T) {
 // every front listener to bind.
 func startGatewayAgents(t *testing.T, cfg *config.Config, met *observ.Metrics, holders map[string]*access.Holder) (context.CancelFunc, chan error) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- runGateway(ctx, Options{Config: cfg, Log: zap.NewNop(), AgentAccess: holders}, met)
-	}()
-	for _, a := range cfg.Agents {
-		waitBound(t, a.ListenAddr)
-		if a.TrapListenAddr != "" {
-			waitBound(t, a.TrapListenAddr)
+	for attempt := 0; attempt < 3; attempt++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- runGateway(ctx, Options{Config: cfg, Log: zap.NewNop(), AgentAccess: holders}, met)
+		}()
+		if err := waitAgentsBound(cfg, errCh); err == nil {
+			return cancel, errCh
+		} else {
+			cancel()
+			if !strings.Contains(err.Error(), "address already in use") {
+				t.Fatalf("gateway agents startup: %v", err)
+			}
+		}
+		// Another package's test grabbed a probed port between freeUDPPort
+		// and the bind. Reallocate the front/trap ports and retry.
+		for i := range cfg.Agents {
+			cfg.Agents[i].ListenAddr = freeUDPPort(t)
+			if cfg.Agents[i].TrapListenAddr != "" {
+				cfg.Agents[i].TrapListenAddr = freeUDPPort(t)
+			}
 		}
 	}
-	return cancel, errCh
+	t.Fatal("gateway agents did not bind after 3 attempts")
+	return nil, nil
+}
+
+// waitAgentsBound waits for every configured front/trap listener, returning
+// the gateway's startup error if it exits first.
+func waitAgentsBound(cfg *config.Config, errCh <-chan error) error {
+	for _, a := range cfg.Agents {
+		for _, addr := range []string{a.ListenAddr, a.TrapListenAddr} {
+			if addr == "" {
+				continue
+			}
+			raddr, err := net.ResolveUDPAddr("udp", addr)
+			if err != nil {
+				return err
+			}
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				select {
+				case err := <-errCh:
+					return err
+				default:
+				}
+				c, err := net.ListenUDP("udp", raddr)
+				if err != nil {
+					break // already bound
+				}
+				_ = c.Close()
+				time.Sleep(20 * time.Millisecond)
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("timeout waiting for %s to be bound", addr)
+			}
+		}
+	}
+	return nil
 }
 
 // TestRunGatewayAgentsUSM pins the multi-agent gateway shape end to end:
@@ -1441,6 +1488,10 @@ agents:
 
 	cancel, errCh := startGatewayAgents(t, cfg, observ.NewMetrics(), holders)
 	defer cancel()
+	// A startup retry may have reallocated the probed ports; keep the
+	// reload YAML in sync with the addresses actually bound.
+	listenA = cfg.Agents[0].ListenAddr
+	listenB = cfg.Agents[1].ListenAddr
 
 	gA := gosnmpV3(t, cfg.Agents[0].ListenAddr)
 	defer gA.Conn.Close()

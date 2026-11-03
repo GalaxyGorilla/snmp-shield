@@ -142,3 +142,70 @@ func waitChainReady(t *testing.T, poll *chainPoll) {
 	}
 	t.Fatalf("the chain never answered a request: %v", lastErr)
 }
+
+// TestGatewayAgentsNoPerRequestGoroutines is the fast non-soak net for the
+// multi-agent gateway: 100 requests to each of two entries may not add a
+// goroutine per message, and the count must return to baseline after stop.
+func TestGatewayAgentsNoPerRequestGoroutines(t *testing.T) {
+	const requests = 100
+	baseline := runtime.NumGoroutine()
+
+	devA := fakeAgent(t, "127.0.0.1:0")
+	defer devA.Close()
+	devB := fakeAgent(t, "127.0.0.1:0")
+	defer devB.Close()
+
+	cfg := &config.Config{Role: config.RoleGateway}
+	cfg.Defaults()
+	cfg.Security.Mode = "usm-gateway"
+	cfg.Security.Users = testUsers()
+	cfg.Security.EngineStoreDir = t.TempDir()
+	cfg.Agents = []config.AgentEntry{
+		{Name: "a", ListenAddr: freeUDPPort(t), AgentAddr: devA.LocalAddr().String()},
+		{Name: "b", ListenAddr: freeUDPPort(t), AgentAddr: devB.LocalAddr().String()},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config validate: %v", err)
+	}
+	cancel, errCh := startGatewayAgents(t, cfg, observ.NewMetrics(), nil)
+	defer cancel()
+
+	gA := gosnmpV3(t, cfg.Agents[0].ListenAddr)
+	defer gA.Conn.Close()
+	gB := gosnmpV3(t, cfg.Agents[1].ListenAddr)
+	defer gB.Conn.Close()
+
+	oid := []string{"1.3.6.1.2.1.1.1.0"}
+	for i := 0; i < 5; i++ { // warm up the lazily started loops
+		if _, err := gA.Get(oid); err != nil {
+			t.Fatalf("warmup a: %v", err)
+		}
+		if _, err := gB.Get(oid); err != nil {
+			t.Fatalf("warmup b: %v", err)
+		}
+	}
+	steady := runtime.NumGoroutine()
+
+	var maxSeen int
+	for i := 0; i < requests; i++ {
+		if _, err := gA.Get(oid); err != nil {
+			t.Fatalf("request %d a: %v", i+1, err)
+		}
+		if _, err := gB.Get(oid); err != nil {
+			t.Fatalf("request %d b: %v", i+1, err)
+		}
+		if g := runtime.NumGoroutine(); g > maxSeen {
+			maxSeen = g
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if maxSeen > steady+10 {
+		t.Fatalf("goroutines %d at steady state, %d during %d requests: something is spawned per message",
+			steady, maxSeen, requests)
+	}
+
+	_ = gA.Conn.Close()
+	_ = gB.Conn.Close()
+	stopRun(t, cancel, errCh, "gateway agents")
+	waitGoroutines(t, baseline+8, 15*time.Second)
+}

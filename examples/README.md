@@ -14,6 +14,7 @@ Config-file templates for every example live in [`configs/`](../configs/).
 | [gateway-notifications-only](gateway-notifications-only.md) | One box in front of a manager | The manager leg: legacy device traps/informs are wrapped into authenticated v3 toward the manager (usm-gateway, notification-only) |
 | [ha-two-proxy](ha-two-proxy.md) | Two proxy pairs, redundant agent side | Adds failover: the manager proxy dials a list of agent-side replicas and shares engine state |
 | [access-control](access-control.md) | Any shape, layered on top | The request leg: client allow-list, per-client rate limit, read-only / OID-scoped write policy — plus SIGHUP reload |
+| [operations](operations.md) | The box is deployed | Day-2 map: install, commission, monitor, reload, troubleshoot, upgrade, and where the security/HA/multi-agent docs live |
 
 Which one do I want?
 

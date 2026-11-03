@@ -83,10 +83,10 @@ and SNMP health metrics, and SBOM/vulnerability tooling.
 The documented proxy and gateway modes are feature-complete and
 production-ready for their stated software scope. The release gate drives the
 built binary with five independent manager stacks, two net-snmp agent releases
-on both the secure-v3 and clear-device legs, a real `snmptrapd` receiver, and
-net-snmp over DTLS/TSM. Traps, informs, request types, writes, policy failures,
-process signals, failover and malformed inputs are covered in addition to the
-race suite. The repository also supplies hardened service units, health
+on both the secure-v3 and clear-device legs, an independent pysnmp v3 agent, a
+real `snmptrapd` receiver, and net-snmp over DTLS/TSM. Traps, informs, request
+types, writes, policy failures, process signals, failover and malformed inputs
+are covered in addition to the race suite. The repository also supplies hardened service units, health
 metrics, configuration validation, self-tests and operational diagnostics.
 
 **Known validation boundary:** the project has not yet completed testing
@@ -420,6 +420,10 @@ with `validate --json`, and offer a "test connection" button backed by
 
 ## Operations
 
+Day-2 install, commissioning, monitoring, reload, troubleshooting and upgrade
+steps are in [`examples/operations.md`](examples/operations.md). The rest of
+this section summarizes the runtime behavior those steps rely on.
+
 - **Reconnect with backoff** — the manager side dials and reconnects
   automatically (configurable ceiling).
 - **Keepalive** — PING/PONG frames keep NAT mappings alive and detect
@@ -493,6 +497,10 @@ exit 77 (skip) when syft/grype are not installed.
   deployment shape.
 - [`configs/`](configs/) — YAML templates for every mode.
 - [`deploy/`](deploy/) — systemd unit files.
+- [`SECURITY.md`](SECURITY.md) — protected assets, trust boundaries, enforced
+  controls, deliberate limits and vulnerability reporting.
+- [`examples/operations.md`](examples/operations.md) — day-2 map: install,
+  commission, monitor, reload, troubleshoot, upgrade.
 - [`AGENTS.md`](AGENTS.md) — architecture, wire-level quirks
   (pion/dtls, gosnmp, net-snmp, BER) and the maintenance rules.
 - [`TESTING.md`](TESTING.md) — test layers, soak coverage and the release

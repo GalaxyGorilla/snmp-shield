@@ -1,0 +1,31 @@
+# Per-package statement-coverage floors for `make cover`.
+#
+# Floors are set just below the measured value so they catch a real
+# regression without failing on a one-line refactor. Raise a floor when a
+# package improves; lower one only with a comment explaining why.
+#
+# `skip` is for packages that are deliberately not part of the production
+# surface (test-only helpers, fixtures, tooling).
+ALL                76
+cmd/snmp-shield    85
+internal/access    90
+internal/cache     88
+internal/config    81
+internal/conformance 71
+internal/msg       75
+internal/notifyfilter 100
+internal/observ    87
+internal/oidmatch  93
+internal/passthrough 71
+internal/proxy     75
+internal/safego    100
+internal/securitylevel 95
+internal/snmpmetrics 76
+internal/tsm        73
+internal/tunnel     85
+internal/usm       72
+internal/watchdog  92
+internal/testkit   skip
+scripts/smoke-client skip
+scripts/tsm-sink   skip
+scripts/covercheck skip

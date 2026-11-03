@@ -12,6 +12,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/GalaxyGorilla/snmp-shield/internal/cache"
 	"github.com/GalaxyGorilla/snmp-shield/internal/config"
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
@@ -197,7 +198,23 @@ func checkEngineStore(path string) check {
 	if err != nil {
 		return check{Name: "engine store", OK: false, Detail: err.Error()}
 	}
+	fi, statErr := f.Stat()
 	_ = f.Close()
+	if statErr != nil {
+		return check{Name: "engine store", OK: false, Detail: statErr.Error()}
+	}
+	// An existing store must actually be loadable. Checking only that the
+	// file opens would report "OK" for a corrupt or torn store, and the
+	// daemon would then refuse to start — the worst moment to discover it.
+	if fi.Size() > 0 {
+		s, err := cache.Open(path)
+		if err != nil {
+			return check{Name: "engine store", OK: false, Detail: err.Error()}
+		}
+		if _, err := s.LoadEngine(); err != nil {
+			return check{Name: "engine store", OK: false, Detail: err.Error()}
+		}
+	}
 	return check{Name: "engine store", OK: true, Detail: path}
 }
 

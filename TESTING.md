@@ -21,6 +21,14 @@ frame-sink pipe, free ports). The conformance layer uses the same scaffolding
 but drives the **built CLI**, so flag parsing, defaults and validation are
 covered too.
 
+The transport and state-store edges are also tested directly, not only through
+conformance: `internal/tunnel/tls_test.go` drives TLS/TCP mutual TLS and the
+certificate mode of DTLS (peer-certificate extraction, refusal of a missing or
+untrusted client certificate, and the config error paths), while
+`internal/cache` and `cmd/snmp-shield` cover a corrupt or torn engine store —
+the daemon fails closed, never silently resets `engineBoots`, and `validate`
+reports the bad store before start.
+
 **Every privacy protocol that ships is driven by an independent stack**, not
 just the one modern devices negotiate: AES-CFB (RFC 3826) throughout, and DES
 (RFC 3414 §8.1.1.1) in `internal/usm/des_e2e_test.go` — a gosnmp DES client
@@ -71,6 +79,7 @@ make conformance-required  # same matrix, but a missing toolchain FAILS (release
 make peers           # pysnmp venv + node net-snmp + the Docker TSM image (idempotent)
 make interop         # two-proxy net-snmp interop (rc 77 without net-snmp)
 make soak            # 10-minute load soak (SOAK_DURATION=90s for a quick pass)
+make cover           # statement coverage + per-package floors (coverage.floors)
 
 go test ./internal/conformance -v -count=1          # see which peers ran/skipped
 go test ./internal/conformance -run TestUSMGatewayRequests -v
@@ -83,6 +92,17 @@ staticcheck ./...
 govulncheck ./...
 make vulnscan        # SBOM + grype, fails on HIGH+
 ```
+
+## Coverage gate
+
+`make cover` runs the suite with a coverage profile and enforces the
+per-package floors in [`coverage.floors`](coverage.floors). The overall figure
+excludes packages marked `skip` (test-only helpers, fixtures and tooling), so
+it tracks the production surface rather than how much scaffolding the repo
+contains. A floor is a regression alarm, not a target: raise it when a package
+improves, and add a test rather than lowering it. Packages run serially
+(`-p 1`) because the fixtures probe free UDP ports; parallel packages can steal
+a probed port between probe and bind.
 
 ## Flags-mode wiring sweep
 

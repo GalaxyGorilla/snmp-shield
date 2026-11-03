@@ -5,7 +5,7 @@
 BINARY := snmp-shield
 GO     ?= go
 
-.PHONY: all build test fmt-check vet staticcheck govulncheck race verify acceptance security peers conformance conformance-required soak interop release release-all sbom vulnscan clean
+.PHONY: all build test fmt-check vet staticcheck govulncheck race verify acceptance security peers conformance conformance-required soak interop cover release release-all sbom vulnscan clean
 
 all: build
 
@@ -15,7 +15,11 @@ build:
 # test gates on formatting: an unformatted file used to slip into a green
 # suite because nothing checked (matches modbus-shield).
 test: fmt-check
-	$(GO) test ./... -race -timeout 180s
+	# -p 1: fixtures probe free UDP/TCP ports before binding them, so
+	# packages running in parallel can steal a probed port and turn a
+	# green suite into an environment race. Serialising packages keeps
+	# the gate deterministic; run a single package for a fast edit loop.
+	$(GO) test ./... -p 1 -race -timeout 600s
 
 fmt-check:
 	@unformatted=$$(gofmt -l . | grep -v '^vendor/' || true); \
@@ -77,6 +81,19 @@ conformance-required:
 soak:
 	SNMP_SHIELD_SOAK=1 SNMP_SHIELD_SOAK_DURATION=$${SOAK_DURATION:-10m} \
 		$(GO) test ./internal/access ./internal/proxy -run 'TestSoak' -count=1 -timeout 60m -v
+
+# cover measures statement coverage and enforces the per-package floors in
+# coverage.floors. A single overall number hides the package that regressed;
+# the floors make a drop in the security boundary visible even when the total
+# is flat. This is a regression gate, not a target to game: raise a floor when
+# a package improves, and add a test rather than lowering it.
+cover:
+	@mkdir -p dist
+	# -p 1: the fixtures probe free UDP ports (FreeUDPPort is a probe, not a
+	# reservation), so packages running in parallel can steal each other's
+	# port. Serialising packages keeps this gate deterministic.
+	$(GO) test ./... -p 1 -covermode=atomic -coverprofile=dist/cover.out -timeout 600s
+	$(GO) run ./scripts/covercheck dist/cover.out coverage.floors
 
 # release builds a stripped static binary for appliance deployment.
 release:

@@ -113,19 +113,38 @@ func TestRunSelftestProbeDisabled(t *testing.T) {
 
 func TestPreflightEngineStore(t *testing.T) {
 	dir := t.TempDir()
-	// existing writable file passes
+	// existing writable empty file passes (a fresh store)
 	path := filepath.Join(dir, "engine.json")
 	ch := checkEngineStore(path)
 	if !ch.OK {
 		t.Fatalf("engine store create: %v", ch.Detail)
+	}
+	// a valid persisted engine passes
+	if err := os.WriteFile(path, []byte(`{"engine_id":"gAECAw==","boots":3,"last_boots":3}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if ch := checkEngineStore(path); !ch.OK {
+		t.Fatalf("valid engine store rejected: %v", ch.Detail)
+	}
+	// a corrupt store must fail preflight, not be reported as usable and
+	// then abort the daemon at start
+	for _, bad := range []string{`{not json`, `{"engine_id":"gAEC","boots":`, `{}`, `null`} {
+		if err := os.WriteFile(path, []byte(bad), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if ch := checkEngineStore(path); ch.OK {
+			t.Fatalf("corrupt engine store %q passed preflight", bad)
+		}
 	}
 	// a directory in place of the file fails
 	ch = checkEngineStore(dir)
 	if ch.OK {
 		t.Fatal("engine store on directory: expected failure")
 	}
-	// a path in a nonexistent directory fails (no parent creation —
-	// matches cache.Open behavior)
+	// A path in a nonexistent directory fails: checkEngineStore does not
+	// create parent directories (cache.Open does), because a typo in
+	// engine_store must be caught by validate rather than silently turned
+	// into a new directory tree.
 	ch = checkEngineStore(filepath.Join(dir, "sub", "engine.json"))
 	if ch.OK {
 		t.Fatal("engine store in missing dir: expected failure")

@@ -82,16 +82,86 @@ func TestStoreRoundTrip(t *testing.T) {
 }
 
 func TestStoreCorruptFileIsError(t *testing.T) {
-	p := filepath.Join(t.TempDir(), "engine.json")
-	if err := os.WriteFile(p, []byte("{not json"), 0o600); err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name string
+		data string
+	}{
+		{"invalid json", "{not json"},
+		{"truncated after key", `{"engine_id":"gAEC","boots":`},
+		{"truncated mid-string", `{"engine_id":"gA`},
+		{"empty object", `{}`},
+		{"json null", `null`},
+		{"engine id but zero boots", `{"engine_id":"gAEC","boots":0}`},
+		{"empty engine id", `{"engine_id":"","boots":4}`},
 	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := filepath.Join(t.TempDir(), "engine.json")
+			if err := os.WriteFile(p, []byte(tc.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			s, err := Open(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := s.LoadEngine(); err == nil {
+				t.Fatal("corrupt store must error, not silently start empty (rollback protection)")
+			}
+			// The daemon must not "repair" the file by overwriting it: the
+			// operator needs the original bytes to diagnose the crash.
+			got, readErr := os.ReadFile(p)
+			if readErr != nil {
+				t.Fatalf("store disappeared after a failed load: %v", readErr)
+			}
+			if string(got) != tc.data {
+				t.Fatalf("failed load rewrote the store: %q -> %q", tc.data, got)
+			}
+		})
+	}
+}
+
+// TestStorePowerLossLeavesCommittedFile pins the write-temp-then-rename
+// contract. A power cut between the temp write and the rename leaves a
+// partial .tmp beside an intact store; the next boot must load the committed
+// state, increment boots, and replace the temp file — never adopt the
+// partial write.
+func TestStorePowerLossLeavesCommittedFile(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "engine.json")
 	s, err := Open(p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.LoadEngine(); err == nil {
-		t.Fatal("corrupt store must error, not silently start empty (rollback protection)")
+	c1, err := NewEngineClock(s, nil, testLogger(t))
+	if err != nil {
+		t.Fatalf("first boot: %v", err)
+	}
+	id := c1.EngineID()
+
+	// Simulate a crash after os.WriteFile(tmp) but before os.Rename.
+	if err := os.WriteFile(p+".tmp", []byte(`{"engine_id":"gA`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	c2, err := NewEngineClock(s, nil, testLogger(t))
+	if err != nil {
+		t.Fatalf("boot after a torn write: %v", err)
+	}
+	if string(c2.EngineID()) != string(id) {
+		t.Fatalf("engine ID changed across a torn write: %x -> %x", id, c2.EngineID())
+	}
+	if c2.Boots() != 2 {
+		t.Fatalf("boots after a torn write = %d, want 2", c2.Boots())
+	}
+	// The next save must have replaced the partial temp file.
+	tmp, err := os.ReadFile(p + ".tmp")
+	if err == nil {
+		t.Fatalf("partial temp file survived the next save: %q", tmp)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat temp file: %v", err)
+	}
+	if got, err := s.LoadEngine(); err != nil || got == nil || got.Boots != 2 {
+		t.Fatalf("committed store after recovery = %+v, %v", got, err)
 	}
 }
 

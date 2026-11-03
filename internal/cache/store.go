@@ -62,6 +62,17 @@ func (s *Store) LoadEngine() (*Engine, error) {
 	if err := json.Unmarshal(data, &e); err != nil {
 		return nil, fmt.Errorf("cache: corrupt engine store %s: %w", s.path, err)
 	}
+	// A syntactically valid document is not necessarily a persisted
+	// engine. `{}` and `null` unmarshal successfully into the zero value,
+	// which NewEngineClock would treat as "no prior engine" and silently
+	// restart at boots=1 — exactly the rollback the store exists to
+	// prevent. Reject the shape instead of trusting the JSON parser.
+	if len(e.EngineID) == 0 {
+		return nil, fmt.Errorf("cache: corrupt engine store %s: missing engine_id", s.path)
+	}
+	if e.Boots == 0 {
+		return nil, fmt.Errorf("cache: corrupt engine store %s: boots must be at least 1", s.path)
+	}
 	return &e, nil
 }
 

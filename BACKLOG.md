@@ -55,8 +55,9 @@ daemon behavior.
   name; listener/agent/security/TLS/notifications/trap changes are
   restart-required. `validate`/`selftest` iterate entries, Prometheus
   counters carry an `agent` label (single-target roles use
-  `agent="default"`), and the SNMP health MIB exposes a per-agent
-  `.40.<n>` table. Design and implementation notes:
+  `agent="default"`), the SNMP health MIB exposes a per-agent `.40.<n>`
+  table, and `/status` on the metrics listener exposes per-entry
+  endpoints/policy/counters as JSON. Design and implementation notes:
   [docs/multi-agent.md](docs/multi-agent.md). Tests: two-entry USM e2e
   (independent policies, no cross-entry traffic, per-agent metrics),
   per-entry trap delivery/filtering, SIGHUP access reload,

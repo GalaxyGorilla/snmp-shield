@@ -240,9 +240,12 @@ func (m *Metrics) CounterList() []prometheus.Counter {
 
 // ServeMetrics serves /metrics on addr until the process exits. It is
 // intended to run in its own goroutine.
-func ServeMetrics(addr string, handler http.Handler, log *zap.Logger) *http.Server {
+func ServeMetrics(addr string, handler http.Handler, log *zap.Logger, status ...http.Handler) *http.Server {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", handler)
+	if len(status) > 0 && status[0] != nil {
+		mux.Handle("/status", status[0])
+	}
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           mux,

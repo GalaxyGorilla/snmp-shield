@@ -157,7 +157,7 @@ plus the short `/tmp` prefix hides it).
 | SBOM + automated vuln-DB comparison (`make sbom` → syft SPDX+CycloneDX into `dist/`; `make vulnscan` → `grype db update` + `grype --fail-on high` vs NVD/GHSA/OSV; `scripts/sbom.sh --sbom-only`) + x/crypto v0.48.0 → v0.58.0 upgrade clearing all Critical/High advisories (go directive 1.24 → 1.26, mandatory for x/crypto ≥ 0.56) | done (tested, `make vulnscan` rc=0 — only residual GO-2026-5932 is Unknown severity/unfixed deprecated-openpgp advisory, below the gate; direct symbol-precise binary scan: 0 findings) |
 | SNMP metrics interface (`internal/snmpmetrics`: read-only SNMPv2c health MIB GET/GETNEXT on `metrics.listen_addr` + v2c tunnel-lifecycle traps to `metrics.trap_sink_addr`; `Session.SetEventFunc` events, all roles; Prometheus stays alongside) | done (tested, unit tests + e2e: two-proxy chain polling + tunnel-down trap pinned) |
 | Front-leg access policy (`internal/access` + `internal/oidmatch`): client allow-list, per-client rate limit, read-only and OID-scoped write policy on the 6 client-facing request ingress sites (usm gateway/manager, tsm gateway/manager, passthrough manager, usm manager-gateway) **plus the write policy at both device-facing agent ingress sites** (usm-translate + tsm tunnel requests, answered `notWritable` back through the tunnel); 3 new Prometheus counters; `access.*` YAML + `--allow`/`--rate-per-sec`/`--read-only`/`--write-default`/`--write-allow`/`--write-deny` flags; SIGHUP access-policy reload (`internal/proxy/reload.go`) | done (tested: access unit tests pin deny-overrides/allow-must-cover/arc boundaries/undecodable-SET/fail-closed cap; wire e2e `internal/usm/access_e2e_test.go` (gosnmp: read-only→notWritable with 0 SETs at the agent, allow-list silence + live holder swap, subtree allow/deny incl. straddling SET, rate-limit burst) + `internal/tsm/access_test.go` (TSM read-only → notWritable, msgID/req-id echoed, agent untouched) + `internal/proxy/proxy_test.go TestRunAgentReadOnlyE2E` (full usm-translate chain, agent-side policy, device sees 0 SETs) + `internal/tsm/tsm_e2e_test.go TestTSMEndToEndAgentReadOnly`; reload tests; full race suite + smoke + interop green) |
-| S1a multiple agents per instance (gateway-only) — **done** (Phase 1 + Phase 2 core, 2026-11-03); S1b multi-agent over the two-proxy tunnel — **closed** | S1a: one process, N independent listener↔agent pairs for all gateway modes (one mode per process); per-entry access, security (`users`/engine/TSM), optional `tls`, trap legs, per-entry notifications filter, `engine_store_dir` derivation, per-agent metrics label and MIB table (`.40.<n>`), one process-wide TSM front-session cap, per-entry `validate`/`selftest` and SIGHUP access reload; docs in `docs/multi-agent.md`. Tests: two-entry USM e2e, per-entry trap delivery/filtering, SIGHUP reload, TSM/manager bind smoke, config validation, per-entry selftest, MIB table GET/GETNEXT, shared session limiter, two-entry conformance across all peers. S1b: one pair per agent; the custom tunnel has no agent selector. No routing by community/context/OID |
+| S1a multiple agents per instance (gateway-only) — **done** (Phase 1 + Phase 2 core, 2026-11-03); S1b multi-agent over the two-proxy tunnel — **closed** | S1a: one process, N independent listener↔agent pairs for all gateway modes (one mode per process); per-entry access, security (`users`/engine/TSM), optional `tls`, trap legs, per-entry notifications filter, `engine_store_dir` derivation, per-agent metrics label and MIB table (`.40.<n>`), one process-wide TSM front-session cap, a `/status` JSON document, per-entry `validate`/`selftest` and SIGHUP access reload; docs in `docs/multi-agent.md`. Tests: two-entry USM e2e, per-entry trap delivery/filtering, SIGHUP reload, TSM/manager bind smoke, config validation, per-entry selftest, MIB table GET/GETNEXT, shared session limiter, two-entry conformance across all peers. S1b: one pair per agent; the custom tunnel has no agent selector. No routing by community/context/OID |
 
 ### Gateway modes (single proxy, no second proxy required)
 
@@ -1633,9 +1633,11 @@ effective engine stores are rejected. Prometheus
 request/notification/access counters carry an `agent` label; single-target
 roles use `agent="default"`. The SNMP health MIB exposes a per-agent
 `.40.<n>` table (name, eight per-agent counters, latency count/sum; rows
-sorted by name). The multi-agent TSM front-session cap is one process-wide
-`tunnel.max_sessions` budget shared by all entries, not one cap per entry.
-SIGHUP applies access per entry by name;
+sorted by name). `/status` on the metrics listener exposes per-entry
+endpoints, a policy summary and counters (no secrets). The multi-agent TSM
+front-session cap is one process-wide `tunnel.max_sessions` budget shared
+by all entries, not one cap per entry. SIGHUP applies access per entry by
+name;
 listener/agent/security/TLS/notifications/trap changes are
 restart-required. **S1b
 (multi-agent over the two-proxy tunnel)** stays closed. The protocol has no
@@ -1677,7 +1679,9 @@ listener remain Phase 2 follow-ups.
   metrics (frames/bytes/reconnects/tunnel/session gauges) stay
   unlabelled. The SNMP MIB's `.40.<n>` table is built from
   `PerAgentCounterList`/`ForwardLatency` per entry (or one `default`
-  row for single-target roles).
+  row for single-target roles). `/status` (`internal/proxy/status.go`)
+  is built from the same views and exposes role/mode/version/config hash
+  plus per-entry endpoints, policy summary and counters; never secrets.
 - Diagnostics: `preflight`, `selftest` and the JSON checks iterate
   `agents:` and set `check.Agent`; `probeAgentV3For`/`gatewayCommunityFor`
   take the per-entry gateway/security values instead of the global

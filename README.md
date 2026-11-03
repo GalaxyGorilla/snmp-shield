@@ -405,6 +405,9 @@ with `validate --json`, and offer a "test connection" button backed by
   filtered/dropped, reconnects, tunnel-up gauge, forwarding latency, and
   the access-policy counters (`snmp_shield_acl_denied_total`,
   `snmp_shield_writes_denied_total`, `snmp_shield_rate_limited_total`).
+  The same listener serves `/status`, a JSON document with role/mode/
+  version/config hash and per-entry endpoints, policy summary and
+  counters (never secrets).
 - **SNMP metrics interface** — every role can expose its health over
   SNMP itself: `metrics.listen_addr` (or `--metrics-snmp-listen`)
   serves a small read-only SNMPv2c agent (GET/GETNEXT: identity,

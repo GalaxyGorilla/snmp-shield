@@ -209,7 +209,7 @@ func Run(opts Options) error {
 	met := observ.NewMetrics()
 	var metSrv *http.Server
 	if opts.MetricsAddr != "" {
-		metSrv = observ.ServeMetrics(opts.MetricsAddr, met.Handler(), opts.Log)
+		metSrv = observ.ServeMetrics(opts.MetricsAddr, met.Handler(), opts.Log, newStatusHandler(opts, met))
 		defer observ.ShutdownMetrics(metSrv)
 	}
 

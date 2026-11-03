@@ -4,8 +4,9 @@
 list for the gateway role, per-entry access/security/TLS/notifications,
 per-entry trap legs, per-agent Prometheus labels and SNMP MIB table,
 one process-wide TSM session cap, per-entry `validate`/`selftest` and
-SIGHUP reload, and a two-entry conformance scenario. JSON status and a
-shared trap listener remain follow-ups (§11).
+SIGHUP reload, a `/status` JSON document, and a two-entry conformance
+scenario. A shared trap listener and TSM conformance/mutation/soak
+coverage remain follow-ups (§11).
 **Decision:** only the gateway part of backlog item S1 is implemented.
 The two-proxy tunnel stays one pair per agent.
 
@@ -285,29 +286,48 @@ for now: one trap listener already aggregates many devices.
 - This is an accepted compatibility change for dashboards. Document it in
   the release notes; the alternative (two metric families) is worse.
 
-### JSON status (Phase 2)
+### JSON status
 
-Not implemented in Phase 1. A stable JSON document listing every entry:
+Served as `/status` on the metrics HTTP listener (`--metrics-addr`), next
+to `/metrics`. A stable JSON document listing every entry:
 
 ```json
 {
-  "revision": "…",
-  "mode": "usm-gateway",
+  "ok": true,
+  "role": "gateway",
+  "security_mode": "usm-gateway",
+  "tunnel_mode": "dtls",
+  "version": "1.2.3",
+  "config_hash": "…",
   "agents": [
     {
       "name": "plc",
       "listen": "10.0.0.10:161",
-      "agent": "10.0.0.50:161",
-      "ready": true,
-      "reload": "ok",
-      "restart_required": [],
-      "counters": { "requests": 1234, "denied": 3 }
+      "upstream": "10.0.0.50:161",
+      "read_only": true,
+      "allow_count": 1,
+      "rate_per_sec": 50,
+      "counters": {
+        "requests_forwarded": 1234,
+        "request_errors": 0,
+        "notifications_relayed": 12,
+        "notifications_filtered": 1,
+        "drops": 3,
+        "acl_denied": 2,
+        "writes_denied": 4,
+        "rate_limited": 5,
+        "latency_count": 1234,
+        "latency_sum_seconds": 0.42
+      }
     }
   ]
 }
 ```
 
-No communities, USM secrets, PSKs, or key material.
+`ok` means the process is serving, not that a device is reachable (use
+`selftest` for that). `config_hash` is the SHA-256 of the active YAML
+file when the process was started from one. No communities, USM secrets,
+PSKs, or key material.
 
 ### SNMP MIB
 
@@ -365,6 +385,8 @@ No communities, USM secrets, PSKs, or key material.
   counters and latency count/sum.
 - `tsm-gateway`: one process-wide `tunnel.max_sessions` budget shared by
   all entries (`tsm.SessionLimiter`), not N × cap.
+- `/status` JSON document on the metrics HTTP listener, next to
+  `/metrics`, with per-entry endpoints, policy summary and counters.
 - Tests: two-entry USM e2e (independent policies, no cross-entry traffic,
   per-agent metrics), per-entry trap delivery and filtering, SIGHUP access
   reload, TSM/manager-gateway bind smoke tests, config validation,
@@ -373,7 +395,6 @@ No communities, USM secrets, PSKs, or key material.
 
 ### Phase 2 — follow-ups
 
-- JSON status integration.
 - Shared trap listener (optional; needs source→entry mapping with
   per-entry security).
 - Two-entry TSM conformance scenario; mutation/soak coverage.
@@ -413,11 +434,10 @@ and dedicated soak additions remain Phase 2.
 
 ## 13. Open questions
 
-1. JSON status integration (Phase 2).
-2. Shared trap listener (Phase 2; needs source→entry mapping with
+1. Shared trap listener (Phase 2; needs source→entry mapping with
    per-entry security).
-3. Conformance-matrix, mutation and soak coverage for the multi-agent
-   shape (Phase 2).
+2. Two-entry TSM conformance scenario; mutation/soak coverage for the
+   multi-agent shape (Phase 2).
 
 ## 14. Decision log
 
@@ -434,6 +454,8 @@ and dedicated soak additions remain Phase 2.
   gateway mode; mixed modes are separate instances.
 - **Per-agent Prometheus label:** accepted compatibility change;
   single-agent configs use `agent="default"`.
+- **JSON status:** served as `/status` on the metrics listener; per-entry
+  endpoints, policy summary and counters; no secrets.
 - **TSM front-session cap:** one process-wide `tunnel.max_sessions`
   budget shared by all entries, not one cap per entry.
 - **Phase 1 implemented (2026-11-03):** all gateway modes (one mode per

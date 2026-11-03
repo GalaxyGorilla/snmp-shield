@@ -268,3 +268,21 @@ func get(t *testing.T, url string, timeout time.Duration) string {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// TestServeMetricsStatusRoute pins the optional /status handler: it is
+// served next to /metrics when supplied, and its absence keeps the old
+// 404 behavior.
+func TestServeMetricsStatusRoute(t *testing.T) {
+	addr := freeTCPAddr(t)
+	status := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	})
+	srv := ServeMetrics(addr, NewMetrics().Handler(), zap.NewNop(), status)
+	defer ShutdownMetrics(srv)
+
+	body := get(t, "http://"+addr+"/status", 5*time.Second)
+	if !strings.Contains(body, `"ok":true`) {
+		t.Fatalf("/status body = %q", body)
+	}
+}

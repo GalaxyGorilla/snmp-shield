@@ -2,11 +2,25 @@ package testkit
 
 import (
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
 
-// FreeUDPPort returns a loopback UDP address that was free a moment ago.
+// usedPorts remembers every port handed out in this process. A probe closes
+// its socket, so the kernel is free to return the same ephemeral port to the
+// next probe — including a probe for a different host form ([::] vs
+// 127.0.0.1). Two fixtures in one test then bind the same port and one dies
+// with "address already in use". Keying on the port (not the host) closes
+// that gap; the set is process-lifetime because a test process uses orders of
+// magnitude fewer than 64K ports.
+var (
+	usedPortsMu sync.Mutex
+	usedPorts   = make(map[string]struct{})
+)
+
+// FreeUDPPort returns a loopback UDP address that was free a moment ago and
+// has not been handed out before in this process.
 //
 // Prefer binding "127.0.0.1:0" and reading LocalAddr(); this exists for
 // configurations that must name an address *before* anything listens (for
@@ -18,15 +32,31 @@ func FreeUDPPort(t testing.TB, host string) string {
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	conn, err := net.ListenPacket("udp", host+":0")
-	if err != nil {
-		t.Fatalf("testkit: probe free udp port: %v", err)
+	for attempt := 0; attempt < 100; attempt++ {
+		conn, err := net.ListenPacket("udp", host+":0")
+		if err != nil {
+			t.Fatalf("testkit: probe free udp port: %v", err)
+		}
+		addr := conn.LocalAddr().String()
+		if err := conn.Close(); err != nil {
+			t.Fatalf("testkit: close probe socket: %v", err)
+		}
+		_, port, err := net.SplitHostPort(addr)
+		if err != nil {
+			t.Fatalf("testkit: probe address %q: %v", addr, err)
+		}
+		usedPortsMu.Lock()
+		_, seen := usedPorts[port]
+		if !seen {
+			usedPorts[port] = struct{}{}
+		}
+		usedPortsMu.Unlock()
+		if !seen {
+			return addr
+		}
 	}
-	addr := conn.LocalAddr().String()
-	if err := conn.Close(); err != nil {
-		t.Fatalf("testkit: close probe socket: %v", err)
-	}
-	return addr
+	t.Fatalf("testkit: no unused UDP port after 100 probes on %s", host)
+	return ""
 }
 
 // UDPBound reports whether something is bound on addr right now. It is the

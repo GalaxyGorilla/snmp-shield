@@ -227,7 +227,11 @@ func (p *proxyProc) awaitFront(addr string, timeout time.Duration) error {
 			p.mu.Lock()
 			err := p.waitErr
 			p.mu.Unlock()
-			return fmt.Errorf("%s exited before binding %s (%v)", p.name, addr, err)
+			out := ""
+			if p.log != nil {
+				out = p.log.String()
+			}
+			return fmt.Errorf("%s exited before binding %s (%v); output:\n%s", p.name, addr, err, out)
 		default:
 		}
 		if testkit.UDPBound(addr) {

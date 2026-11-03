@@ -116,18 +116,24 @@ would be ten minutes of edit loop. The gate is therefore a *release checklist
 item*, not a CI one — this repository has no CI by design.
 
 The budget is **per test**, so a full `make soak` takes about 40 minutes
-(four tests). A full run on 2026-10-29:
+(four tests). A full run on 2026-11-03:
 
 ```
-steady state   10m0s, 27386 requests, worst round trip 39ms,
-               goroutines 26 (baseline 26, peak 26), live heap 0.9MiB -> 1.1MiB
-HA failover    10m0s, failover after 8.092s (4 failures), 17177 answers after
-               the kill, final streak 17177, teardown back to baseline
-rate limiter   10m0s, 1036288 admitted / 4238498006 refused, table 4096/4096,
+steady state   10m0s, 28217 requests, worst round trip 60ms,
+               goroutines 27 (baseline 27, peak 27), live heap 0.9MiB -> 1.1MiB
+HA failover    10m0s, failover after 12.143s (6 failures), 16558 answers after
+               the kill, final streak 16558
+rate limiter   10m0s, 1081344 admitted / 4422862393 refused, table 4096/4096,
                goroutines 2, heap flat
-multi-agent    20s quick pass, 1850 requests, goroutines 11 -> 11,
-               live heap 1.0MiB -> 1.1MiB (full 10m is a release item)
+multi-agent    10m0s, 51700 requests, 25850 trap rounds, worst round trip 25ms,
+               goroutines 15 (baseline 15, peak 15), live heap 1.1MiB -> 3.1MiB,
+               traps a=1034 b=1034
 ```
+
+The first full run hit the old 30-minute package budget after the third test
+started; `make soak` now uses `-timeout 60m`, because three 10-minute proxy
+tests plus setup exceed 30 minutes. The multi-agent row was then run at the
+full 10-minute budget on its own and passed.
 
 That is the shape the numbers should have: flat goroutines, a heap that does
 not track the request count, an outage measured in seconds, and a rate-limiter

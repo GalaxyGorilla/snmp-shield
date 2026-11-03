@@ -76,7 +76,7 @@ conformance-required:
 # by default; SOAK_DURATION overrides it (e.g. `make soak SOAK_DURATION=90s`).
 soak:
 	SNMP_SHIELD_SOAK=1 SNMP_SHIELD_SOAK_DURATION=$${SOAK_DURATION:-10m} \
-		$(GO) test ./internal/access ./internal/proxy -run 'TestSoak' -count=1 -timeout 30m -v
+		$(GO) test ./internal/access ./internal/proxy -run 'TestSoak' -count=1 -timeout 60m -v
 
 # release builds a stripped static binary for appliance deployment.
 release:

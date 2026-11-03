@@ -210,6 +210,18 @@ func (m *Metrics) Handler() http.Handler {
 	return promhttp.HandlerFor(m.reg, promhttp.HandlerOpts{})
 }
 
+// PerAgentCounterList returns the per-agent counters in the fixed MIB
+// table order (requests forwarded/errors, notifications relayed/filtered,
+// drops, ACL denied, writes denied, rate limited). It is the same order
+// for the aggregate and for a ForAgent view.
+func (m *Metrics) PerAgentCounterList() []prometheus.Counter {
+	return []prometheus.Counter{
+		m.ReqForwarded, m.ReqErrors,
+		m.NotifsRelayed, m.NotifsFiltered,
+		m.DropTotal, m.ACLDenied, m.WritesDenied, m.RateLimited,
+	}
+}
+
 // CounterList returns the counters in the fixed SNMP MIB row order
 // (.20.1..n): frames sent/received, bytes sent/received, requests
 // forwarded/errors, notifications relayed/filtered, drops, reconnects,

@@ -72,7 +72,7 @@ func newSNMPMetricsAgent(opts Options, met *observ.Metrics) *snmpmetrics.Agent {
 	if ver == "" {
 		ver = "dev"
 	}
-	return snmpmetrics.New(snmpmetrics.Config{
+	cfg := snmpmetrics.Config{
 		Community:  m.Community,
 		BaseOID:    m.BaseOID,
 		Version:    ver,
@@ -80,7 +80,25 @@ func newSNMPMetricsAgent(opts Options, met *observ.Metrics) *snmpmetrics.Agent {
 		SecMode:    opts.Config.Security.Mode,
 		TunnelMode: opts.Config.Tunnel.Mode,
 		Endpoints:  strings.Join(opts.Config.DialEndpoints(), ","),
-	}, met.CounterList(), met.ForwardLatency, opts.Log)
+	}
+	if opts.Config.HasAgents() {
+		for _, a := range opts.Config.Agents {
+			name := a.EffectiveName()
+			view := met.ForAgent(name)
+			cfg.Agents = append(cfg.Agents, snmpmetrics.AgentRow{
+				Name:     name,
+				Counters: view.PerAgentCounterList(),
+				Latency:  view.ForwardLatency,
+			})
+		}
+	} else {
+		cfg.Agents = []snmpmetrics.AgentRow{{
+			Name:     "default",
+			Counters: met.PerAgentCounterList(),
+			Latency:  met.ForwardLatency,
+		}}
+	}
+	return snmpmetrics.New(cfg, met.CounterList(), met.ForwardLatency, opts.Log)
 }
 
 // serveSNMPMetrics runs the SNMP MIB listener until stop is closed.
@@ -611,10 +629,6 @@ func runGatewaySingle(ctx context.Context, opts Options, met *observ.Metrics) er
 // The entries share only the process, config file, log and metrics
 // registry; no datagram crosses them.
 func runGatewayAgents(ctx context.Context, opts Options, met *observ.Metrics) error {
-	filt, ferr := opts.Config.TrapFilter()
-	if ferr != nil {
-		return ferr
-	}
 	gctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -643,11 +657,22 @@ func runGatewayAgents(ctx context.Context, opts Options, met *observ.Metrics) er
 		wg.Wait()
 		return err
 	}
+	// tsm-gateway: one front-session budget for the whole process, not
+	// one per entry. The appliance sets tunnel.max_sessions to the total
+	// it is willing to hold across all agents.
+	var tsmLimiter *tsm.SessionLimiter
+	if opts.Config.Security.Mode == "tsm-gateway" {
+		tsmLimiter = tsm.NewSessionLimiter(opts.Config.Tunnel.MaxSessions)
+	}
 
 	for _, a := range opts.Config.Agents {
 		name := a.EffectiveName()
 		gw := opts.Config.EffectiveGateway(a)
 		sec := opts.Config.EffectiveSecurity(a)
+		filt, ferr := opts.Config.TrapFilterFor(a)
+		if ferr != nil {
+			return abort(fmt.Errorf("agent %s: notifications.filter: %w", name, ferr))
+		}
 		agentMet := met.ForAgent(name)
 		holder := holders[name]
 		if holder == nil {
@@ -677,6 +702,7 @@ func runGatewayAgents(ctx context.Context, opts Options, met *observ.Metrics) er
 			if err != nil {
 				return abort(fmt.Errorf("agent %s: %w", name, err))
 			}
+			tr.SetSessionLimiter(tsmLimiter)
 			launch(name, holder, func(done <-chan struct{}) error { return tr.Run(done) }, tr.SetAccess)
 		default: // usm-gateway
 			store, err := cache.Open(sec.EngineStore)

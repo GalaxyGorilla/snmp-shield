@@ -119,8 +119,8 @@ appliance-level orchestration remains outside this repository.
 **Several agents, one gateway.** The gateway role accepts an `agents:` list:
 one process, one config, one metrics endpoint, N independent
 listener↔agent pairs. Each entry has its own access policy, security
-(USM users/engine, TSM material), optional TLS and optional trap legs;
-the security mode is process-wide. The two-proxy shape stays one pair per
+(USM users/engine, TSM material), optional TLS, optional trap legs and
+optional notification filter; the security mode is process-wide. The two-proxy shape stays one pair per
 agent. Any number of managers can use
 each listener. The invariant is **front listener ↔ server**, not client ↔
 server: many clients can share one listener, and one client can use several
@@ -408,7 +408,8 @@ with `validate --json`, and offer a "test connection" button backed by
 - **SNMP metrics interface** — every role can expose its health over
   SNMP itself: `metrics.listen_addr` (or `--metrics-snmp-listen`)
   serves a small read-only SNMPv2c agent (GET/GETNEXT: identity,
-  tunnel state, counters) and `metrics.trap_sink_addr` (or
+  tunnel state, counters, and a per-agent `.40` table with name,
+  per-agent counters and latency) and `metrics.trap_sink_addr` (or
   `--metrics-snmp-trap-sink`) emits v2c traps on tunnel lifecycle
   changes (up/down, HA failover). `metrics.community` (default
   "public") and `metrics.base_oid` apply to both. Prometheus stays

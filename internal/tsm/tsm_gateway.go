@@ -82,6 +82,7 @@ type TSMGateway struct {
 	cfg         config.GatewayRole
 	sec         config.Security
 	maxSessions int
+	limiter     *SessionLimiter
 	log         *zap.Logger
 	met         *observ.Metrics
 	filtr       *notifyfilter.Filter // notification filter (nil = allow all)
@@ -123,6 +124,51 @@ type TSMGateway struct {
 // passes 0 (config default is 64; this is the belt for direct callers).
 const defaultMaxSessions = 64
 
+// SessionLimiter bounds concurrent front sessions across one or more
+// TSMGateway instances. A shared limiter gives the whole process one
+// budget; nil falls back to the per-gateway max_sessions.
+type SessionLimiter struct {
+	sem chan struct{}
+	max int
+}
+
+// NewSessionLimiter creates a limiter. A non-positive max uses the
+// default (64), matching the single-gateway behavior.
+func NewSessionLimiter(max int) *SessionLimiter {
+	if max <= 0 {
+		max = defaultMaxSessions
+	}
+	return &SessionLimiter{sem: make(chan struct{}, max), max: max}
+}
+
+// Acquire takes a slot without blocking. False means the cap is reached.
+func (l *SessionLimiter) Acquire() bool {
+	if l == nil {
+		return true
+	}
+	select {
+	case l.sem <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+// Release returns a slot.
+func (l *SessionLimiter) Release() {
+	if l != nil {
+		<-l.sem
+	}
+}
+
+// Max is the configured cap.
+func (l *SessionLimiter) Max() int {
+	if l == nil {
+		return 0
+	}
+	return l.max
+}
+
 // frontIdleTimeout bounds how long one TSM front session may hold its
 // session-cap slot without traffic. DTLS sessions carry no keepalive of their
 // own, so without this a vanished peer's slot is never released. It is
@@ -159,6 +205,10 @@ func NewTSMGateway(cfg config.GatewayRole, sec config.Security, lcfg tunnel.List
 // SetAccess installs (or replaces) the front-leg access policy. The policy
 // is read per datagram, so a reload takes effect on the next request.
 func (g *TSMGateway) SetAccess(h *access.Holder) { g.access = h }
+
+// SetSessionLimiter installs a shared front-session limiter. Call before
+// Run. nil keeps the per-gateway max_sessions behavior.
+func (g *TSMGateway) SetSessionLimiter(l *SessionLimiter) { g.limiter = l }
 
 // Run binds the raw DTLS front leg, the clear agent socket and
 // (optionally) the clear trap listener, and serves until done is closed.
@@ -207,7 +257,10 @@ func (g *TSMGateway) Run(done <-chan struct{}) error {
 	if maxSessions <= 0 {
 		maxSessions = defaultMaxSessions
 	}
-	sem := make(chan struct{}, maxSessions)
+	limiter := g.limiter
+	if limiter == nil {
+		limiter = NewSessionLimiter(maxSessions)
+	}
 	var wg sync.WaitGroup
 	for {
 		conn, aerr := l.Accept()
@@ -226,16 +279,14 @@ func (g *TSMGateway) Run(done <-chan struct{}) error {
 			}
 			return fmt.Errorf("tsm gateway: front accept: %w", aerr)
 		}
-		select {
-		case sem <- struct{}{}:
-		default:
+		if !limiter.Acquire() {
 			_ = conn.Close()
 			if g.met != nil {
 				g.met.SessionsDenied.Inc()
 			}
 			if g.log != nil {
 				g.log.Warn("tsm gateway session refused: session cap reached",
-					zap.Int("max_sessions", maxSessions), zap.String("peer", conn.RemoteAddr().String()))
+					zap.Int("max_sessions", limiter.Max()), zap.String("peer", conn.RemoteAddr().String()))
 			}
 			continue
 		}
@@ -247,7 +298,7 @@ func (g *TSMGateway) Run(done <-chan struct{}) error {
 		safego.Go(g.log, "tsm gateway front session", func() {
 			defer wg.Done()
 			defer func() {
-				<-sem
+				limiter.Release()
 				if g.met != nil {
 					g.met.SessionsActive.Dec()
 				}

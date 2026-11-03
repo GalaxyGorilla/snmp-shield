@@ -15,7 +15,7 @@ import (
 
 // testAgent builds an agent with two counters and starts its listener on
 // an ephemeral port. Returns the agent and its listen address.
-func testAgent(t *testing.T, community string) (*Agent, string) {
+func testAgent(t *testing.T, community string, rows ...AgentRow) (*Agent, string) {
 	t.Helper()
 	c1 := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_c1"})
 	c1.Add(42)
@@ -28,6 +28,7 @@ func testAgent(t *testing.T, community string) (*Agent, string) {
 		SecMode:    "usm-translate",
 		TunnelMode: "dtls",
 		Endpoints:  "10.0.0.1:19611,10.0.0.2:19611",
+		Agents:     rows,
 	}, []prometheus.Counter{c1, c2}, nil, zap.NewNop())
 	addr := freeUDPPort(t)
 	stop := make(chan struct{})
@@ -380,5 +381,88 @@ func TestTunnelUpScalarsAndTraps(t *testing.T) {
 	_, vbs = parseResponse(t, resp)
 	if got := vbs[base+".10"]; got == nil || string(got) != string(msg.AppendInteger(nil, 0)) {
 		t.Fatalf("tunnelUp after down: got %v, want 0", got)
+	}
+}
+
+// TestSNMPAgentTable pins the per-agent .40 table: rows sort by name, the
+// name and counter columns resolve, GETNEXT enters the table after .31,
+// and the last cell ends the MIB.
+func TestSNMPAgentTable(t *testing.T) {
+	c1 := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_agent_c1"})
+	c1.Add(11)
+	c2 := prometheus.NewCounter(prometheus.CounterOpts{Name: "test_agent_c2"})
+	c2.Add(22)
+	rowB := AgentRow{Name: "beta", Counters: []prometheus.Counter{c1, c2}}
+	rowA := AgentRow{Name: "alpha", Counters: []prometheus.Counter{c1, c2}}
+	_, addr := testAgent(t, "metcomm", rowB, rowA)
+	base := "1.3.6.1.4.1.58427.1"
+
+	get := func(oid string) []byte {
+		t.Helper()
+		resp := exchange(t, addr, buildGetDg(t, "metcomm", msg.PDUGetRequest, oid))
+		if resp == nil {
+			t.Fatalf("no response to GET %s", oid)
+		}
+		_, vbs := parseResponse(t, resp)
+		val, ok := vbs[oid]
+		if !ok {
+			t.Fatalf("response missing %s", oid)
+		}
+		return val
+	}
+	strVal := func(oid string) string {
+		t.Helper()
+		v := get(oid)
+		if len(v) < 2 || v[0] != 0x04 {
+			t.Fatalf("%s is not an OCTET STRING: %v", oid, v)
+		}
+		return string(v[2:])
+	}
+	intVal := func(oid string) int64 {
+		t.Helper()
+		v := get(oid)
+		if len(v) < 2 || v[0] != 0x02 {
+			t.Fatalf("%s is not an INTEGER: %v", oid, v)
+		}
+		var n int64
+		for _, b := range v[2:] {
+			n = n<<8 | int64(b)
+		}
+		return n
+	}
+
+	if got := strVal(base + ".40.1.1"); got != "alpha" {
+		t.Fatalf("row 1 name = %q, want alpha (sorted)", got)
+	}
+	if got := strVal(base + ".40.2.1"); got != "beta" {
+		t.Fatalf("row 2 name = %q, want beta", got)
+	}
+	if got := intVal(base + ".40.1.2"); got != 11 {
+		t.Fatalf("row 1 requests = %d, want 11", got)
+	}
+	if got := intVal(base + ".40.2.3"); got != 22 {
+		t.Fatalf("row 2 errors = %d, want 22", got)
+	}
+
+	// GETNEXT from .31 enters the table at the first row.
+	resp := exchange(t, addr, buildGetDg(t, "metcomm", msg.PDUGetNextRequest, base+".31"))
+	if resp == nil {
+		t.Fatal("no response to GETNEXT after .31")
+	}
+	_, vbs := parseResponse(t, resp)
+	if _, ok := vbs[base+".40.1.1"]; !ok {
+		t.Fatalf("GETNEXT after .31 did not enter the agent table: %v", vbs)
+	}
+
+	// GETNEXT past the last cell is endOfMibView.
+	last := base + ".40.2.11"
+	resp = exchange(t, addr, buildGetDg(t, "metcomm", msg.PDUGetNextRequest, last))
+	if resp == nil {
+		t.Fatal("no response to GETNEXT at end of agent table")
+	}
+	_, vbs = parseResponse(t, resp)
+	val, ok := vbs[last]
+	if !ok || len(val) != 2 || val[0] != 0x80 {
+		t.Fatalf("expected endOfMibView after %s, got %v", last, val)
 	}
 }

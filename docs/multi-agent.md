@@ -1,9 +1,11 @@
 # Multiple agents per instance — gateway-only co-hosting
 
-**Status:** Phase 1 implemented (2026-11-03): `agents:` list for the
-gateway role, per-entry access/security/TLS, per-entry trap legs,
-per-agent Prometheus labels, per-entry `validate`/`selftest` and SIGHUP
-reload. Phase 2 follow-ups are listed in §11.
+**Status:** Phase 1 + Phase 2 core implemented (2026-11-03): `agents:`
+list for the gateway role, per-entry access/security/TLS/notifications,
+per-entry trap legs, per-agent Prometheus labels and SNMP MIB table,
+one process-wide TSM session cap, per-entry `validate`/`selftest` and
+SIGHUP reload, and a two-entry conformance scenario. JSON status and a
+shared trap listener remain follow-ups (§11).
 **Decision:** only the gateway part of backlog item S1 is implemented.
 The two-proxy tunnel stays one pair per agent.
 
@@ -231,8 +233,9 @@ security boundary, not the process.
   community.
 - Client certificates are authenticated per DTLS session; the entry is
   selected by the listener the client connected to.
-- `tunnel.max_sessions` is per listener today. With N entries the process
-  total is N × cap; decide whether Phase 1 adds a process-wide cap.
+- `tunnel.max_sessions` is one process-wide budget shared by all entries
+  in the multi-agent runner (`tsm.SessionLimiter`), not N × cap. The
+  single-agent path uses the same value for its one listener.
 
 ### `usm-manager-gateway`
 
@@ -266,9 +269,9 @@ Later optimization: one shared trap listener. With per-entry security it
 needs a source→entry mapping (agent IP or engineID) to pick the right
 user/engine/credentials. Do not block Phase 1 on it.
 
-The notification-only shape stays a single-entry process-global feature
-for now: one trap listener already aggregates many devices. Per-agent
-notification policy can be a later extension.
+Per-entry `notifications.filter` is supported (see §6.2); the
+notification-only shape remains a single-entry process-global feature
+for now: one trap listener already aggregates many devices.
 
 ## 9. Metrics and status
 
@@ -306,11 +309,16 @@ Not implemented in Phase 1. A stable JSON document listing every entry:
 
 No communities, USM secrets, PSKs, or key material.
 
-### SNMP MIB (Phase 2)
+### SNMP MIB
 
-- Keep the process-level scalars.
-- Add a per-agent table later (indexed by entry name) if operators need
-  it. Do not block Phase 1.
+- The process-level scalars stay as they are.
+- Per-agent table `<Base>.40.<n>.<col>`: `.1` agent name, `.2`–`.9` the
+  eight per-agent counters in `PerAgentCounterList` order (requests
+  forwarded/errors, notifications relayed/filtered, drops, ACL denied,
+  writes denied, rate limited), `.10` latency count, `.11` latency sum.
+- Rows are sorted by agent name. Single-target roles expose one row
+  named `default`.
+- The table is read-only GET/GETNEXT like the rest of the MIB.
 
 ## 10. Lifecycle
 
@@ -320,12 +328,13 @@ No communities, USM secrets, PSKs, or key material.
   - `usm-gateway`: one `cache.EngineClock` and one `[]usm.Profile`
     user list; each translator builds its own key cache from them;
   - `tsm-gateway`: one `tunnel.ListenerConfig`;
-  - `usm-manager-gateway`: per-entry `Security` (Phase 2).
+  - `usm-manager-gateway`: per-entry `Security`.
 - Shutdown cancels all entries and waits; one slow entry must not prevent
   the others from stopping.
 - SIGHUP:
   - reload each entry's `access` by `name`;
-  - report listener/agent/security changes as `(restart required)`;
+  - report listener/agent/security/TLS/notifications/trap changes as
+    `(restart required)`;
   - adding/removing an entry is restart-only in Phase 1;
   - an invalid file keeps the running configuration.
 - `validate` iterates entries: config, local resources, address
@@ -341,29 +350,33 @@ No communities, USM secrets, PSKs, or key material.
 - `agents:` list for the gateway role, mutually exclusive with the
   single-agent `gateway.listen_addr` / `gateway.agent_addr` pair.
 - Per-entry `access`, `security` (users, engine ID/store, TSM identities,
-  trap community) and `tls`; `engine_store_dir` derives
-  `<dir>/<name>.json`.
+  trap community), `tls` and `notifications` filter; `engine_store_dir`
+  derives `<dir>/<name>.json`; duplicate stores are rejected.
 - Runner builds one translator per entry with per-entry security/engine/
-  TLS; a bind or construction failure aborts startup.
+  TLS/filter; a bind or construction failure aborts startup.
 - Per-entry trap legs.
 - SIGHUP applies access policy per entry by name; listener/agent/security/
-  TLS/trap changes are reported as restart-required; adding/removing an
-  entry is restart-only.
+  TLS/notifications/trap changes are reported as restart-required;
+  adding/removing an entry is restart-only.
 - `validate`/`selftest` iterate entries; JSON checks carry an `agent`
   field.
 - Per-agent Prometheus label; single-target roles use `agent="default"`.
+- Per-agent SNMP MIB table (`.40.<n>`) with name, the eight per-agent
+  counters and latency count/sum.
+- `tsm-gateway`: one process-wide `tunnel.max_sessions` budget shared by
+  all entries (`tsm.SessionLimiter`), not N × cap.
 - Tests: two-entry USM e2e (independent policies, no cross-entry traffic,
-  per-agent metrics), per-entry trap delivery, SIGHUP access reload,
-  TSM/manager-gateway bind smoke tests, config validation, per-entry
-  selftest.
+  per-agent metrics), per-entry trap delivery and filtering, SIGHUP access
+  reload, TSM/manager-gateway bind smoke tests, config validation,
+  per-entry selftest, MIB table GET/GETNEXT, shared session limiter, and
+  a two-entry conformance scenario across all available peers.
 
 ### Phase 2 — follow-ups
 
-- MIB table / JSON status integration.
+- JSON status integration.
 - Shared trap listener (optional; needs source→entry mapping with
   per-entry security).
-- Per-entry `notifications.filter`.
-- TSM front-session cap: per entry or one process-wide budget?
+- Two-entry TSM conformance scenario; mutation/soak coverage.
 
 ## 12. Test plan
 
@@ -371,21 +384,25 @@ Phase 1 implemented the unit and E2E items below; conformance, mutation
 and dedicated soak additions remain Phase 2.
 
 - **Unit**
-  - config: mutual exclusion, unique names/listeners, per-entry trap
-    pairs, mode-specific requirements, access compilation;
-  - reload diff by name.
+  - config: mutual exclusion, unique names/listeners/stores, per-entry
+    trap pairs, mode-specific requirements, access compilation,
+    per-entry notification filters;
+  - reload diff by name;
+  - MIB table row order, name/counter resolution and GETNEXT.
 - **E2E**
   - two entries with different access policies;
   - cross-entry isolation: a client admitted on listener A cannot reach
     agent B;
   - one dead agent does not affect the other;
-  - per-entry trap direction;
+  - per-entry trap direction and filter;
   - SIGHUP changes one entry only;
   - `selftest` reports each entry;
   - metrics carry the right `agent` label.
 - **Conformance**
-  - extend the matrix with a two-entry `usm-gateway` and `tsm-gateway`
-    scenario; at least gosnmp + net-snmp.
+  - implemented: `TestUSMGatewayAgents` drives a two-entry `agents:`
+    config with every available peer (gosnmp, net-snmp 5.6/5.9, pysnmp,
+    node); each front listener returns its own device.
+  - Phase 2: a two-entry `tsm-gateway` scenario.
 - **Mutation checks**
   - removing the per-entry access holder makes the cross-policy test
     fail;
@@ -396,11 +413,11 @@ and dedicated soak additions remain Phase 2.
 
 ## 13. Open questions
 
-1. MIB table shape and index (entry name vs numeric index).
-2. TSM front-session cap: per entry or one process-wide budget?
-3. Per-entry `notifications.filter` (Phase 2).
-4. Shared trap listener (Phase 2; needs source→entry mapping with
+1. JSON status integration (Phase 2).
+2. Shared trap listener (Phase 2; needs source→entry mapping with
    per-entry security).
+3. Conformance-matrix, mutation and soak coverage for the multi-agent
+   shape (Phase 2).
 
 ## 14. Decision log
 
@@ -417,6 +434,8 @@ and dedicated soak additions remain Phase 2.
   gateway mode; mixed modes are separate instances.
 - **Per-agent Prometheus label:** accepted compatibility change;
   single-agent configs use `agent="default"`.
+- **TSM front-session cap:** one process-wide `tunnel.max_sessions`
+  budget shared by all entries, not one cap per entry.
 - **Phase 1 implemented (2026-11-03):** all gateway modes (one mode per
-  process), per-entry security/access/trap legs, per-agent metrics label,
-  per-entry validate/selftest/reload.
+  process), per-entry security/access/trap legs/filters, per-agent metrics
+  label and MIB table, per-entry validate/selftest/reload.

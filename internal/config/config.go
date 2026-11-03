@@ -170,6 +170,9 @@ type AgentEntry struct {
 	// Security overrides parts of the process-wide security block. The
 	// mode is process-wide and cannot be changed per entry.
 	Security *Security `yaml:"security"`
+	// Notifications overrides the process-wide notification filter for
+	// this entry's trap legs.
+	Notifications *Notifications `yaml:"notifications"`
 	// TLS is the per-entry certificate material for tsm-gateway; empty
 	// fields fall back to the process-wide tunnel block.
 	TLS *AgentTLS `yaml:"tls"`
@@ -536,6 +539,24 @@ func (c *Config) EffectiveAccess(a AgentEntry) Access {
 		return *a.Access
 	}
 	return c.Access
+}
+
+// EffectiveNotifications returns the per-entry notification filter,
+// falling back to the process-wide block.
+func (c *Config) EffectiveNotifications(a AgentEntry) *Notifications {
+	if a.Notifications != nil {
+		return a.Notifications
+	}
+	return &c.Notifications
+}
+
+// TrapFilterFor builds the notification filter for one gateway entry.
+func (c *Config) TrapFilterFor(a AgentEntry) (*notifyfilter.Filter, error) {
+	n := c.EffectiveNotifications(a)
+	if n == nil || n.Filter == nil {
+		return nil, nil
+	}
+	return notifyfilter.New(n.Filter.Action, n.Filter.Oids)
 }
 
 // EffectiveTLS returns the per-entry TLS material for tsm-gateway,
@@ -950,6 +971,9 @@ func (c *Config) validateGatewayAgents() error {
 		}
 		if err := c.EffectiveAccess(a).validate(); err != nil {
 			return fmt.Errorf("agents[%d] (%s): %w", i, name, err)
+		}
+		if _, err := c.TrapFilterFor(a); err != nil {
+			return fmt.Errorf("agents[%d] (%s): notifications.filter: %w", i, name, err)
 		}
 	}
 	return nil

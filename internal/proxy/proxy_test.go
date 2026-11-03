@@ -1625,3 +1625,160 @@ func TestRunGatewayAgentsManagerGatewayBinds(t *testing.T) {
 	defer cancel()
 	stopRun(t, cancel, errCh, "gateway agents manager-gateway")
 }
+
+// TestSNMPMetricsAgentAgentTable pins the wiring from the gateway's
+// agents: list into the per-agent .40 MIB table.
+func TestSNMPMetricsAgentAgentTable(t *testing.T) {
+	cfg := &config.Config{Role: config.RoleGateway, Security: config.Security{Mode: "usm-gateway"}}
+	cfg.Defaults()
+	cfg.Metrics.ListenAddr = freeUDPPort(t)
+	cfg.Agents = []config.AgentEntry{
+		{Name: "plc", ListenAddr: "127.0.0.1:1161", AgentAddr: "10.0.0.1:161"},
+		{Name: "ahu", ListenAddr: "127.0.0.1:1162", AgentAddr: "10.0.0.2:161"},
+	}
+	met := observ.NewMetrics()
+	met.ForAgent("plc").ReqForwarded.Inc()
+
+	a := newSNMPMetricsAgent(Options{Config: cfg, Log: zap.NewNop(), Version: "test"}, met)
+	if a == nil {
+		t.Fatal("newSNMPMetricsAgent returned nil")
+	}
+	stop := make(chan struct{})
+	ready := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() { errCh <- a.Serve(cfg.Metrics.ListenAddr, stop, ready) }()
+	select {
+	case <-ready:
+	case err := <-errCh:
+		t.Fatalf("metrics agent failed to start: %v", err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for metrics agent")
+	}
+	defer func() {
+		close(stop)
+		<-errCh
+	}()
+
+	g := gosnmpV2c(t, cfg.Metrics.ListenAddr)
+	defer g.Conn.Close()
+	get := func(oid string) gosnmp.SnmpPDU {
+		t.Helper()
+		res, err := g.Get([]string{oid})
+		if err != nil {
+			t.Fatalf("GET %s: %v", oid, err)
+		}
+		if len(res.Variables) != 1 {
+			t.Fatalf("GET %s returned %d variables", oid, len(res.Variables))
+		}
+		return res.Variables[0]
+	}
+	base := ".1.3.6.1.4.1.58427.1.40."
+	str := func(p gosnmp.SnmpPDU) string {
+		switch v := p.Value.(type) {
+		case string:
+			return v
+		case []byte:
+			return string(v)
+		default:
+			return fmt.Sprint(v)
+		}
+	}
+	// Rows are sorted by name: ahu first, plc second.
+	if got := str(get(base + "1.1")); got != "ahu" {
+		t.Fatalf("row 1 name = %q, want ahu", got)
+	}
+	if got := str(get(base + "2.1")); got != "plc" {
+		t.Fatalf("row 2 name = %q, want plc", got)
+	}
+	if got := fmt.Sprint(get(base + "2.2").Value); got != "1" {
+		t.Fatalf("plc requests = %v, want 1", get(base+"2.2").Value)
+	}
+}
+
+// TestRunGatewayAgentsTrapFilters pins per-entry notification filtering:
+// the same trap is allowed by one entry and dropped by the other.
+func TestRunGatewayAgentsTrapFilters(t *testing.T) {
+	agentA := fakeAgent(t, "127.0.0.1:0")
+	defer agentA.Close()
+	agentB := fakeAgent(t, "127.0.0.1:0")
+	defer agentB.Close()
+
+	sinkA := testkit.NewV3Sink(t, testkit.V3SinkOptions{
+		User: "proxy", AuthPass: "authpass", PrivPass: "privpass",
+	})
+	sinkB := testkit.NewV3Sink(t, testkit.V3SinkOptions{
+		User: "proxy", AuthPass: "authpass", PrivPass: "privpass",
+	})
+
+	cfg := &config.Config{Role: config.RoleGateway}
+	cfg.Defaults()
+	cfg.Security.Mode = "usm-gateway"
+	cfg.Security.Users = testUsers()
+	cfg.Security.EngineStoreDir = t.TempDir()
+	cfg.Agents = []config.AgentEntry{
+		{
+			Name:           "plc",
+			ListenAddr:     freeUDPPort(t),
+			AgentAddr:      agentA.LocalAddr().String(),
+			TrapListenAddr: freeUDPPort(t),
+			TrapSinkAddr:   sinkA.Addr,
+			Notifications: &config.Notifications{Filter: &config.NotifyFilter{
+				Action: "allow", Oids: []string{"1.3.6.1.6.3.1.1.5.1"},
+			}},
+		},
+		{
+			Name:           "ahu",
+			ListenAddr:     freeUDPPort(t),
+			AgentAddr:      agentB.LocalAddr().String(),
+			TrapListenAddr: freeUDPPort(t),
+			TrapSinkAddr:   sinkB.Addr,
+			Notifications: &config.Notifications{Filter: &config.NotifyFilter{
+				Action: "deny", Oids: []string{"1.3.6.1.6.3.1.1.5.1"},
+			}},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config validate: %v", err)
+	}
+	cancel, errCh := startGatewayAgents(t, cfg, observ.NewMetrics(), nil)
+	defer cancel()
+
+	oidBytes, err := msg.EncodeOID("1.3.6.1.6.3.1.1.5.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vb1 := msg.AppendTLV(nil, 0x30, append(
+		msg.AppendTLV(nil, 0x06, msg.OIDSysUpTime),
+		msg.AppendTLV(nil, 0x43, []byte{0, 0, 0, 1})...))
+	vb2 := msg.AppendTLV(nil, 0x30, append(
+		msg.AppendTLV(nil, 0x06, msg.OIDSnmpTrapOID),
+		msg.AppendTLV(nil, 0x06, oidBytes)...))
+	pdu := msg.BuildPDU(msg.PDUSNMPv2Trap, 0, 0, 0, append(vb1, vb2...))
+	dg, err := msg.BuildV1V2c(msg.Version2c, []byte("public"), pdu)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for _, a := range cfg.Agents {
+		dst, err := net.ResolveUDPAddr("udp", a.TrapListenAddr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := conn.WriteTo(dg, dst); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sinkA.WaitForOID(t, "1.3.6.1.6.3.1.1.5.1", 10*time.Second)
+	time.Sleep(200 * time.Millisecond)
+	if got := sinkB.Count(); got != 0 {
+		t.Fatalf("denied trap reached ahu sink: %d notification(s)", got)
+	}
+
+	stopRun(t, cancel, errCh, "gateway agents")
+}

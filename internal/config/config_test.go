@@ -777,6 +777,9 @@ func TestValidateGatewayAgentsRejects(t *testing.T) {
 		{"invalid per-entry access", func(c *Config) {
 			c.Agents[0].Access = &Access{ReadOnly: true, WritePolicy: &WritePolicyCfg{Default: "allow"}}
 		}},
+		{"invalid per-entry filter", func(c *Config) {
+			c.Agents[0].Notifications = &Notifications{Filter: &NotifyFilter{Action: "bogus", Oids: []string{"1.3.6"}}}
+		}},
 		{"missing users", func(c *Config) { c.Security.Users = nil }},
 		{"missing engine store", func(c *Config) { c.Security.EngineStoreDir = "" }},
 		{"duplicate engine store", func(c *Config) {

@@ -50,9 +50,13 @@ agents:
       read_only: true
       allow: ["10.8.0.0/24"]
       rate_per_sec: 50
-    # Optional per-entry notification legs (both or neither).
+    # Optional per-entry notification legs (both or neither) and filter.
     trap_listen_addr: "10.0.0.10:162"
     trap_sink_addr: "10.8.0.5:162"
+    notifications:
+      filter:
+        action: allow
+        oids: ["1.3.6.1.4.1.8072"]
 
   - name: ahu
     listen_addr: "10.0.0.11:161"

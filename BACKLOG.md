@@ -42,22 +42,27 @@ daemon behavior.
 
 ## Done — scope (kept for reference)
 
-- **S1a Multiple agents per instance (gateway-only) — DONE (Phase 1,
-  2026-11-03).** The gateway role now accepts an `agents:` list: one
+- **S1a Multiple agents per instance (gateway-only) — DONE (Phase 1 +
+  Phase 2 core, 2026-11-03).** The gateway role now accepts an `agents:` list: one
   process, one config, one metrics endpoint, N independent
   listener↔agent pairs. Each entry has its own `access`, `security`
   (users, engine ID/store, TSM identities, trap community), optional
-  `tls`, and optional trap legs. `security.engine_store_dir` derives a
-  per-entry store as `<dir>/<name>.json`; an explicit `engine_store`
-  wins. One security mode per process. SIGHUP applies access changes per
-  entry by name; listener/agent/security/TLS/trap changes are
-  restart-required. `validate`/`selftest` iterate entries, and Prometheus
+  `tls`, optional trap legs and optional notification filter.
+  `security.engine_store_dir` derives a per-entry store as
+  `<dir>/<name>.json`; an explicit `engine_store` wins. One security mode
+  per process. TSM front sessions share one process-wide
+  `tunnel.max_sessions` budget. SIGHUP applies access changes per entry by
+  name; listener/agent/security/TLS/notifications/trap changes are
+  restart-required. `validate`/`selftest` iterate entries, Prometheus
   counters carry an `agent` label (single-target roles use
-  `agent="default"`). Design and implementation notes:
+  `agent="default"`), and the SNMP health MIB exposes a per-agent
+  `.40.<n>` table. Design and implementation notes:
   [docs/multi-agent.md](docs/multi-agent.md). Tests: two-entry USM e2e
   (independent policies, no cross-entry traffic, per-agent metrics),
-  per-entry trap delivery, SIGHUP access reload, TSM/manager-gateway
-  bind smoke tests, config validation, per-entry selftest.
+  per-entry trap delivery/filtering, SIGHUP access reload,
+  TSM/manager-gateway bind smoke tests, config validation, per-entry
+  selftest, MIB table GET/GETNEXT, two-entry conformance across all
+  available peers.
 
   The two-proxy shape stays one pair per agent: the custom tunnel frame has
   no agent selector, and adding one would turn the security tunnel into a

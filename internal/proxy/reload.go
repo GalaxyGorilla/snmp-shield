@@ -91,6 +91,9 @@ func applyReloadAgents(cur, next *config.Config, holders map[string]*access.Hold
 		if !reflect.DeepEqual(old.TLS, a.TLS) {
 			warnings = append(warnings, fmt.Sprintf("agent %s tls changed; restart required", name))
 		}
+		if !reflect.DeepEqual(old.Notifications, a.Notifications) {
+			warnings = append(warnings, fmt.Sprintf("agent %s notifications changed; restart required", name))
+		}
 		if old.TrapListenAddr != a.TrapListenAddr || old.TrapSinkAddr != a.TrapSinkAddr ||
 			old.TrapSinkCommunity != a.TrapSinkCommunity {
 			warnings = append(warnings, fmt.Sprintf("agent %s trap legs changed; restart required", name))

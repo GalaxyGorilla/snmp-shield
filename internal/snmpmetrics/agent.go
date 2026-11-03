@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,6 +40,21 @@ var errNotAVarbind = errors.New("snmpmetrics: varbind is not {OID, value}")
 //	<Base>.20.<n> counters     INTEGER, 1-based row per CounterList order
 //	<Base>.30  latencyCount    INTEGER, forwarded requests observed
 //	<Base>.31  latencySum      INTEGER, cumulative seconds, truncated
+//	<Base>.40.<n>.1  agentName           OCTET STRING
+//	<Base>.40.<n>.2  reqForwarded        INTEGER
+//	<Base>.40.<n>.3  reqErrors           INTEGER
+//	<Base>.40.<n>.4  notifsRelayed       INTEGER
+//	<Base>.40.<n>.5  notifsFiltered      INTEGER
+//	<Base>.40.<n>.6  drops               INTEGER
+//	<Base>.40.<n>.7  aclDenied           INTEGER
+//	<Base>.40.<n>.8  writesDenied        INTEGER
+//	<Base>.40.<n>.9  rateLimited         INTEGER
+//	<Base>.40.<n>.10 latencyCount        INTEGER
+//	<Base>.40.<n>.11 latencySum          INTEGER, cumulative seconds
+//
+// The per-agent table is sorted by agent name, so a row index is stable
+// for a given set of names. Consumers should match on .1 (name) when
+// entries are added or removed.
 //
 // Events subtree (traps):
 //
@@ -68,9 +84,19 @@ type Agent struct {
 	// semantics without importing testutil).
 	counters []prometheus.Counter
 	latency  prometheus.Histogram
+	agents   []AgentRow
 
 	mu       sync.Mutex
 	listener *net.UDPConn
+}
+
+// AgentRow is one row of the per-agent MIB table (.40.<n>). Counters are
+// in observ.Metrics.PerAgentCounterList order; Latency supplies the
+// count/sum columns. Rows are sorted by Name in New.
+type AgentRow struct {
+	Name     string
+	Counters []prometheus.Counter
+	Latency  prometheus.Histogram
 }
 
 // Config describes the agent identity and wiring.
@@ -82,6 +108,8 @@ type Config struct {
 	SecMode    string // security.mode
 	TunnelMode string // tunnel transport ("" for gateway roles)
 	Endpoints  string // comma-separated tunnel endpoints ("" for gateway)
+	// Agents is the optional per-agent table. Empty means no .40 subtree.
+	Agents []AgentRow
 }
 
 // New builds the metrics agent. counters/latency are the prometheus
@@ -97,6 +125,8 @@ func New(cfg Config, counters []prometheus.Counter, latency prometheus.Histogram
 	// Normalize: the dotted accessor form always carries a leading dot
 	// (".1.3.6..."), but EncodeOID rejects it — strip for encoding.
 	cfg.BaseOID = strings.TrimPrefix(cfg.BaseOID, ".")
+	agents := append([]AgentRow(nil), cfg.Agents...)
+	sort.Slice(agents, func(i, j int) bool { return agents[i].Name < agents[j].Name })
 	a := &Agent{
 		community:  cfg.Community,
 		base:       cfg.BaseOID,
@@ -110,6 +140,7 @@ func New(cfg Config, counters []prometheus.Counter, latency prometheus.Histogram
 		startedAt:  time.Now(),
 		counters:   counters,
 		latency:    latency,
+		agents:     agents,
 	}
 	a.curEndpoint.Store("")
 	return a
@@ -228,23 +259,9 @@ func (a *Agent) resolve(oid string) *varbind {
 	case a.base + ".11":
 		return str(a.curEndpoint.Load().(string))
 	case a.base + ".30":
-		if a.latency == nil {
-			return intv(0)
-		}
-		m := &dto.Metric{}
-		if a.latency.Write(m) != nil || m.Histogram == nil || m.Histogram.SampleCount == nil {
-			return intv(0)
-		}
-		return intv(int64(*m.Histogram.SampleCount))
+		return intv(histogramCount(a.latency))
 	case a.base + ".31":
-		if a.latency == nil {
-			return intv(0)
-		}
-		m := &dto.Metric{}
-		if a.latency.Write(m) != nil || m.Histogram == nil || m.Histogram.SampleSum == nil {
-			return intv(0)
-		}
-		return intv(int64(*m.Histogram.SampleSum))
+		return intv(histogramSum(a.latency))
 	}
 	// counters: .20.<n>, 1-based
 	if n, ok := counterArc(a.base+".20.", oid); ok {
@@ -258,7 +275,75 @@ func (a *Agent) resolve(oid string) *varbind {
 		}
 		return intv(int64(m.Counter.GetValue()))
 	}
+	// per-agent table: .40.<row>.<col>, 1-based
+	if row, col, ok := agentArc(a.base+".40.", oid); ok {
+		if row < 1 || row > int64(len(a.agents)) {
+			return nil
+		}
+		ag := a.agents[row-1]
+		switch col {
+		case 1:
+			return str(ag.Name)
+		case 2, 3, 4, 5, 6, 7, 8, 9:
+			i := int(col) - 2
+			if i >= len(ag.Counters) || ag.Counters[i] == nil {
+				return intv(0)
+			}
+			m := &dto.Metric{}
+			if ag.Counters[i].Write(m) != nil || m.Counter == nil {
+				return intv(0)
+			}
+			return intv(int64(m.Counter.GetValue()))
+		case 10:
+			return intv(histogramCount(ag.Latency))
+		case 11:
+			return intv(histogramSum(ag.Latency))
+		}
+		return nil
+	}
 	return nil
+}
+
+// agentArc parses the ".40.<row>.<col>" part of oid.
+func agentArc(prefix, oid string) (row, col int64, ok bool) {
+	if !strings.HasPrefix(oid, prefix) {
+		return 0, 0, false
+	}
+	parts := strings.Split(strings.TrimPrefix(oid, prefix), ".")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	r, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || r < 1 {
+		return 0, 0, false
+	}
+	c, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || c < 1 {
+		return 0, 0, false
+	}
+	return r, c, true
+}
+
+func histogramCount(h prometheus.Histogram) int64 {
+	if h == nil {
+		return 0
+	}
+	m := &dto.Metric{}
+	if h.Write(m) != nil || m.Histogram == nil || m.Histogram.SampleCount == nil {
+		return 0
+	}
+	return int64(*m.Histogram.SampleCount)
+}
+
+func histogramSum(h prometheus.Histogram) int64 {
+	if h == nil {
+		return 0
+	}
+	m := &dto.Metric{}
+	if h.Write(m) != nil || m.Histogram == nil || m.Histogram.SampleSum == nil {
+		return 0
+	}
+	return int64(*m.Histogram.SampleSum)
 }
 
 // counterArc parses the ".20.<n>" row of oid; ok when oid is exactly
@@ -335,6 +420,11 @@ func (a *Agent) objectIDs() []string {
 		out = append(out, a.base+".20."+strconv.Itoa(i+1))
 	}
 	out = append(out, a.base+".30", a.base+".31")
+	for i := range a.agents {
+		for col := 1; col <= 11; col++ {
+			out = append(out, a.base+".40."+strconv.Itoa(i+1)+"."+strconv.Itoa(col))
+		}
+	}
 	return out
 }
 

@@ -63,8 +63,9 @@ daemon behavior.
   per-entry trap delivery/filtering, SIGHUP access reload,
   TSM/manager-gateway bind smoke tests, config validation, per-entry
   selftest, MIB table GET/GETNEXT, two-entry USM conformance across all
-  available peers, two-entry TSM vendor-client conformance over DTLS,
-  and a fast multi-agent goroutine regression.
+  available peers, two-entry TSM vendor-client conformance over DTLS, a
+  fast multi-agent goroutine regression, and a soak-gated multi-agent
+  steady-state test (`TestSoakMultiAgentSteadyState`).
 
   The two-proxy shape stays one pair per agent: the custom tunnel frame has
   no agent selector, and adding one would turn the security tunnel into a
@@ -107,3 +108,15 @@ daemon behavior.
   The sibling reference implementations are modbus-shield's `devices:` +
   `internal/proxy/runner.go` and bacnet-shield's `devices:` + `extra_listen`.
   They remain the right reference for what co-hosting means.
+
+## Done — testing (kept for reference)
+
+- **Soak coverage:** `make soak` (opt-in, 10 min per test) covers the
+  two-proxy steady state, HA failover under load, the spoofed-source
+  rate-limit flood, and the multi-agent gateway
+  (`TestSoakMultiAgentSteadyState`: two `agents:` entries under continuous
+  v3 load — zero unanswered requests, flat goroutines, bounded live heap).
+  A 20s quick pass is green (1,850 requests, goroutines 11 → 11, live heap
+  1.0 → 1.1 MiB); the full 10-minute run is a release-checklist item. The
+  fast non-soak net for the goroutine class is
+  `TestGatewayAgentsNoPerRequestGoroutines`.

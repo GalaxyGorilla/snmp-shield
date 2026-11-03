@@ -18,6 +18,7 @@ import (
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
 	"github.com/GalaxyGorilla/snmp-shield/internal/testkit"
+	"github.com/gosnmp/gosnmp"
 )
 
 const soakPollInterval = 20 * time.Millisecond
@@ -332,4 +333,115 @@ func waitGoroutines(t *testing.T, want int, timeout time.Duration) {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// TestSoakMultiAgentSteadyState keeps two gateway agents: entries busy for
+// the soak budget and asserts the multi-agent runner stays flat: zero
+// unanswered requests, no goroutine growth, and a live heap that does not
+// track the request count.
+func TestSoakMultiAgentSteadyState(t *testing.T) {
+	budget := testkit.SoakDuration(t)
+	baseline := runtime.NumGoroutine()
+
+	devA := fakeAgent(t, "127.0.0.1:0")
+	defer devA.Close()
+	devB := fakeAgent(t, "127.0.0.1:0")
+	defer devB.Close()
+
+	cfg := &config.Config{Role: config.RoleGateway}
+	cfg.Defaults()
+	cfg.Security.Mode = "usm-gateway"
+	cfg.Security.Users = testUsers()
+	cfg.Security.EngineStoreDir = t.TempDir()
+	cfg.Agents = []config.AgentEntry{
+		{Name: "a", ListenAddr: freeUDPPort(t), AgentAddr: devA.LocalAddr().String()},
+		{Name: "b", ListenAddr: freeUDPPort(t), AgentAddr: devB.LocalAddr().String()},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config validate: %v", err)
+	}
+
+	cancel, errCh := startGatewayAgents(t, cfg, observ.NewMetrics(), nil)
+	defer cancel()
+
+	gA := gosnmpV3(t, cfg.Agents[0].ListenAddr)
+	defer gA.Conn.Close()
+	gB := gosnmpV3(t, cfg.Agents[1].ListenAddr)
+	defer gB.Conn.Close()
+
+	oid := []string{"1.3.6.1.2.1.1.1.0"}
+	for i := 0; i < 5; i++ { // warm up the lazily started loops
+		if _, err := gA.Get(oid); err != nil {
+			t.Fatalf("warmup a: %v", err)
+		}
+		if _, err := gB.Get(oid); err != nil {
+			t.Fatalf("warmup b: %v", err)
+		}
+	}
+
+	runtime.GC()
+	baseGoroutines := runtime.NumGoroutine()
+	var baseHeap runtime.MemStats
+	runtime.ReadMemStats(&baseHeap)
+
+	var (
+		ok, failed, maxGoroutines int
+		worst                     time.Duration
+		lastErr                   error
+	)
+	sampleEvery := budget / 20
+	if sampleEvery < time.Second {
+		sampleEvery = time.Second
+	}
+	nextSample := time.Now().Add(sampleEvery)
+	deadline := time.Now().Add(budget)
+
+	for time.Now().Before(deadline) {
+		for _, g := range []*gosnmp.GoSNMP{gA, gB} {
+			start := time.Now()
+			_, err := g.Get(oid)
+			elapsed := time.Since(start)
+			if err != nil {
+				failed++
+				lastErr = err
+			} else {
+				ok++
+				if elapsed > worst {
+					worst = elapsed
+				}
+			}
+		}
+		if time.Now().After(nextSample) {
+			if g := runtime.NumGoroutine(); g > maxGoroutines {
+				maxGoroutines = g
+			}
+			nextSample = time.Now().Add(sampleEvery)
+		}
+		time.Sleep(soakPollInterval)
+	}
+
+	if failed != 0 {
+		t.Fatalf("%d of %d requests were unanswered over %s (last error: %v)",
+			failed, ok+failed, budget, lastErr)
+	}
+	if maxGoroutines > baseGoroutines+8 {
+		t.Fatalf("goroutines grew %d -> %d during the soak", baseGoroutines, maxGoroutines)
+	}
+
+	runtime.GC()
+	var endHeap runtime.MemStats
+	runtime.ReadMemStats(&endHeap)
+	if grew := int64(endHeap.HeapAlloc) - int64(baseHeap.HeapAlloc); grew > 24<<20 {
+		t.Fatalf("live heap grew %.1fMiB over the soak (%.1fMiB -> %.1fMiB): something retains per-request state",
+			float64(grew)/(1<<20), float64(baseHeap.HeapAlloc)/(1<<20), float64(endHeap.HeapAlloc)/(1<<20))
+	}
+
+	t.Logf("multi-agent soak: %s, %d requests, worst round trip %s, goroutines %d (baseline %d, peak %d), live heap %.1fMiB -> %.1fMiB",
+		budget, ok, worst.Round(time.Millisecond), runtime.NumGoroutine(), baseGoroutines, maxGoroutines,
+		float64(baseHeap.HeapAlloc)/(1<<20), float64(endHeap.HeapAlloc)/(1<<20))
+
+	_ = gA.Conn.Close()
+	_ = gB.Conn.Close()
+	stopRun(t, cancel, errCh, "gateway agents")
+	waitGoroutines(t, baseline+8, 15*time.Second)
 }

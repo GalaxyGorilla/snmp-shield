@@ -108,14 +108,15 @@ the real loops, with the numbers that only a trend makes meaningful.
 | `TestSoakSteadyState` (`internal/proxy`) | one two-proxy chain, a request every 20 ms: **zero** unanswered requests, worst round trip logged, goroutines at baseline ± 8, live heap (post-GC) within 24 MiB of the start |
 | `TestSoakHAFailoverUnderLoad` (`internal/proxy`) | the manager polls through two replicas while the sticky one is killed at ⅓ of the budget: recovery ≤ 30 s, a green streak at the end, `snmp_shield_tunnel_reconnects_total` moved, tunnel-up gauge 1, goroutines back to baseline after teardown |
 | `TestSoakRateLimiterSpoofedSources` (`internal/access`) | a flood over the whole 10/8 space: the bucket table never exceeds `limitMaxBuckets`, a never-seen source is still refused afterwards (fail-closed survives the churn), goroutines and heap flat |
+| `TestSoakMultiAgentSteadyState` (`internal/proxy`) | two gateway `agents:` entries under continuous v3 load: **zero** unanswered requests, goroutines at baseline ± 8, live heap (post-GC) within 24 MiB of the start |
 
 They are gated behind `SNMP_SHIELD_SOAK=1` (with `SNMP_SHIELD_SOAK_DURATION`
 overriding the 10-minute default), because ten minutes inside `make test`
 would be ten minutes of edit loop. The gate is therefore a *release checklist
 item*, not a CI one — this repository has no CI by design.
 
-The budget is **per test**, so a full `make soak` takes about 30 minutes. A
-full run on 2026-10-29:
+The budget is **per test**, so a full `make soak` takes about 40 minutes
+(four tests). A full run on 2026-10-29:
 
 ```
 steady state   10m0s, 27386 requests, worst round trip 39ms,
@@ -124,6 +125,8 @@ HA failover    10m0s, failover after 8.092s (4 failures), 17177 answers after
                the kill, final streak 17177, teardown back to baseline
 rate limiter   10m0s, 1036288 admitted / 4238498006 refused, table 4096/4096,
                goroutines 2, heap flat
+multi-agent    20s quick pass, 1850 requests, goroutines 11 -> 11,
+               live heap 1.0MiB -> 1.1MiB (full 10m is a release item)
 ```
 
 That is the shape the numbers should have: flat goroutines, a heap that does

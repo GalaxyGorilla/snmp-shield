@@ -335,6 +335,21 @@ go test ./internal/notifyfilter -run '^$' -fuzz 'Fuzz' -fuzztime 30s
 Crashers and failing inputs land in `testdata/fuzz/` and run as normal test
 cases afterwards.
 
+## Focused mutation checks
+
+Not full mutation testing. Each row was applied to a clean tree, the named
+test failed, and the file was restored with `git checkout --`. The point is
+to find tests that pass for the wrong reason; the modbus stale-response row
+did exactly that (the test only checked the normalized transaction ID, so it
+was strengthened to check the payload and the stale counter).
+
+| Invariant broken | Mutation | Test that caught it |
+|---|---|---|
+| Write-policy deny-overrides | deny loop `return false` → `continue` | `TestWritePolicy*` (`internal/access`) |
+| TSM front-session cap | limiter capacity `max` → `max+100` | `TestTSMGatewaySessionCap` |
+| Rate-limit table cap | `len(buckets) >= limitMaxBuckets` → `false` | `TestLimitFailsClosedWhenFull` |
+| Readiness barrier | mark ready + `READY=1` before the role starts | `TestRunDoesNotAnnounceReadyBeforeBind` |
+
 ## What a green run does not prove
 
 "Green" is a claim about what was actually exercised, so the gaps are listed

@@ -115,7 +115,8 @@ daemon behavior.
   two-proxy steady state, HA failover under load, the spoofed-source
   rate-limit flood, and the multi-agent gateway
   (`TestSoakMultiAgentSteadyState`: two `agents:` entries under continuous
-  v3 load — zero unanswered requests, flat goroutines, bounded live heap).
+  v3 request load plus periodic per-entry trap traffic to both sinks — zero
+  unanswered requests, flat goroutines, bounded live heap).
   A 20s quick pass is green (1,850 requests, goroutines 11 → 11, live heap
   1.0 → 1.1 MiB); the full 10-minute run is a release-checklist item. The
   fast non-soak net for the goroutine class is

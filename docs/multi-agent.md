@@ -435,9 +435,9 @@ and dedicated soak additions remain Phase 2.
   - implemented: `TestGatewayAgentsNoPerRequestGoroutines` (100 requests
     to each of two entries; flat goroutines, back to baseline).
   - implemented (soak-gated): `TestSoakMultiAgentSteadyState` (two entries
-    under continuous v3 load; zero unanswered, flat goroutines, bounded
-    live heap). A 20s quick pass is green; the full 10-minute run is a
-    release-checklist item.
+    under continuous v3 request load plus periodic per-entry traps to both
+    sinks; zero unanswered, flat goroutines, bounded live heap). A 20s quick
+    pass is green; the full 10-minute run is a release-checklist item.
 
 ## 13. Open questions
 

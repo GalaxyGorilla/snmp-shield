@@ -348,14 +348,27 @@ func TestSoakMultiAgentSteadyState(t *testing.T) {
 	devB := fakeAgent(t, "127.0.0.1:0")
 	defer devB.Close()
 
+	sinkA := testkit.NewV3Sink(t, testkit.V3SinkOptions{
+		User: "proxy", AuthPass: "authpass", PrivPass: "privpass",
+	})
+	sinkB := testkit.NewV3Sink(t, testkit.V3SinkOptions{
+		User: "proxy", AuthPass: "authpass", PrivPass: "privpass",
+	})
+
 	cfg := &config.Config{Role: config.RoleGateway}
 	cfg.Defaults()
 	cfg.Security.Mode = "usm-gateway"
 	cfg.Security.Users = testUsers()
 	cfg.Security.EngineStoreDir = t.TempDir()
 	cfg.Agents = []config.AgentEntry{
-		{Name: "a", ListenAddr: freeUDPPort(t), AgentAddr: devA.LocalAddr().String()},
-		{Name: "b", ListenAddr: freeUDPPort(t), AgentAddr: devB.LocalAddr().String()},
+		{
+			Name: "a", ListenAddr: freeUDPPort(t), AgentAddr: devA.LocalAddr().String(),
+			TrapListenAddr: freeUDPPort(t), TrapSinkAddr: sinkA.Addr,
+		},
+		{
+			Name: "b", ListenAddr: freeUDPPort(t), AgentAddr: devB.LocalAddr().String(),
+			TrapListenAddr: freeUDPPort(t), TrapSinkAddr: sinkB.Addr,
+		},
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("config validate: %v", err)
@@ -379,6 +392,40 @@ func TestSoakMultiAgentSteadyState(t *testing.T) {
 		}
 	}
 
+	// Per-entry notification load: a clear coldStart trap to each entry's
+	// trap listener is wrapped into a v3 notification and must reach that
+	// entry's sink. Every 25 request rounds is ~2 traps/s per entry at the
+	// soak cadence: enough to exercise the notification path without making
+	// the sink's own retention dominate the heap measurement.
+	const trapOID = "1.3.6.1.6.3.1.1.5.1"
+	trapOIDBytes, err := msg.EncodeOID(trapOID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	vb1 := msg.AppendTLV(nil, 0x30, append(
+		msg.AppendTLV(nil, 0x06, msg.OIDSysUpTime),
+		msg.AppendTLV(nil, 0x43, []byte{0, 0, 0, 1})...))
+	vb2 := msg.AppendTLV(nil, 0x30, append(
+		msg.AppendTLV(nil, 0x06, msg.OIDSnmpTrapOID),
+		msg.AppendTLV(nil, 0x06, trapOIDBytes)...))
+	trapPDU := msg.BuildPDU(msg.PDUSNMPv2Trap, 0, 0, 0, append(vb1, vb2...))
+	trapDG, err := msg.BuildV1V2c(msg.Version2c, []byte("public"), trapPDU)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trapConn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer trapConn.Close()
+	trapDst := make([]*net.UDPAddr, len(cfg.Agents))
+	for i, a := range cfg.Agents {
+		trapDst[i], err = net.ResolveUDPAddr("udp", a.TrapListenAddr)
+		if err != nil {
+			t.Fatalf("resolve trap listener %s: %v", a.TrapListenAddr, err)
+		}
+	}
+
 	runtime.GC()
 	baseGoroutines := runtime.NumGoroutine()
 	var baseHeap runtime.MemStats
@@ -386,6 +433,7 @@ func TestSoakMultiAgentSteadyState(t *testing.T) {
 
 	var (
 		ok, failed, maxGoroutines int
+		trapSent, trapFailed      int
 		worst                     time.Duration
 		lastErr                   error
 	)
@@ -411,6 +459,15 @@ func TestSoakMultiAgentSteadyState(t *testing.T) {
 				}
 			}
 		}
+		trapSent++
+		if trapSent%25 == 0 {
+			for _, dst := range trapDst {
+				if _, err := trapConn.WriteTo(trapDG, dst); err != nil {
+					trapFailed++
+					lastErr = err
+				}
+			}
+		}
 		if time.Now().After(nextSample) {
 			if g := runtime.NumGoroutine(); g > maxGoroutines {
 				maxGoroutines = g
@@ -427,6 +484,17 @@ func TestSoakMultiAgentSteadyState(t *testing.T) {
 	if maxGoroutines > baseGoroutines+8 {
 		t.Fatalf("goroutines grew %d -> %d during the soak", baseGoroutines, maxGoroutines)
 	}
+	if trapFailed != 0 {
+		t.Fatalf("%d trap datagrams could not be sent to an entry", trapFailed)
+	}
+	if trapSent == 0 {
+		t.Fatal("no traps were sent during the soak")
+	}
+	sinkA.WaitForOID(t, trapOID, 10*time.Second)
+	sinkB.WaitForOID(t, trapOID, 10*time.Second)
+	if sinkA.Count() == 0 || sinkB.Count() == 0 {
+		t.Fatalf("notification path was not soaked: sink a=%d b=%d", sinkA.Count(), sinkB.Count())
+	}
 
 	runtime.GC()
 	var endHeap runtime.MemStats
@@ -436,9 +504,10 @@ func TestSoakMultiAgentSteadyState(t *testing.T) {
 			float64(grew)/(1<<20), float64(baseHeap.HeapAlloc)/(1<<20), float64(endHeap.HeapAlloc)/(1<<20))
 	}
 
-	t.Logf("multi-agent soak: %s, %d requests, worst round trip %s, goroutines %d (baseline %d, peak %d), live heap %.1fMiB -> %.1fMiB",
-		budget, ok, worst.Round(time.Millisecond), runtime.NumGoroutine(), baseGoroutines, maxGoroutines,
-		float64(baseHeap.HeapAlloc)/(1<<20), float64(endHeap.HeapAlloc)/(1<<20))
+	t.Logf("multi-agent soak: %s, %d requests, %d trap rounds, worst round trip %s, goroutines %d (baseline %d, peak %d), live heap %.1fMiB -> %.1fMiB, traps a=%d b=%d",
+		budget, ok, trapSent, worst.Round(time.Millisecond), runtime.NumGoroutine(), baseGoroutines, maxGoroutines,
+		float64(baseHeap.HeapAlloc)/(1<<20), float64(endHeap.HeapAlloc)/(1<<20),
+		sinkA.Count(), sinkB.Count())
 
 	_ = gA.Conn.Close()
 	_ = gB.Conn.Close()

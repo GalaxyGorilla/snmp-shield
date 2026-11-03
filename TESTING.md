@@ -108,7 +108,7 @@ the real loops, with the numbers that only a trend makes meaningful.
 | `TestSoakSteadyState` (`internal/proxy`) | one two-proxy chain, a request every 20 ms: **zero** unanswered requests, worst round trip logged, goroutines at baseline ± 8, live heap (post-GC) within 24 MiB of the start |
 | `TestSoakHAFailoverUnderLoad` (`internal/proxy`) | the manager polls through two replicas while the sticky one is killed at ⅓ of the budget: recovery ≤ 30 s, a green streak at the end, `snmp_shield_tunnel_reconnects_total` moved, tunnel-up gauge 1, goroutines back to baseline after teardown |
 | `TestSoakRateLimiterSpoofedSources` (`internal/access`) | a flood over the whole 10/8 space: the bucket table never exceeds `limitMaxBuckets`, a never-seen source is still refused afterwards (fail-closed survives the churn), goroutines and heap flat |
-| `TestSoakMultiAgentSteadyState` (`internal/proxy`) | two gateway `agents:` entries under continuous v3 load: **zero** unanswered requests, goroutines at baseline ± 8, live heap (post-GC) within 24 MiB of the start |
+| `TestSoakMultiAgentSteadyState` (`internal/proxy`) | two gateway `agents:` entries under continuous v3 request load plus periodic per-entry traps to both sinks: **zero** unanswered requests, goroutines at baseline ± 8, live heap (post-GC) within 24 MiB of the start |
 
 They are gated behind `SNMP_SHIELD_SOAK=1` (with `SNMP_SHIELD_SOAK_DURATION`
 overriding the 10-minute default), because ten minutes inside `make test`

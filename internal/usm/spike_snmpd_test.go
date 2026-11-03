@@ -87,7 +87,7 @@ func spikeUDP(t *testing.T, out []byte, wait time.Duration) []byte {
 func spikeDiscovery(t *testing.T) *spikeEngine {
 	t.Helper()
 
-	pdu := msg.BuildPDU(msg.PDUGetRequest, 1, 0, 0, []byte{0}) // empty varbind-list content
+	pdu := msg.BuildPDU(msg.PDUGetRequest, 1, 0, 0, nil) // empty varbind-list content
 	scoped := msg.BuildScoped(nil, []byte{}, pdu)
 	out, err := msg.BuildV3(msg.V3Header{
 		MsgID:      100,

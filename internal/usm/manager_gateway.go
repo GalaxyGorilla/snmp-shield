@@ -451,7 +451,7 @@ func (g *ManagerGateway) ensureEngine() (*remoteEngine, error) {
 	}
 	g.engineMu.Unlock()
 
-	pdu := msg.BuildPDU(msg.PDUGetRequest, int32(g.reqID.Add(1)), 0, 0, []byte{0})
+	pdu := msg.BuildPDU(msg.PDUGetRequest, int32(g.reqID.Add(1)), 0, 0, nil)
 	scoped := msg.BuildScoped(nil, []byte{}, pdu)
 	out, err := msg.BuildV3(msg.V3Header{
 		MsgID:      int32(g.msgID.Add(1)),

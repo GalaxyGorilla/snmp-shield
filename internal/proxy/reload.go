@@ -30,13 +30,21 @@ import (
 // installed — a reload typo must never leave the proxy unprotected or
 // wide open by accident.
 func applyReload(cur, next *config.Config, h *access.Holder) []string {
-	var warnings []string
+	warnings, _, _ := applyReloadDetailed(cur, next, h)
+	return warnings
+}
+
+// applyReloadDetailed is applyReload plus the status view: whether the
+// access policy was installed and which differences still need a restart.
+func applyReloadDetailed(cur, next *config.Config, h *access.Holder) (warnings, restart []string, applied bool) {
+	applied = true
 
 	pol, err := next.AccessPolicy()
 	if err != nil {
 		warnings = append(warnings, fmt.Sprintf(
 			"access policy invalid, keeping the running policy: %v", err))
-	} else {
+		applied = false
+	} else if h != nil {
 		h.Store(pol)
 	}
 
@@ -45,18 +53,39 @@ func applyReload(cur, next *config.Config, h *access.Holder) []string {
 	trimmed := *next
 	trimmed.Access = cur.Access
 	trimmed.Role = cur.Role
-	if msgs := restartRequired(*cur, trimmed); len(msgs) > 0 {
-		warnings = append(warnings, msgs...)
-	}
-	return warnings
+	restart = restartRequired(*cur, trimmed)
+	warnings = append(warnings, restart...)
+	return warnings, restart, applied
+}
+
+// agentReloadResult is the per-entry status of one agents: reload.
+type agentReloadResult struct {
+	policyApplied   bool
+	restartRequired []string
 }
 
 // applyReloadAgents installs the per-agent access policies for the
 // multi-agent gateway shape and reports everything that needs a restart.
 func applyReloadAgents(cur, next *config.Config, holders map[string]*access.Holder) []string {
-	var warnings []string
+	warnings, _, _ := applyReloadAgentsDetailed(cur, next, holders)
+	return warnings
+}
+
+// applyReloadAgentsDetailed is applyReloadAgents plus the per-entry status
+// view used by /status.
+func applyReloadAgentsDetailed(cur, next *config.Config, holders map[string]*access.Holder) (warnings, restart []string, perAgent map[string]agentReloadResult) {
+	perAgent = make(map[string]agentReloadResult)
 	if !next.HasAgents() {
-		return append(warnings, "agents list removed; restart required")
+		msg := "agents list removed; restart required"
+		warnings = append(warnings, msg)
+		restart = append(restart, msg)
+		for _, a := range cur.Agents {
+			perAgent[a.EffectiveName()] = agentReloadResult{
+				policyApplied:   false,
+				restartRequired: []string{"removed"},
+			}
+		}
+		return warnings, restart, perAgent
 	}
 	curByName := make(map[string]config.AgentEntry, len(cur.Agents))
 	for _, a := range cur.Agents {
@@ -68,58 +97,103 @@ func applyReloadAgents(cur, next *config.Config, holders map[string]*access.Hold
 	}
 	for name, a := range nextByName {
 		old, existed := curByName[name]
+		res := agentReloadResult{policyApplied: true}
 		if !existed {
-			warnings = append(warnings, fmt.Sprintf("agent %s added; restart required", name))
+			msg := fmt.Sprintf("agent %s added; restart required", name)
+			warnings = append(warnings, msg)
+			restart = append(restart, msg)
+			res.policyApplied = false
+			res.restartRequired = append(res.restartRequired, "added")
+			perAgent[name] = res
 			continue
 		}
 		pol, err := next.EffectiveAccess(a).Policy()
 		if err != nil {
 			warnings = append(warnings, fmt.Sprintf(
 				"agent %s access policy invalid, keeping the running policy: %v", name, err))
+			res.policyApplied = false
 		} else if h := holders[name]; h != nil {
 			h.Store(pol)
 		} else {
-			warnings = append(warnings, fmt.Sprintf(
-				"agent %s has no running access holder; restart required", name))
+			msg := fmt.Sprintf("agent %s has no running access holder; restart required", name)
+			warnings = append(warnings, msg)
+			restart = append(restart, msg)
+			res.policyApplied = false
+			res.restartRequired = append(res.restartRequired, "no access holder")
 		}
 		if old.ListenAddr != a.ListenAddr || old.AgentAddr != a.AgentAddr || old.AgentCommunity != a.AgentCommunity {
-			warnings = append(warnings, fmt.Sprintf("agent %s listener/agent changed; restart required", name))
+			msg := fmt.Sprintf("agent %s listener/agent changed; restart required", name)
+			warnings = append(warnings, msg)
+			restart = append(restart, msg)
+			res.restartRequired = append(res.restartRequired, "listener/agent changed")
 		}
 		if !reflect.DeepEqual(old.Security, a.Security) {
-			warnings = append(warnings, fmt.Sprintf("agent %s security changed; restart required", name))
+			msg := fmt.Sprintf("agent %s security changed; restart required", name)
+			warnings = append(warnings, msg)
+			restart = append(restart, msg)
+			res.restartRequired = append(res.restartRequired, "security changed")
 		}
 		if !reflect.DeepEqual(old.TLS, a.TLS) {
-			warnings = append(warnings, fmt.Sprintf("agent %s tls changed; restart required", name))
+			msg := fmt.Sprintf("agent %s tls changed; restart required", name)
+			warnings = append(warnings, msg)
+			restart = append(restart, msg)
+			res.restartRequired = append(res.restartRequired, "tls changed")
 		}
 		if !reflect.DeepEqual(old.Notifications, a.Notifications) {
-			warnings = append(warnings, fmt.Sprintf("agent %s notifications changed; restart required", name))
+			msg := fmt.Sprintf("agent %s notifications changed; restart required", name)
+			warnings = append(warnings, msg)
+			restart = append(restart, msg)
+			res.restartRequired = append(res.restartRequired, "notifications changed")
 		}
 		if old.TrapListenAddr != a.TrapListenAddr || old.TrapSinkAddr != a.TrapSinkAddr ||
 			old.TrapSinkCommunity != a.TrapSinkCommunity {
-			warnings = append(warnings, fmt.Sprintf("agent %s trap legs changed; restart required", name))
+			msg := fmt.Sprintf("agent %s trap legs changed; restart required", name)
+			warnings = append(warnings, msg)
+			restart = append(restart, msg)
+			res.restartRequired = append(res.restartRequired, "trap legs changed")
 		}
+		perAgent[name] = res
 	}
 	for name := range curByName {
 		if _, ok := nextByName[name]; !ok {
-			warnings = append(warnings, fmt.Sprintf("agent %s removed; restart required", name))
+			msg := fmt.Sprintf("agent %s removed; restart required", name)
+			warnings = append(warnings, msg)
+			restart = append(restart, msg)
+			perAgent[name] = agentReloadResult{
+				policyApplied:   false,
+				restartRequired: []string{"removed"},
+			}
 		}
 	}
+	var top []string
 	if !reflect.DeepEqual(cur.Tunnel, next.Tunnel) {
-		warnings = append(warnings, "tunnel block changed (restart required)")
+		top = append(top, "tunnel block changed (restart required)")
 	}
 	if !reflect.DeepEqual(cur.Security, next.Security) {
-		warnings = append(warnings, "security block changed (restart required)")
+		top = append(top, "security block changed (restart required)")
 	}
 	if !reflect.DeepEqual(cur.Gateway, next.Gateway) {
-		warnings = append(warnings, "gateway block changed (restart required)")
+		top = append(top, "gateway block changed (restart required)")
 	}
 	if !reflect.DeepEqual(cur.Notifications, next.Notifications) {
-		warnings = append(warnings, "notifications block changed (restart required)")
+		top = append(top, "notifications block changed (restart required)")
 	}
 	if !reflect.DeepEqual(cur.Metrics, next.Metrics) {
-		warnings = append(warnings, "metrics block changed (restart required)")
+		top = append(top, "metrics block changed (restart required)")
 	}
-	return warnings
+	warnings = append(warnings, top...)
+	restart = append(restart, top...)
+	// A process-wide change affects every entry that keeps running.
+	if len(top) > 0 {
+		for name, res := range perAgent {
+			if _, ok := nextByName[name]; !ok {
+				continue
+			}
+			res.restartRequired = append(res.restartRequired, top...)
+			perAgent[name] = res
+		}
+	}
+	return warnings, restart, perAgent
 }
 
 // restartRequired lists the differences a SIGHUP cannot apply.

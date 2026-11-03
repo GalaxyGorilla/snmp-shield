@@ -19,6 +19,7 @@ about, and what cannot be verified on this host.
 | `node` | node `net-snmp` | 3.29.2 | `make peers` (npm) |
 | `snmpd` | net-snmp agent | 5.6.2.1 (Apple) | system `snmpd` (agent-leg scenario) |
 | `snmpd59` | net-snmp agent (Docker) | 5.9.3 (Debian) | Docker daemon (`make peers` builds the image) |
+| `pysnmp-agent` | pysnmp v3 agent (`test/peers/v3_agent.py`) | 7.1.30 | `make peers` (venv) |
 | `netsnmp59` | net-snmp CLI (clear legs) | 5.9.3 (Debian, Docker) | Docker daemon (`make peers` builds the image) |
 | `netsnmp-docker` | net-snmp CLI over **DTLS/TSM** | 5.9.3 (Debian) | Docker daemon (`make peers` builds the image) |
 | `snmptrapd` | net-snmp v3 notification **receiver** | 5.9.3 (Debian, Docker) | Docker daemon (`make peers` builds the image) |
@@ -27,7 +28,10 @@ Two net-snmp **agents** back both the manager-gateway v3-agent scenarios and
 the USM gateway's clear-device scenarios: the host's `snmpd` (Apple 5.6.2.1)
 and the `snmpd` in the Debian image (5.9.3). Both run the same suite, so a
 proxy behaviour that only one release accepts is a finding rather than an
-assumption. They are not interchangeable fixtures:
+assumption. A third v3 agent, `pysnmp-agent`, uses pysnmp's USM engine and
+BER codec rather than net-snmp; it is the only agent that is a different
+implementation family, so it judges discovery/key localization/signing
+independently. It is not interchangeable either:
 5.9 refuses every request with `AuthorizationError` until an access-control
 directive (`rouser`) exists, while 5.6 rejects `rouser` as an unknown token
 and grants the created user access implicitly — see the divergences below.
@@ -189,6 +193,14 @@ Recorded so nobody "fixes" the proxy to match one vendor. Adapters normalize
   instructive too: it (and pysnmp, node, gosnmp) all tolerate a Reportable
   flag on a response, so that defect had to be caught by reading RFC 3412,
   not by a peer (finding 5 above).
+- **The discovery varbind list must be empty.** RFC 3414 §4's discovery
+  probe is a GetRequest with an empty variable-bindings field. The encoder
+  was passed `[]byte{0}`, which produces `30 01 00` (a one-byte varbind
+  list), not `30 00`. net-snmp accepts it; pysnmp rejects the datagram, so
+  the manager-gateway and passthrough discovery paths timed out **only**
+  against the new pysnmp agent while every net-snmp scenario stayed green.
+  Fixed in all discovery call sites and pinned by
+  `TestDiscoveryRequestHasEmptyVarbindList`.
 - **Inform authority.** net-snmp, pysnmp and node perform receiver-side
   discovery for informs (RFC-correct). gosnmp treats informs like traps and
   addresses them to its own engine. The proxy supports both: a message

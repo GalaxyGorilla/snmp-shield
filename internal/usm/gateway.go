@@ -944,7 +944,7 @@ func (g *GatewayTranslator) ensureSinkEngine() (*remoteEngine, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve trap_sink_addr: %w", err)
 	}
-	pdu := msg.BuildPDU(msg.PDUGetRequest, int32(g.msgID.Add(1)), 0, 0, []byte{0})
+	pdu := msg.BuildPDU(msg.PDUGetRequest, int32(g.msgID.Add(1)), 0, 0, nil)
 	scoped := msg.BuildScoped(nil, []byte{}, pdu)
 	probe, err := msg.BuildV3(msg.V3Header{
 		MsgID:      int32(g.msgID.Add(1)),

@@ -123,8 +123,9 @@ func NewManagerTranslator(cfg config.ManagerRole, sec config.Security, clock *ca
 func (m *ManagerTranslator) SetAccess(h *access.Holder) { m.access = h }
 
 // Run starts the translator: binds the clear listener(s), subscribes to
-// tunnel RESP/NOTIF frames, and serves until done is closed.
-func (m *ManagerTranslator) Run(done <-chan struct{}) error {
+// tunnel RESP/NOTIF frames, and serves until done is closed. When supplied,
+// ready is closed after every configured listener has been bound.
+func (m *ManagerTranslator) Run(done <-chan struct{}, ready ...chan<- struct{}) error {
 	conn, err := net.ListenPacket("udp", m.cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("usm manager: clear listener: %w", err)
@@ -157,6 +158,9 @@ func (m *ManagerTranslator) Run(done <-chan struct{}) error {
 	go m.readClear()
 	if m.trapConn != nil {
 		go m.readTraps()
+	}
+	if len(ready) > 0 && ready[0] != nil {
+		close(ready[0])
 	}
 
 	for {
@@ -503,7 +507,7 @@ func (m *ManagerTranslator) ensureEngine() (*remoteEngine, error) {
 	m.engineMu.Unlock()
 
 	// discovery: empty GetRequest, Reportable|NoAuthNoPriv, empty user
-	pdu := msg.BuildPDU(msg.PDUGetRequest, int32(m.reqID.Add(1)), 0, 0, []byte{0})
+	pdu := msg.BuildPDU(msg.PDUGetRequest, int32(m.reqID.Add(1)), 0, 0, nil)
 	scoped := msg.BuildScoped(nil, []byte{}, pdu)
 	out, err := msg.BuildV3(msg.V3Header{
 		MsgID:      int32(m.msgID.Add(1)),

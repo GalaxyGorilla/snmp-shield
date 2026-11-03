@@ -295,19 +295,32 @@ to `/metrics`. A stable JSON document listing every entry:
 ```json
 {
   "ok": true,
+  "ready": true,
   "role": "gateway",
   "security_mode": "usm-gateway",
   "tunnel_mode": "dtls",
   "version": "1.2.3",
   "config_hash": "…",
+  "config_revision": 4,
+  "reload": {
+    "attempts": 3,
+    "applied": 3,
+    "last_ok": true,
+    "restart_required": ["agent plc listener/agent changed; restart required"]
+  },
   "agents": [
     {
       "name": "plc",
       "listen": "10.0.0.10:161",
       "upstream": "10.0.0.50:161",
+      "ready": true,
       "read_only": true,
       "allow_count": 1,
       "rate_per_sec": 50,
+      "reload": {
+        "policy_applied": true,
+        "restart_required": ["listener/agent changed"]
+      },
       "counters": {
         "requests_forwarded": 1234,
         "request_errors": 0,
@@ -325,10 +338,15 @@ to `/metrics`. A stable JSON document listing every entry:
 }
 ```
 
-`ok` means the process is serving, not that a device is reachable (use
-`selftest` for that). `config_hash` is the SHA-256 of the active YAML
-file when the process was started from one. No communities, USM secrets,
-PSKs, or key material.
+`ready` is true only after every configured listener has bound; `ok` is
+the same for the whole process (it means the daemon is serving, not that
+a device is reachable — use `selftest` for that). `config_hash` is the
+SHA-256 of the last successfully loaded YAML file, and `config_revision`
+counts those successful loads (starting at 1). `reload` reports the last
+SIGHUP: a failed file leaves the hash/revision and the running policy
+alone and records `last_error`. Per-entry `reload.restart_required` names
+the settings that are still at their bound values while the file says
+something else. No communities, USM secrets, PSKs, or key material.
 
 ### SNMP MIB
 
@@ -387,7 +405,10 @@ PSKs, or key material.
 - `tsm-gateway`: one process-wide `tunnel.max_sessions` budget shared by
   all entries (`tsm.SessionLimiter`), not N × cap.
 - `/status` JSON document on the metrics HTTP listener, next to
-  `/metrics`, with per-entry endpoints, policy summary and counters.
+  `/metrics`, with per-entry endpoints, policy summary and counters,
+  per-entry `ready`, the active config revision/hash, and the last
+  reload result including restart-required fields. `READY=1` is sent
+  only after every entry's listeners have bound.
 - Tests: two-entry USM e2e (independent policies, no cross-entry traffic,
   per-agent metrics), per-entry trap delivery and filtering, SIGHUP access
   reload, TSM/manager-gateway bind smoke tests, config validation,
@@ -460,7 +481,8 @@ and dedicated soak additions remain Phase 2.
 - **Per-agent Prometheus label:** accepted compatibility change;
   single-agent configs use `agent="default"`.
 - **JSON status:** served as `/status` on the metrics listener; per-entry
-  endpoints, policy summary and counters; no secrets.
+  endpoints, policy summary and counters, per-entry `ready`, active config
+  revision/hash and the last reload result; no secrets.
 - **TSM front-session cap:** one process-wide `tunnel.max_sessions`
   budget shared by all entries, not one cap per entry.
 - **Phase 1 implemented (2026-11-03):** all gateway modes (one mode per

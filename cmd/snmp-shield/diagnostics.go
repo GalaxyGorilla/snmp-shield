@@ -526,7 +526,7 @@ func probeAgentV3For(ctx context.Context, gw config.GatewayRole, sec config.Secu
 	}
 
 	// RFC 3414 discovery: Reportable NoAuthNoPriv empty GET.
-	pdu := msg.BuildPDU(msg.PDUGetRequest, 1, 0, 0, []byte{0})
+	pdu := msg.BuildPDU(msg.PDUGetRequest, 1, 0, 0, nil)
 	scoped := msg.BuildScoped(nil, []byte{}, pdu)
 	out, err := msg.BuildV3(msg.V3Header{
 		MsgID:      100,

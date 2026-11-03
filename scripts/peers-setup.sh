@@ -3,6 +3,7 @@
 # conformance tests. Idempotent; safe to re-run.
 #
 #   python venv + pysnmp + cryptography   -> test/peers/.venv
+#       (clear-leg manager peer + the independent pysnmp v3 agent)
 #   node net-snmp                         -> test/peers/node_modules
 #   net-snmp in Docker                    -> docker image snmp-shield-net-snmp:peer
 #       (current-release clear-leg peer + RFC 6353 TSM client + snmptrapd as

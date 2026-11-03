@@ -10,7 +10,7 @@ the less it can be fooled by our own encoders.
 |---|---|---|---|---|
 | Unit | `internal/*/..._test.go` | hand-built vectors, RFC examples | ms | yes |
 | Wire e2e (Go) | `internal/usm`, `internal/tsm`, `internal/tunnel`, `internal/proxy`, `internal/access`, `internal/snmpmetrics` | gosnmp, raw datagrams, real UDP/DTLS loopback (IPv4 and `[::1]`) | seconds | yes |
-| Conformance | `internal/conformance` | five independent vendor stacks driving the real binary, a vendor v3 notification **receiver** (`snmptrapd` 5.9), net-snmp 5.9 over DTLS (TSM), and two real agents used on both the v3 and clear-v2c device legs (host `snmpd` 5.6.2.1 + image `snmpd` 5.9.3), Docker for the container peers | ~110s | yes |
+| Conformance | `internal/conformance` | five independent vendor stacks driving the real binary, a vendor v3 notification **receiver** (`snmptrapd` 5.9), net-snmp 5.9 over DTLS (TSM), and three real agents used on the v3/clear device legs (host `snmpd` 5.6.2.1, image `snmpd` 5.9.3, and a pysnmp v3 agent), Docker for the container peers | ~110s | yes |
 | Soak | `internal/access`, `internal/proxy` (`TestSoak*`) | the real binary's loops under continuous load: goroutine and live-heap graphs, a spoofed-source flood, a killed replica | 10 min | no (`make soak`, `SNMP_SHIELD_SOAK=1`) |
 | Interop scripts | `scripts/interop-*.sh` | net-snmp CLI / snmpd as the peer | minutes | no (`make interop ...`) |
 | Smoke | `scripts/smoke-cli.sh` | a hand-written Python v2c agent | seconds | no |
@@ -348,6 +348,20 @@ names what would close it.
   enforces running it: there is no CI by design, so the gate is only as good
   as the release checklist that calls it. Vendor limitations
   (`KindUnsupported`) still skip, correctly, even under the gate.
+- **Readiness and `/status` are pinned at the daemon boundary.** `Run`
+  starts the role in the background and waits for every configured listener
+  (all `agents:` entries included) before marking the status ready and
+  sending `READY=1`. `TestRunDoesNotAnnounceReadyBeforeBind` occupies the
+  front port, points `NOTIFY_SOCKET` at a real unixgram socket, and requires
+  both: `Run` returns the bind error and **no** `READY=1` arrives.
+  `TestStatusReadyOnlyAfterListenersBind` pins the pre/post-bind document.
+  `TestStatusTracksReloadResult` pins the successful hash/revision bump, the
+  applied access policy, and the failed-file path (hash/revision and running
+  policy unchanged, `last_error` set). `TestStatusPerAgentReloadRestartRequired`
+  pins per-entry `restart_required` while the document still reports the
+  **bound** listener, not the unbound one from the new file. The remaining
+  gap is the systemd side itself: `NOTIFY_SOCKET` is faked, and
+  `systemctl start/reload` is not exercised.
 - **The signal edge is covered on a real process, but only for the shapes
   listed** (`internal/conformance/lifecycle_test.go`, measured 2026-10-30:
   `cmd/snmp-shield` 86.0%, `internal/observ` 100%, overall 67.5% excluding the

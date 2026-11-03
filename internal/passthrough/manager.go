@@ -98,8 +98,9 @@ func NewManager(cfg config.ManagerRole, sess *tunnel.Session, log *zap.Logger, m
 func (m *Manager) SetAccess(h *access.Holder) { m.access = h }
 
 // Run starts the manager-side forwarder. It blocks until ctx is
-// cancelled or a fatal error occurs.
-func (m *Manager) Run(ctx context.Context) error {
+// cancelled or a fatal error occurs. When supplied, ready is closed after
+// every configured listener has been bound.
+func (m *Manager) Run(ctx context.Context, ready ...chan<- struct{}) error {
 	laddr, err := net.ResolveUDPAddr("udp", m.cfg.ListenAddr)
 	if err != nil {
 		return fmt.Errorf("resolve listen addr: %w", err)
@@ -159,6 +160,10 @@ func (m *Manager) Run(ctx context.Context) error {
 	notifCh, cancelNotif := m.sess.Subscribe(tunnel.TypeNOTIF)
 	defer cancelResp()
 	defer cancelNotif()
+
+	if len(ready) > 0 && ready[0] != nil {
+		close(ready[0])
+	}
 
 	go m.sinkLoop(notifCh)
 	go m.respLoop(respCh)

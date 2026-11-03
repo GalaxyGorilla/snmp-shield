@@ -212,7 +212,9 @@ func (g *TSMGateway) SetSessionLimiter(l *SessionLimiter) { g.limiter = l }
 
 // Run binds the raw DTLS front leg, the clear agent socket and
 // (optionally) the clear trap listener, and serves until done is closed.
-func (g *TSMGateway) Run(done <-chan struct{}) error {
+// When supplied, ready is closed after every configured listener has been
+// bound.
+func (g *TSMGateway) Run(done <-chan struct{}, ready ...chan<- struct{}) error {
 	l, err := tunnel.ListenRaw(g.cfg.ListenAddr, g.lcfg)
 	if err != nil {
 		return fmt.Errorf("tsm gateway: raw DTLS front listener: %w", err)
@@ -244,6 +246,9 @@ func (g *TSMGateway) Run(done <-chan struct{}) error {
 	go g.readAgent()
 	if g.trapConn != nil {
 		go g.readTraps()
+	}
+	if len(ready) > 0 && ready[0] != nil {
+		close(ready[0])
 	}
 
 	// serve DTLS sessions concurrently: every TSM manager dials its own

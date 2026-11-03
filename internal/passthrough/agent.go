@@ -82,8 +82,9 @@ func NewAgent(cfg config.AgentRole, sess *tunnel.Session, log *zap.Logger, met *
 	}
 }
 
-// Run starts the agent-side forwarder.
-func (a *Agent) Run(ctx context.Context) error {
+// Run starts the agent-side forwarder. When supplied, ready is closed after
+// every configured socket has been bound.
+func (a *Agent) Run(ctx context.Context, ready ...chan<- struct{}) error {
 	aaddr, err := net.ResolveUDPAddr("udp", a.cfg.AgentAddr)
 	if err != nil {
 		return fmt.Errorf("resolve agent addr: %w", err)
@@ -127,6 +128,10 @@ func (a *Agent) Run(ctx context.Context) error {
 	defer cancelReq()
 	defer cancelNotif()
 	defer cancelNotifAck()
+
+	if len(ready) > 0 && ready[0] != nil {
+		close(ready[0])
+	}
 
 	// Tunnel REQ frames -> real agent.
 	go a.reqLoop(reqCh)

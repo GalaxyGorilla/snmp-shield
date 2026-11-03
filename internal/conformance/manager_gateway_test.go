@@ -182,6 +182,7 @@ func TestManagerGatewayRealAgent(t *testing.T) {
 	}{
 		{"host-snmpd", startV3Snmpd},
 		{"docker-snmpd-5.9", startDockerV3Snmpd},
+		{"pysnmp-agent", startPysnmpV3Agent},
 	}
 	for _, fx := range fixtures {
 		t.Run(fx.name, func(t *testing.T) {

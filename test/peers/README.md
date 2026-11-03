@@ -12,6 +12,13 @@ silence in an adapter.
 | `peer_node.js` | node `net-snmp` (JS) | 3.29.2 | `test/peers/node_modules` |
 | `netsnmp-docker/Dockerfile` | net-snmp CLI in a container (**TSM/DTLS** client) | 5.9.3 (Debian) | Docker daemon |
 
+`v3_agent.py` is not an adapter: it is a small read-only pysnmp **agent**
+used by the manager-gateway conformance scenarios. It exists because the
+net-snmp host build and the net-snmp container are the same implementation
+family; pysnmp's USM engine and BER codec are an independent oracle for
+RFC 3414 discovery, key localization and authPriv. It binds one loopback
+port and exits when killed.
+
 `scripts/peers-setup.sh` prepares the managed toolchains (Python venv + npm
 install + the Docker image). The venv and `node_modules` are gitignored; the
 Go test suite skips a peer whose toolchain is missing and says why.

@@ -51,6 +51,10 @@ type Options struct {
 	// startup; adding or removing an entry is restart-only, so its keys do
 	// not change during a reload.
 	AgentAccess map[string]*access.Holder
+	// status is the live /status state shared with the SIGHUP reload
+	// path. Run creates it when nil; tests may supply one to inspect the
+	// exact document a running process would serve.
+	status *statusState
 }
 
 // SNMP event trap OIDs, relative to the metrics base (base + ".2.x").
@@ -181,32 +185,83 @@ func reloadConfig(opts Options) {
 		opts.Log.Warn("SIGHUP ignored: reload requires --config (flags-mode settings come from the command line)")
 		return
 	}
+	st := opts.status
+	if st != nil {
+		st.reloadAttempt()
+	}
 	next, err := config.Load(opts.ConfigPath, opts.Config.Role)
 	if err != nil {
 		opts.Log.Error("reload: new config invalid, keeping the running configuration", zap.Error(err))
+		if st != nil {
+			st.reloadFailed(err)
+		}
 		return
 	}
+	hash := configFileHash(opts.ConfigPath)
 	if next.HasAgents() || opts.Config.HasAgents() {
-		for _, w := range applyReloadAgents(opts.Config, next, opts.AgentAccess) {
+		warnings, restart, perAgent := applyReloadAgentsDetailed(opts.Config, next, opts.AgentAccess)
+		for _, w := range warnings {
 			opts.Log.Warn("reload: " + w)
+		}
+		if st != nil {
+			st.reloadApplied(activeAgentsConfig(opts.Config, next), hash, restart, perAgent)
 		}
 		opts.Log.Info("SIGHUP: configuration reloaded", zap.Int("agents", len(next.Agents)))
 		return
 	}
-	for _, w := range applyReload(opts.Config, next, opts.Access) {
+	warnings, restart, applied := applyReloadDetailed(opts.Config, next, opts.Access)
+	for _, w := range warnings {
 		opts.Log.Warn("reload: " + w)
 	}
 	var pol *access.Policy
 	if opts.Access != nil {
 		pol = opts.Access.Get()
 	}
+	if st != nil {
+		st.reloadApplied(activeSingleConfig(opts.Config, next), hash, restart,
+			map[string]agentReloadResult{
+				"default": {policyApplied: applied, restartRequired: append([]string(nil), restart...)},
+			})
+	}
 	opts.Log.Info("SIGHUP: configuration reloaded",
 		zap.String("access", describePolicy(pol)))
+}
+
+// activeSingleConfig is the running single-agent view after a reload: the
+// listener and security settings stay at their bound values, while the
+// access policy comes from the newly loaded file.
+func activeSingleConfig(cur, next *config.Config) *config.Config {
+	active := *cur
+	active.Access = next.Access
+	return &active
+}
+
+// activeAgentsConfig is the running multi-agent view after a reload: the
+// entries, listeners, security and notification filters stay at their
+// bound values, while each entry's access policy comes from the newly
+// loaded file.
+func activeAgentsConfig(cur, next *config.Config) *config.Config {
+	active := *cur
+	active.Access = next.Access
+	active.Agents = append([]config.AgentEntry(nil), cur.Agents...)
+	byName := make(map[string]config.AgentEntry, len(next.Agents))
+	for _, a := range next.Agents {
+		byName[a.EffectiveName()] = a
+	}
+	for i := range active.Agents {
+		if na, ok := byName[active.Agents[i].EffectiveName()]; ok {
+			active.Agents[i].Access = na.Access
+		}
+	}
+	return &active
 }
 
 // Run executes the configured role until SIGINT/SIGTERM.
 func Run(opts Options) error {
 	met := observ.NewMetrics()
+	if opts.status == nil {
+		opts.status = newStatusState(opts)
+	}
 	var metSrv *http.Server
 	if opts.MetricsAddr != "" {
 		metSrv = observ.ServeMetrics(opts.MetricsAddr, met.Handler(), opts.Log, newStatusHandler(opts, met))
@@ -230,9 +285,11 @@ func Run(opts Options) error {
 			zap.String("security_mode", opts.Config.Security.Mode))
 	}
 
-	// systemd watchdog: READY=1 once serving, WATCHDOG=1 pings while
-	// running (no-ops outside systemd). A wedged process is restarted
-	// by the host — the proxy is the device's only network path.
+	// systemd watchdog: READY=1 only after every configured listener has
+	// bound, WATCHDOG=1 pings while running (no-ops outside systemd). A
+	// wedged process is restarted by the host — the proxy is the device's
+	// only network path. Announcing readiness before a bind would tell the
+	// host to route traffic to a process that is about to exit.
 	if wd := watchdog.Interval(); wd > 0 {
 		opts.Log.Info("systemd watchdog enabled", zap.Duration("interval", wd))
 	}
@@ -281,6 +338,33 @@ func Run(opts Options) error {
 	defer signal.Stop(hupCh)
 	go reloadLoop(hupCh, opts, ctx.Done())
 
+	// Start the role in the background so readiness and a startup failure
+	// can be distinguished: the role closes ready only after every
+	// configured listener has bound. A bind error returns through errCh
+	// without ever advertising READY=1.
+	ready := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		switch opts.Config.Role {
+		case config.RoleManager:
+			errCh <- runManager(ctx, opts, met, snmpAgent, ready)
+		case config.RoleAgent:
+			errCh <- runAgent(ctx, opts, met, snmpAgent, ready)
+		case config.RoleGateway:
+			errCh <- runGateway(ctx, opts, met, ready)
+		default:
+			errCh <- fmt.Errorf("unknown role %q", opts.Config.Role)
+		}
+	}()
+	select {
+	case <-ready:
+	case err := <-errCh:
+		return err
+	}
+
+	// Every listener is bound: the status contract can say ready and the
+	// host may start routing traffic here.
+	opts.status.markAllReady()
 	wdStop := make(chan struct{})
 	defer close(wdStop)
 	if wd := watchdog.Interval(); wd > 0 {
@@ -289,22 +373,13 @@ func Run(opts Options) error {
 	if _, err := watchdog.NotifyReady(); err != nil {
 		opts.Log.Warn("sd_notify READY failed", zap.Error(err))
 	}
-
-	switch opts.Config.Role {
-	case config.RoleManager:
-		return runManager(ctx, opts, met, snmpAgent)
-	case config.RoleAgent:
-		return runAgent(ctx, opts, met, snmpAgent)
-	case config.RoleGateway:
-		return runGateway(ctx, opts, met)
-	default:
-		return fmt.Errorf("unknown role %q", opts.Config.Role)
-	}
+	return <-errCh
 }
 
 // runManager runs the manager-side instance: it dials the tunnel and
-// serves the clear manager leg.
-func runManager(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent *snmpmetrics.Agent) error {
+// serves the clear manager leg. ready, when supplied, is closed after
+// every configured listener has bound.
+func runManager(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent *snmpmetrics.Agent, ready ...chan<- struct{}) error {
 	psk, err := opts.Config.PSKBytes()
 	if err != nil {
 		return err
@@ -340,7 +415,7 @@ func runManager(ctx context.Context, opts Options, met *observ.Metrics, snmpAgen
 
 	switch opts.Config.Security.Mode {
 	case "usm-translate":
-		return runManagerUSM(ctx, opts, agentMet, sess)
+		return runManagerUSM(ctx, opts, agentMet, sess, ready...)
 	case "tsm":
 		filt, ferr := opts.Config.TrapFilter()
 		if ferr != nil {
@@ -351,7 +426,7 @@ func runManager(ctx context.Context, opts Options, met *observ.Metrics, snmpAgen
 			return err
 		}
 		tr.SetAccess(opts.Access)
-		return tr.Run(ctx.Done())
+		return tr.Run(ctx.Done(), ready...)
 	default:
 		filt, ferr := opts.Config.TrapFilter()
 		if ferr != nil {
@@ -359,12 +434,12 @@ func runManager(ctx context.Context, opts Options, met *observ.Metrics, snmpAgen
 		}
 		mgr := passthrough.NewManager(opts.Config.Manager, sess, opts.Log, agentMet, filt)
 		mgr.SetAccess(opts.Access)
-		return mgr.Run(ctx)
+		return mgr.Run(ctx, ready...)
 	}
 }
 
 // runManagerUSM wires the USM translate manager-side engine.
-func runManagerUSM(ctx context.Context, opts Options, met *observ.Metrics, sess *tunnel.Session) error {
+func runManagerUSM(ctx context.Context, opts Options, met *observ.Metrics, sess *tunnel.Session, ready ...chan<- struct{}) error {
 	store, err := cache.Open(opts.Config.Security.EngineStore)
 	if err != nil {
 		return err
@@ -386,7 +461,7 @@ func runManagerUSM(ctx context.Context, opts Options, met *observ.Metrics, sess 
 		return terr
 	}
 	tr.SetAccess(opts.Access)
-	return tr.Run(ctx.Done())
+	return tr.Run(ctx.Done(), ready...)
 }
 
 // runAgent runs the agent-side instance: it listens on the tunnel and
@@ -560,18 +635,18 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent 
 //     relayed as clear v2c to the manager's trap receiver.
 //   - tsm-gateway: raw DTLS front leg (RFC 6353, one SNMP datagram per
 //     DTLS record, no frame layer); the handshake is the authentication.
-func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
+func runGateway(ctx context.Context, opts Options, met *observ.Metrics, ready ...chan<- struct{}) error {
 	if met == nil {
 		met = observ.NewMetrics()
 	}
 	if opts.Config.HasAgents() {
-		return runGatewayAgents(ctx, opts, met)
+		return runGatewayAgents(ctx, opts, met, ready...)
 	}
-	return runGatewaySingle(ctx, opts, met)
+	return runGatewaySingle(ctx, opts, met, ready...)
 }
 
 // runGatewaySingle is the original one-agent gateway path.
-func runGatewaySingle(ctx context.Context, opts Options, met *observ.Metrics) error {
+func runGatewaySingle(ctx context.Context, opts Options, met *observ.Metrics, ready ...chan<- struct{}) error {
 	filt, ferr := opts.Config.TrapFilter()
 	if ferr != nil {
 		return ferr
@@ -584,7 +659,7 @@ func runGatewaySingle(ctx context.Context, opts Options, met *observ.Metrics) er
 			return err
 		}
 		gw.SetAccess(opts.Access)
-		return gw.Run(ctx.Done())
+		return gw.Run(ctx.Done(), ready...)
 	case "tsm-gateway":
 		lcfg := tunnel.ListenerConfig{
 			Mode:     "dtls",
@@ -598,7 +673,7 @@ func runGatewaySingle(ctx context.Context, opts Options, met *observ.Metrics) er
 			return err
 		}
 		gw.SetAccess(opts.Access)
-		return gw.Run(ctx.Done())
+		return gw.Run(ctx.Done(), ready...)
 	default:
 		store, err := cache.Open(opts.Config.Security.EngineStore)
 		if err != nil {
@@ -621,29 +696,33 @@ func runGatewaySingle(ctx context.Context, opts Options, met *observ.Metrics) er
 			return terr
 		}
 		tr.SetAccess(opts.Access)
-		return tr.Run(ctx.Done())
+		return tr.Run(ctx.Done(), ready...)
 	}
 }
 
 // runGatewayAgents runs one independent translator per agents: entry.
 // The entries share only the process, config file, log and metrics
-// registry; no datagram crosses them.
-func runGatewayAgents(ctx context.Context, opts Options, met *observ.Metrics) error {
+// registry; no datagram crosses them. ready, when supplied, is closed
+// after every entry's listeners have bound.
+func runGatewayAgents(ctx context.Context, opts Options, met *observ.Metrics, ready ...chan<- struct{}) error {
 	gctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(opts.Config.Agents))
 	holders := opts.AgentAccess
+	entryReady := make([]chan struct{}, 0, len(opts.Config.Agents))
 
-	launch := func(name string, holder *access.Holder, run func(<-chan struct{}) error, setAccess func(*access.Holder)) {
+	launch := func(name string, holder *access.Holder, run func(<-chan struct{}, chan<- struct{}) error, setAccess func(*access.Holder)) {
 		if holder != nil {
 			setAccess(holder)
 		}
+		ch := make(chan struct{})
+		entryReady = append(entryReady, ch)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := run(gctx.Done()); err != nil {
+			if err := run(gctx.Done(), ch); err != nil {
 				select {
 				case errCh <- fmt.Errorf("agent %s: %w", name, err):
 				default:
@@ -688,7 +767,7 @@ func runGatewayAgents(ctx context.Context, opts Options, met *observ.Metrics) er
 			if err != nil {
 				return abort(fmt.Errorf("agent %s: %w", name, err))
 			}
-			launch(name, holder, func(done <-chan struct{}) error { return tr.Run(done) }, tr.SetAccess)
+			launch(name, holder, func(done <-chan struct{}, ready chan<- struct{}) error { return tr.Run(done, ready) }, tr.SetAccess)
 		case "tsm-gateway":
 			tls := opts.Config.EffectiveTLS(a)
 			lcfg := tunnel.ListenerConfig{
@@ -703,7 +782,7 @@ func runGatewayAgents(ctx context.Context, opts Options, met *observ.Metrics) er
 				return abort(fmt.Errorf("agent %s: %w", name, err))
 			}
 			tr.SetSessionLimiter(tsmLimiter)
-			launch(name, holder, func(done <-chan struct{}) error { return tr.Run(done) }, tr.SetAccess)
+			launch(name, holder, func(done <-chan struct{}, ready chan<- struct{}) error { return tr.Run(done, ready) }, tr.SetAccess)
 		default: // usm-gateway
 			store, err := cache.Open(sec.EngineStore)
 			if err != nil {
@@ -725,8 +804,24 @@ func runGatewayAgents(ctx context.Context, opts Options, met *observ.Metrics) er
 			if terr != nil {
 				return abort(fmt.Errorf("agent %s: %w", name, terr))
 			}
-			launch(name, holder, func(done <-chan struct{}) error { return tr.Run(done) }, tr.SetAccess)
+			launch(name, holder, func(done <-chan struct{}, ready chan<- struct{}) error { return tr.Run(done, ready) }, tr.SetAccess)
 		}
+	}
+	var out chan<- struct{}
+	if len(ready) > 0 {
+		out = ready[0]
+	}
+	if out != nil {
+		go func() {
+			for _, ch := range entryReady {
+				select {
+				case <-ch:
+				case <-gctx.Done():
+					return
+				}
+			}
+			close(out)
+		}()
 	}
 	wg.Wait()
 	select {

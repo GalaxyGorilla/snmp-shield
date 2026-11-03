@@ -24,7 +24,12 @@ closed.
   and hash, role and mode, readiness, tunnel and peer state, reload result,
   restart-required fields, engine-store health, certificate expiry, and
   relevant counters as stable JSON. Never include communities, USM secrets,
-  PSKs, or private-key material.
+  PSKs, or private-key material. **Daemon part done:** `/status` now carries
+  `ready`, `config_revision`, `config_hash`, `reload` (`attempts`, `applied`,
+  `last_ok`, `last_error`, `restart_required`) and per-entry
+  `ready`/`policy_applied`/`restart_required`; readiness is only true after
+  every listener binds. Still appliance-layer: tunnel/peer state,
+  engine-store health, certificate expiry, and the management transport (A2).
 - **A5 Secret, certificate, and engine-state lifecycle:** define safe upload,
   ownership, permissions, validation, rotation, expiry reporting, backup,
   anti-rollback handling, and redaction behavior. Encryption at rest and
@@ -57,7 +62,10 @@ daemon behavior.
   counters carry an `agent` label (single-target roles use
   `agent="default"`), the SNMP health MIB exposes a per-agent `.40.<n>`
   table, and `/status` on the metrics listener exposes per-entry
-  endpoints/policy/counters as JSON. Design and implementation notes:
+  endpoints/policy/counters as JSON plus per-entry `ready`, the active
+  config revision/hash, the last reload result and restart-required
+  fields. Readiness is announced only after every entry's listeners bind.
+  Design and implementation notes:
   [docs/multi-agent.md](docs/multi-agent.md). Tests: two-entry USM e2e
   (independent policies, no cross-entry traffic, per-agent metrics),
   per-entry trap delivery/filtering, SIGHUP access reload,

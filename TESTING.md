@@ -418,6 +418,17 @@ names what would close it.
   What it still does not show: days of uptime, a real WAN (loss/reorder/jumbo
   MTU), RSS as opposed to live heap, and concurrent client fan-in rather than
   one sequential poller.
+- **Network faults are deterministic on the USM gateway device leg.**
+  `internal/testkit.FaultyUDPRelay` sits between the proxy and the fake
+  device and drops/duplicates/delays one datagram at a time.
+  `TestUSMGatewayRetriesAfterResponseLoss` proves a lost answer is recovered
+  by client retransmission; `TestUSMGatewayIgnoresDuplicateResponses` keeps
+  duplicates on the wire; `TestUSMGatewayReorderedResponses` lets a later
+  answer overtake a delayed one (correlation is by request-id);
+  `TestUSMGatewayConcurrentManagers` runs 16 managers × 10 GETs at once.
+  Still uncovered: the v3 **generator** device leg under faults (its
+  correctness oracle is the pysnmp/net-snmp conformance agent), a real WAN
+  with jumbo MTU, and RSS rather than live heap.
 - **Fuzzing is burst-mode.** Targets are run 15–30 s when a parser changes;
   the corpus runs on every `go test`, which is the important half, but long
   sessions are not continuous.

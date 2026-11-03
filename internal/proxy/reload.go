@@ -51,6 +51,74 @@ func applyReload(cur, next *config.Config, h *access.Holder) []string {
 	return warnings
 }
 
+// applyReloadAgents installs the per-agent access policies for the
+// multi-agent gateway shape and reports everything that needs a restart.
+func applyReloadAgents(cur, next *config.Config, holders map[string]*access.Holder) []string {
+	var warnings []string
+	if !next.HasAgents() {
+		return append(warnings, "agents list removed; restart required")
+	}
+	curByName := make(map[string]config.AgentEntry, len(cur.Agents))
+	for _, a := range cur.Agents {
+		curByName[a.EffectiveName()] = a
+	}
+	nextByName := make(map[string]config.AgentEntry, len(next.Agents))
+	for _, a := range next.Agents {
+		nextByName[a.EffectiveName()] = a
+	}
+	for name, a := range nextByName {
+		old, existed := curByName[name]
+		if !existed {
+			warnings = append(warnings, fmt.Sprintf("agent %s added; restart required", name))
+			continue
+		}
+		pol, err := next.EffectiveAccess(a).Policy()
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf(
+				"agent %s access policy invalid, keeping the running policy: %v", name, err))
+		} else if h := holders[name]; h != nil {
+			h.Store(pol)
+		} else {
+			warnings = append(warnings, fmt.Sprintf(
+				"agent %s has no running access holder; restart required", name))
+		}
+		if old.ListenAddr != a.ListenAddr || old.AgentAddr != a.AgentAddr || old.AgentCommunity != a.AgentCommunity {
+			warnings = append(warnings, fmt.Sprintf("agent %s listener/agent changed; restart required", name))
+		}
+		if !reflect.DeepEqual(old.Security, a.Security) {
+			warnings = append(warnings, fmt.Sprintf("agent %s security changed; restart required", name))
+		}
+		if !reflect.DeepEqual(old.TLS, a.TLS) {
+			warnings = append(warnings, fmt.Sprintf("agent %s tls changed; restart required", name))
+		}
+		if old.TrapListenAddr != a.TrapListenAddr || old.TrapSinkAddr != a.TrapSinkAddr ||
+			old.TrapSinkCommunity != a.TrapSinkCommunity {
+			warnings = append(warnings, fmt.Sprintf("agent %s trap legs changed; restart required", name))
+		}
+	}
+	for name := range curByName {
+		if _, ok := nextByName[name]; !ok {
+			warnings = append(warnings, fmt.Sprintf("agent %s removed; restart required", name))
+		}
+	}
+	if !reflect.DeepEqual(cur.Tunnel, next.Tunnel) {
+		warnings = append(warnings, "tunnel block changed (restart required)")
+	}
+	if !reflect.DeepEqual(cur.Security, next.Security) {
+		warnings = append(warnings, "security block changed (restart required)")
+	}
+	if !reflect.DeepEqual(cur.Gateway, next.Gateway) {
+		warnings = append(warnings, "gateway block changed (restart required)")
+	}
+	if !reflect.DeepEqual(cur.Notifications, next.Notifications) {
+		warnings = append(warnings, "notifications block changed (restart required)")
+	}
+	if !reflect.DeepEqual(cur.Metrics, next.Metrics) {
+		warnings = append(warnings, "metrics block changed (restart required)")
+	}
+	return warnings
+}
+
 // restartRequired lists the differences a SIGHUP cannot apply.
 func restartRequired(cur, next config.Config) []string {
 	var msgs []string

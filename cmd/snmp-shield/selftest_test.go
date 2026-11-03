@@ -794,3 +794,39 @@ func (a *fakeV3Agent) send(dg []byte, to net.Addr) {
 	}
 	_, _ = a.conn.WriteTo(dg, to)
 }
+
+// TestSelftestGatewayAgents probes every entry in the multi-agent gateway
+// shape, not just the first one.
+func TestSelftestGatewayAgents(t *testing.T) {
+	devA := testkit.NewAgent(t, testkit.AgentOptions{Community: "public"})
+	devB := testkit.NewAgent(t, testkit.AgentOptions{Community: "public"})
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gateway.yaml")
+	content := `
+security:
+  mode: usm-gateway
+  engine_store_dir: ` + dir + `
+  users:
+    - name: proxy
+      auth_protocol: sha
+      auth_passphrase: authpass
+      priv_protocol: aes
+      priv_passphrase: privpass
+agents:
+  - name: plc
+    listen_addr: "127.0.0.1:1161"
+    agent_addr: "` + devA.Addr() + `"
+  - name: ahu
+    listen_addr: "127.0.0.1:1162"
+    agent_addr: "` + devB.Addr() + `"
+`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if rc := runSelftest([]string{"--role", "gateway", "--config", path, "--json"}); rc != 0 {
+		t.Fatalf("selftest rc = %d, want 0", rc)
+	}
+	if devA.GETs() == 0 || devB.GETs() == 0 {
+		t.Fatalf("selftest did not probe every agent: plc=%d ahu=%d", devA.GETs(), devB.GETs())
+	}
+}

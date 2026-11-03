@@ -116,6 +116,21 @@ appliance-level orchestration remains outside this repository.
 | [Two-proxy USM](examples/two-proxy-usm.md) / [TSM](examples/two-proxy-tsm.md) | Both endpoints stay unchanged, or the long link is untrusted | One proxy is placed beside each endpoint |
 | [HA two-proxy](examples/ha-two-proxy.md) | The agent-side proxy needs failover | Add a second agent-side proxy and shared engine identity |
 
+**Several agents, one gateway.** The gateway role accepts an `agents:` list:
+one process, one config, one metrics endpoint, N independent
+listener↔agent pairs. Each entry has its own access policy, security
+(USM users/engine, TSM material), optional TLS and optional trap legs;
+the security mode is process-wide. The two-proxy shape stays one pair per
+agent. Any number of managers can use
+each listener. The invariant is **front listener ↔ server**, not client ↔
+server: many clients can share one listener, and one client can use several
+listeners to reach several servers. The shield is a per-asset security gate,
+not a router — it never selects an agent by community, context, or OID. See
+[docs/multi-agent.md](docs/multi-agent.md) for the `agents:` schema and
+operational details, and
+[configs/gateway-usm-agents.yaml](configs/gateway-usm-agents.yaml) for a
+template.
+
 ## Security modes
 
 **Naming note:** in this project `TSM` always means SNMP's **Transport

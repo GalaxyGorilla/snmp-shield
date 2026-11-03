@@ -42,10 +42,15 @@ type Options struct {
 	// SIGHUP re-reads it and applies the reloadable parts (the access
 	// policy). Flags mode leaves it empty: SIGHUP is then a logged no-op.
 	ConfigPath string
-	// Access is the live front-leg access policy installed into every
-	// ingress leg. Run creates it from Config.AccessPolicy() and a reload
-	// swaps it atomically; nil means "no policy" (allow everything).
+	// Access is the live front-leg access policy installed into the
+	// single-agent shape. Run creates it from Config.AccessPolicy() and a
+	// reload swaps it atomically; nil means "no policy" (allow everything).
 	Access *access.Holder
+	// AgentAccess holds one live access policy per gateway agents: entry,
+	// keyed by the entry's effective name. The map is created once at
+	// startup; adding or removing an entry is restart-only, so its keys do
+	// not change during a reload.
+	AgentAccess map[string]*access.Holder
 }
 
 // SNMP event trap OIDs, relative to the metrics base (base + ".2.x").
@@ -163,11 +168,22 @@ func reloadConfig(opts Options) {
 		opts.Log.Error("reload: new config invalid, keeping the running configuration", zap.Error(err))
 		return
 	}
+	if next.HasAgents() || opts.Config.HasAgents() {
+		for _, w := range applyReloadAgents(opts.Config, next, opts.AgentAccess) {
+			opts.Log.Warn("reload: " + w)
+		}
+		opts.Log.Info("SIGHUP: configuration reloaded", zap.Int("agents", len(next.Agents)))
+		return
+	}
 	for _, w := range applyReload(opts.Config, next, opts.Access) {
 		opts.Log.Warn("reload: " + w)
 	}
+	var pol *access.Policy
+	if opts.Access != nil {
+		pol = opts.Access.Get()
+	}
 	opts.Log.Info("SIGHUP: configuration reloaded",
-		zap.String("access", describePolicy(opts.Access.Get())))
+		zap.String("access", describePolicy(pol)))
 }
 
 // Run executes the configured role until SIGINT/SIGTERM.
@@ -212,6 +228,18 @@ func Run(opts Options) error {
 		}
 		opts.Access = access.NewHolder(pol)
 		opts.Log.Info("access policy", zap.String("policy", describePolicy(pol)))
+	}
+	if opts.Config.HasAgents() && opts.AgentAccess == nil {
+		opts.AgentAccess = make(map[string]*access.Holder, len(opts.Config.Agents))
+		for _, a := range opts.Config.Agents {
+			pol, aerr := opts.Config.EffectiveAccess(a).Policy()
+			if aerr != nil {
+				return aerr
+			}
+			name := a.EffectiveName()
+			opts.AgentAccess[name] = access.NewHolder(pol)
+			opts.Log.Info("access policy", zap.String("agent", name), zap.String("policy", describePolicy(pol)))
+		}
 	}
 	if opts.Config.Access.WritePolicy != nil && opts.Config.Security.Mode == "passthrough" {
 		if opts.Config.Role == config.RoleAgent {
@@ -281,6 +309,7 @@ func runManager(ctx context.Context, opts Options, met *observ.Metrics, snmpAgen
 	sess := tunnel.NewClientSession(dial, opts.Config.Tunnel.MaxFrameSize, 1200, opts.Log)
 	defer sess.Close()
 	sess.SetMetrics(met)
+	agentMet := met.ForAgent("default")
 	sess.SetTuning(opts.Config.Keepalive(), opts.Config.Backoff())
 
 	// Connect eagerly: the first Send on a lazy session races the DTLS
@@ -293,13 +322,13 @@ func runManager(ctx context.Context, opts Options, met *observ.Metrics, snmpAgen
 
 	switch opts.Config.Security.Mode {
 	case "usm-translate":
-		return runManagerUSM(ctx, opts, met, sess)
+		return runManagerUSM(ctx, opts, agentMet, sess)
 	case "tsm":
 		filt, ferr := opts.Config.TrapFilter()
 		if ferr != nil {
 			return ferr
 		}
-		tr, err := tsm.NewManagerTranslator(opts.Config.Manager, opts.Config.Security, sess, opts.Log, met, filt)
+		tr, err := tsm.NewManagerTranslator(opts.Config.Manager, opts.Config.Security, sess, opts.Log, agentMet, filt)
 		if err != nil {
 			return err
 		}
@@ -310,7 +339,7 @@ func runManager(ctx context.Context, opts Options, met *observ.Metrics, snmpAgen
 		if ferr != nil {
 			return ferr
 		}
-		mgr := passthrough.NewManager(opts.Config.Manager, sess, opts.Log, met, filt)
+		mgr := passthrough.NewManager(opts.Config.Manager, sess, opts.Log, agentMet, filt)
 		mgr.SetAccess(opts.Access)
 		return mgr.Run(ctx)
 	}
@@ -378,6 +407,7 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent 
 		}
 	}()
 
+	agentMet := met.ForAgent("default")
 	// USM mode state is per-instance (one authoritative engine shared by
 	// all tunnel sessions).
 	usmMode := opts.Config.Security.Mode == "usm-translate"
@@ -466,14 +496,14 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent 
 			var rerr error
 			if usmMode {
 				var tr *usm.AgentTranslator
-				tr, rerr = usm.NewAgentTranslator(opts.Config.Agent, usm.ProfilesFromSecurity(opts.Config.Security), clock, sess, opts.Log, met)
+				tr, rerr = usm.NewAgentTranslator(opts.Config.Agent, usm.ProfilesFromSecurity(opts.Config.Security), clock, sess, opts.Log, agentMet)
 				if rerr == nil {
 					tr.SetAccess(opts.Access)
 					rerr = tr.Run(sctx.Done())
 				}
 			} else if tsmMode {
 				var tr *tsm.AgentTranslator
-				tr, rerr = tsm.NewAgentTranslator(opts.Config.Agent, opts.Config.Security, sess, opts.Log, met)
+				tr, rerr = tsm.NewAgentTranslator(opts.Config.Agent, opts.Config.Security, sess, opts.Log, agentMet)
 				if rerr == nil {
 					tr.SetAccess(opts.Access)
 					rerr = tr.Run(sctx.Done())
@@ -484,7 +514,7 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent 
 					opts.Log.Error("notification filter", zap.Error(ferr))
 					return
 				}
-				agt := passthrough.NewAgent(opts.Config.Agent, sess, opts.Log, met, filt)
+				agt := passthrough.NewAgent(opts.Config.Agent, sess, opts.Log, agentMet, filt)
 				rerr = agt.Run(sctx)
 			}
 			if rerr != nil {
@@ -513,13 +543,25 @@ func runAgent(ctx context.Context, opts Options, met *observ.Metrics, snmpAgent 
 //   - tsm-gateway: raw DTLS front leg (RFC 6353, one SNMP datagram per
 //     DTLS record, no frame layer); the handshake is the authentication.
 func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
+	if met == nil {
+		met = observ.NewMetrics()
+	}
+	if opts.Config.HasAgents() {
+		return runGatewayAgents(ctx, opts, met)
+	}
+	return runGatewaySingle(ctx, opts, met)
+}
+
+// runGatewaySingle is the original one-agent gateway path.
+func runGatewaySingle(ctx context.Context, opts Options, met *observ.Metrics) error {
 	filt, ferr := opts.Config.TrapFilter()
 	if ferr != nil {
 		return ferr
 	}
+	agentMet := met.ForAgent("default")
 	switch opts.Config.Security.Mode {
 	case "usm-manager-gateway":
-		gw, err := usm.NewManagerGateway(opts.Config.Gateway, opts.Config.Security, opts.Log, met, filt)
+		gw, err := usm.NewManagerGateway(opts.Config.Gateway, opts.Config.Security, opts.Log, agentMet, filt)
 		if err != nil {
 			return err
 		}
@@ -533,7 +575,7 @@ func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
 			KeyFile:  opts.Config.Tunnel.KeyFile,
 			Insecure: opts.Config.Tunnel.InsecureSkipVerify,
 		}
-		gw, err := tsm.NewTSMGateway(opts.Config.Gateway, opts.Config.Security, lcfg, opts.Config.Tunnel.MaxSessions, opts.Log, met, filt)
+		gw, err := tsm.NewTSMGateway(opts.Config.Gateway, opts.Config.Security, lcfg, opts.Config.Tunnel.MaxSessions, opts.Log, agentMet, filt)
 		if err != nil {
 			return err
 		}
@@ -556,12 +598,119 @@ func runGateway(ctx context.Context, opts Options, met *observ.Metrics) error {
 		if len(users) == 0 {
 			return fmt.Errorf("security.users: usm-gateway needs at least one user")
 		}
-		tr, terr := usm.NewGatewayTranslator(opts.Config.Gateway, users, clock, opts.Log, met, filt)
+		tr, terr := usm.NewGatewayTranslator(opts.Config.Gateway, users, clock, opts.Log, agentMet, filt)
 		if terr != nil {
 			return terr
 		}
 		tr.SetAccess(opts.Access)
 		return tr.Run(ctx.Done())
+	}
+}
+
+// runGatewayAgents runs one independent translator per agents: entry.
+// The entries share only the process, config file, log and metrics
+// registry; no datagram crosses them.
+func runGatewayAgents(ctx context.Context, opts Options, met *observ.Metrics) error {
+	filt, ferr := opts.Config.TrapFilter()
+	if ferr != nil {
+		return ferr
+	}
+	gctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(opts.Config.Agents))
+	holders := opts.AgentAccess
+
+	launch := func(name string, holder *access.Holder, run func(<-chan struct{}) error, setAccess func(*access.Holder)) {
+		if holder != nil {
+			setAccess(holder)
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := run(gctx.Done()); err != nil {
+				select {
+				case errCh <- fmt.Errorf("agent %s: %w", name, err):
+				default:
+				}
+				cancel()
+			}
+		}()
+	}
+	abort := func(err error) error {
+		cancel()
+		wg.Wait()
+		return err
+	}
+
+	for _, a := range opts.Config.Agents {
+		name := a.EffectiveName()
+		gw := opts.Config.EffectiveGateway(a)
+		sec := opts.Config.EffectiveSecurity(a)
+		agentMet := met.ForAgent(name)
+		holder := holders[name]
+		if holder == nil {
+			pol, perr := opts.Config.EffectiveAccess(a).Policy()
+			if perr != nil {
+				return abort(fmt.Errorf("agent %s: %w", name, perr))
+			}
+			holder = access.NewHolder(pol)
+		}
+		switch opts.Config.Security.Mode {
+		case "usm-manager-gateway":
+			tr, err := usm.NewManagerGateway(gw, sec, opts.Log, agentMet, filt)
+			if err != nil {
+				return abort(fmt.Errorf("agent %s: %w", name, err))
+			}
+			launch(name, holder, func(done <-chan struct{}) error { return tr.Run(done) }, tr.SetAccess)
+		case "tsm-gateway":
+			tls := opts.Config.EffectiveTLS(a)
+			lcfg := tunnel.ListenerConfig{
+				Mode:     "dtls",
+				CAFile:   tls.CAFile,
+				CertFile: tls.CertFile,
+				KeyFile:  tls.KeyFile,
+				Insecure: tls.InsecureSkipVerify,
+			}
+			tr, err := tsm.NewTSMGateway(gw, sec, lcfg, opts.Config.Tunnel.MaxSessions, opts.Log, agentMet, filt)
+			if err != nil {
+				return abort(fmt.Errorf("agent %s: %w", name, err))
+			}
+			launch(name, holder, func(done <-chan struct{}) error { return tr.Run(done) }, tr.SetAccess)
+		default: // usm-gateway
+			store, err := cache.Open(sec.EngineStore)
+			if err != nil {
+				return abort(fmt.Errorf("agent %s: %w", name, err))
+			}
+			engineID, err := parseEngineID(sec.EngineID)
+			if err != nil {
+				return abort(fmt.Errorf("agent %s: %w", name, err))
+			}
+			clock, err := cache.NewEngineClock(store, engineID, zapLogger{opts.Log})
+			if err != nil {
+				return abort(fmt.Errorf("agent %s: %w", name, err))
+			}
+			users := usm.ProfilesFromSecurity(sec)
+			if len(users) == 0 {
+				return abort(fmt.Errorf("agent %s: security.users needs at least one user", name))
+			}
+			tr, terr := usm.NewGatewayTranslator(gw, users, clock, opts.Log, agentMet, filt)
+			if terr != nil {
+				return abort(fmt.Errorf("agent %s: %w", name, terr))
+			}
+			launch(name, holder, func(done <-chan struct{}) error { return tr.Run(done) }, tr.SetAccess)
+		}
+	}
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		if ctx.Err() != nil {
+			return nil
+		}
+		return err
+	default:
+		return nil
 	}
 }
 

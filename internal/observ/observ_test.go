@@ -87,16 +87,17 @@ func TestLogHonoursLevel(t *testing.T) {
 // page": the registry is private, so only the handler proves registration.
 func TestMetricsScrape(t *testing.T) {
 	met := NewMetrics()
-	met.ReqForwarded.Inc()
+	agent := met.ForAgent("default")
+	agent.ReqForwarded.Inc()
 	met.TunnelUp.Set(1)
-	met.ForwardLatency.Observe(0.01)
+	agent.ForwardLatency.Observe(0.01)
 
 	rec := scrape(t, met.Handler())
 	for _, want := range []string{
-		`snmp_shield_requests_forwarded_total 1`,
+		`snmp_shield_requests_forwarded_total{agent="default"} 1`,
 		`snmp_shield_tunnel_up 1`,
 		`snmp_shield_sessions_active 0`,
-		`snmp_shield_forward_latency_seconds_count 1`,
+		`snmp_shield_forward_latency_seconds_count{agent="default"} 1`,
 	} {
 		if !strings.Contains(rec, want) {
 			t.Errorf("scrape output is missing %q", want)

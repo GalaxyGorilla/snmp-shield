@@ -21,6 +21,7 @@ import (
 
 // check is one selftest/validate result line.
 type check struct {
+	Agent  string `json:"agent,omitempty"`
 	Name   string `json:"name"`
 	OK     bool   `json:"ok"`
 	Detail string `json:"detail,omitempty"`
@@ -128,9 +129,34 @@ func finishValidate(rep report, jsonOut bool) int {
 
 // preflight checks local resources referenced by the config: tunnel
 // certificate material and the engine store path. Returns one check per
-// resource (only the ones the config references).
+// resource (only the ones the config references). In the multi-agent
+// gateway shape every entry is pre-flighted independently.
 func preflight(cfg *config.Config) []check {
 	var out []check
+	if cfg.HasAgents() {
+		for _, a := range cfg.Agents {
+			name := a.EffectiveName()
+			t := cfg.EffectiveTLS(a)
+			if t.CertFile != "" || t.KeyFile != "" {
+				ch := checkKeyPair(t.CertFile, t.KeyFile)
+				ch.Agent = name
+				ch.Name = "tls keypair"
+				out = append(out, ch)
+			}
+			if t.CAFile != "" {
+				ch := checkCA(t.CAFile)
+				ch.Agent = name
+				ch.Name = "tls CA"
+				out = append(out, ch)
+			}
+			if sec := cfg.EffectiveSecurity(a); sec.EngineStore != "" {
+				ch := checkEngineStore(sec.EngineStore)
+				ch.Agent = name
+				out = append(out, ch)
+			}
+		}
+		return out
+	}
 	t := cfg.Tunnel
 	if t.CertFile != "" || t.KeyFile != "" {
 		out = append(out, checkKeyPair(t.CertFile, t.KeyFile))
@@ -217,6 +243,28 @@ func runSelftest(args []string) int {
 		case config.RoleAgent:
 			rep.Checks = append(rep.Checks, probeAgent(ctx, cfg.Agent.AgentAddr, agentCommunity(cfg)))
 		case config.RoleGateway:
+			if cfg.HasAgents() {
+				for _, a := range cfg.Agents {
+					name := a.EffectiveName()
+					gw := cfg.EffectiveGateway(a)
+					sec := cfg.EffectiveSecurity(a)
+					if cfg.Security.Mode == "tsm-gateway" {
+						ch := probeCertExpiry(cfg.EffectiveTLS(a).CertFile)
+						ch.Agent = name
+						rep.Checks = append(rep.Checks, ch)
+					}
+					if cfg.Security.Mode == "usm-manager-gateway" {
+						ch := probeAgentV3For(ctx, gw, sec)
+						ch.Agent = name
+						rep.Checks = append(rep.Checks, ch)
+					} else if gw.AgentAddr != "" {
+						ch := probeAgent(ctx, gw.AgentAddr, gatewayCommunityFor(gw))
+						ch.Agent = name
+						rep.Checks = append(rep.Checks, ch)
+					}
+				}
+				break
+			}
 			// tsm-gateway front-leg material is checked by preflight;
 			// the leg that must work is toward the legacy agent.
 			if cfg.Security.Mode == "tsm-gateway" {
@@ -284,10 +332,16 @@ func agentCommunity(cfg *config.Config) string {
 }
 
 // gatewayCommunity picks the v1/v2c community used toward the legacy
-// agent behind a gateway.
+// agent behind a single-agent gateway.
 func gatewayCommunity(cfg *config.Config) string {
-	if cfg.Gateway.AgentCommunity != "" {
-		return cfg.Gateway.AgentCommunity
+	return gatewayCommunityFor(cfg.Gateway)
+}
+
+// gatewayCommunityFor picks the v1/v2c community used toward one gateway
+// entry's legacy agent.
+func gatewayCommunityFor(gw config.GatewayRole) string {
+	if gw.AgentCommunity != "" {
+		return gw.AgentCommunity
 	}
 	return "public"
 }
@@ -450,9 +504,11 @@ func sysDescrVarbinds() []byte {
 // credentials, verifying the response digest and decrypting it. This is
 // the exact flow the gateway itself drives per request.
 func probeAgentV3(ctx context.Context, cfg *config.Config) check {
-	name := "agent(v3) " + cfg.Gateway.AgentAddr
-	gw := cfg.Gateway
-	sec := cfg.Security
+	return probeAgentV3For(ctx, cfg.Gateway, cfg.Security)
+}
+
+func probeAgentV3For(ctx context.Context, gw config.GatewayRole, sec config.Security) check {
+	name := "agent(v3) " + gw.AgentAddr
 	if len(sec.Users) == 0 {
 		return check{Name: name, OK: false, Detail: "no security.users configured"}
 	}

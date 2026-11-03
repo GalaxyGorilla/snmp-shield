@@ -1,7 +1,9 @@
 # BACKLOG — snmp-shield
 
 The documented protocol scope is implemented. The open items below concern
-turnkey integration into a managed appliance with a web UI.
+turnkey integration into a managed appliance with a web UI. The gateway
+multi-agent co-hosting (S1a) is implemented; the two-proxy variant stays
+closed.
 
 ## Open — appliance management integration
 
@@ -38,48 +40,63 @@ Completion means an unprivileged management UI can safely configure and
 operate every supported deployment mode without duplicating undocumented
 daemon behavior.
 
-## Open — scope
+## Done — scope (kept for reference)
 
-- **S1 Multiple agents per instance:** like the sibling Shield projects,
-  snmp-shield binds **one** agent (or manager) target per instance: an
-  instance has a single `agent.agent_addr` / `gateway.agent_addr`, and
-  `usm-manager-gateway` names one agent user. Protecting several agents means
-  one process + config + unit per agent, or one two-proxy pair per endpoint.
-  modbus-shield already co-hosts N listener↔device pairs in one process
-  (`devices: []`, `internal/proxy/runner.go`): one config, one process, one
-  metrics endpoint with a per-device label. Consider the same shape here — one
-  instance in front of several agents, each entry a front listener/target with
-  its own policy, allow-list and rate limit — so an appliance does not need a
-  process per agent. Decide deliberately: this is a scaling/ops convenience,
-  **not** a new security capability, and it must not become protocol
-  translation or request routing between agents.
+- **S1a Multiple agents per instance (gateway-only) — DONE (Phase 1,
+  2026-11-03).** The gateway role now accepts an `agents:` list: one
+  process, one config, one metrics endpoint, N independent
+  listener↔agent pairs. Each entry has its own `access`, `security`
+  (users, engine ID/store, TSM identities, trap community), optional
+  `tls`, and optional trap legs. `security.engine_store_dir` derives a
+  per-entry store as `<dir>/<name>.json`; an explicit `engine_store`
+  wins. One security mode per process. SIGHUP applies access changes per
+  entry by name; listener/agent/security/TLS/trap changes are
+  restart-required. `validate`/`selftest` iterate entries, and Prometheus
+  counters carry an `agent` label (single-target roles use
+  `agent="default"`). Design and implementation notes:
+  [docs/multi-agent.md](docs/multi-agent.md). Tests: two-entry USM e2e
+  (independent policies, no cross-entry traffic, per-agent metrics),
+  per-entry trap delivery, SIGHUP access reload, TSM/manager-gateway
+  bind smoke tests, config validation, per-entry selftest.
 
-  **Confirmed shape (review of the three projects):** the 1-to-1 limit is on
-  the *upstream target*, not on clients. A single instance serves any number
-  of managers and trap senders; they all reach the one agent. The other
-  listeners and lists are not multi-agent:
+  The two-proxy shape stays one pair per agent: the custom tunnel frame has
+  no agent selector, and adding one would turn the security tunnel into a
+  router. That part is closed as **S1b** below.
+
+## Closed — scope (kept for reference)
+
+- **S1b Multi-agent over the two-proxy tunnel — CLOSED (not planned).**
+  The 1-to-1 limit is on the *upstream target*, not on clients. A single
+  instance serves any number of managers and trap senders; they all reach
+  the one agent. The other listeners and lists are not multi-agent:
 
   - `gateway.listen_addr` (requests) and `gateway.trap_listen_addr`
     (notifications) are different directions/roles, not two front doors for
     one target. The same is true for `manager.*` and `agent.*`.
   - `tunnel.dial_addrs` is a **failover list for the same logical agent-side
-    tunnel**, not a set of different agents. It walks the list; it never routes
-    a request to a different agent.
+    tunnel**, not a set of different agents. It walks the list; it never
+    routes a request to a different agent.
   - `security.users` / `security.tsm_identities` are several managers'
     credentials for the **same** agent, not agent selectors.
   - There is no `extra_listen` equivalent: the same request path cannot be
     bound on a second address in one instance.
 
+  **Why S1b is closed:** SNMP has no honest target selector in the request
+  (community and `contextName` are security identities; the translating modes
+  drop `contextName`), so a shared front listener would be a proxy forwarder.
+  The tunnel frame has no agent selector either. USM/TSM state is per agent,
+  so multi-agent over one tunnel would need both routing and per-agent
+  security inside the custom link. One pair per agent is the honest shape.
+
   Current parity:
 
   | Capability | modbus-shield | bacnet-shield | snmp-shield |
   |---|---|---|---|
-  | Upstream targets per instance | N (`devices:`) | N (`devices:`) | **1** |
-  | Front listeners per target | 1 + `extra_listen` | 1 + `extra_listen` | 1 per role/direction; no extras |
-  | Per-target policy/metrics | yes | yes | N/A (one target) |
+  | Upstream targets per instance | N (`devices:`) | N (`devices:`) | gateway: N (implemented); two-proxy: 1 |
+  | Front listeners per target | 1 + `extra_listen` | 1 + `extra_listen` | 1 per target; no extras |
+  | Per-target policy/metrics | yes | yes | per entry |
+  | Model | co-hosting | co-hosting | gateway co-hosting; two-proxy one pair per target |
 
-  If S1 is implemented, decide the entry name (`agents:` is more honest than
-  `devices:` for SNMP), whether each entry gets its own request + trap
-  listeners, and whether an `extra_listen`-style list is needed at all. The
-  reference implementations are modbus-shield's `devices:` +
+  The sibling reference implementations are modbus-shield's `devices:` +
   `internal/proxy/runner.go` and bacnet-shield's `devices:` + `extra_listen`.
+  They remain the right reference for what co-hosting means.

@@ -709,3 +709,159 @@ func TestTunnelMaxSessions(t *testing.T) {
 		t.Fatal("negative tunnel.max_sessions accepted (would read as unlimited)")
 	}
 }
+
+// --- multi-agent gateway ---------------------------------------------------
+
+func TestValidateGatewayAgentsUSM(t *testing.T) {
+	dir := t.TempDir()
+	c := &Config{
+		Role: RoleGateway,
+		Security: Security{
+			Mode:           "usm-gateway",
+			Users:          []UserCfg{goodUser()},
+			EngineStoreDir: dir,
+		},
+		Agents: []AgentEntry{
+			{Name: "plc", ListenAddr: ":1161", AgentAddr: "10.0.0.1:161",
+				Access: &Access{ReadOnly: true}},
+			{Name: "ahu", ListenAddr: ":1162", AgentAddr: "10.0.0.2:161"},
+		},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid multi-agent usm config rejected: %v", err)
+	}
+	if got := c.EffectiveSecurity(c.Agents[0]).EngineStore; got != filepath.Join(dir, "plc.json") {
+		t.Fatalf("derived engine store = %q, want %q", got, filepath.Join(dir, "plc.json"))
+	}
+	if !c.EffectiveAccess(c.Agents[0]).ReadOnly {
+		t.Fatal("per-entry read_only was lost")
+	}
+	if c.EffectiveAccess(c.Agents[1]).ReadOnly {
+		t.Fatal("entry without access inherited another entry's policy")
+	}
+	if got := c.EffectiveGateway(c.Agents[1]).ListenAddr; got != ":1162" {
+		t.Fatalf("effective listen = %q", got)
+	}
+}
+
+func TestValidateGatewayAgentsRejects(t *testing.T) {
+	dir := t.TempDir()
+	base := func() *Config {
+		return &Config{
+			Role: RoleGateway,
+			Security: Security{
+				Mode:           "usm-gateway",
+				Users:          []UserCfg{goodUser()},
+				EngineStoreDir: dir,
+			},
+			Agents: []AgentEntry{{Name: "plc", ListenAddr: ":1161", AgentAddr: "10.0.0.1:161"}},
+		}
+	}
+	cases := []struct {
+		name string
+		edit func(*Config)
+	}{
+		{"single-agent listener alongside agents", func(c *Config) { c.Gateway.ListenAddr = ":161" }},
+		{"single-agent trap legs alongside agents", func(c *Config) { c.Gateway.TrapListenAddr = ":162" }},
+		{"missing listen", func(c *Config) { c.Agents[0].ListenAddr = "" }},
+		{"missing agent", func(c *Config) { c.Agents[0].AgentAddr = "" }},
+		{"duplicate name", func(c *Config) {
+			c.Agents = append(c.Agents, AgentEntry{Name: "plc", ListenAddr: ":1162", AgentAddr: "10.0.0.2:161"})
+		}},
+		{"unsafe name", func(c *Config) { c.Agents[0].Name = "../escape" }},
+		{"duplicate listen", func(c *Config) {
+			c.Agents = append(c.Agents, AgentEntry{Name: "ahu", ListenAddr: ":1161", AgentAddr: "10.0.0.2:161"})
+		}},
+		{"half trap pair", func(c *Config) { c.Agents[0].TrapListenAddr = ":1162" }},
+		{"per-entry mode", func(c *Config) { c.Agents[0].Security = &Security{Mode: "tsm-gateway"} }},
+		{"invalid per-entry access", func(c *Config) {
+			c.Agents[0].Access = &Access{ReadOnly: true, WritePolicy: &WritePolicyCfg{Default: "allow"}}
+		}},
+		{"missing users", func(c *Config) { c.Security.Users = nil }},
+		{"missing engine store", func(c *Config) { c.Security.EngineStoreDir = "" }},
+		{"duplicate engine store", func(c *Config) {
+			c.Security.EngineStoreDir = ""
+			c.Security.EngineStore = "/tmp/shared-engine.json"
+			c.Agents = append(c.Agents, AgentEntry{Name: "ahu", ListenAddr: ":1162", AgentAddr: "10.0.0.2:161"})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := base()
+			tc.edit(c)
+			if err := c.Validate(); err == nil {
+				t.Fatalf("%s accepted", tc.name)
+			}
+		})
+	}
+}
+
+func TestValidateGatewayAgentsTSMAndManager(t *testing.T) {
+	tsm := &Config{
+		Role:     RoleGateway,
+		Security: Security{Mode: "tsm-gateway"},
+		Tunnel:   Tunnel{CAFile: "ca.pem", CertFile: "server.crt", KeyFile: "server.key"},
+		Agents:   []AgentEntry{{Name: "plc", ListenAddr: ":1161", AgentAddr: "10.0.0.1:161"}},
+	}
+	if err := tsm.Validate(); err != nil {
+		t.Fatalf("valid tsm multi-agent config rejected: %v", err)
+	}
+	tsm.Tunnel.CAFile = ""
+	if err := tsm.Validate(); err == nil {
+		t.Fatal("tsm multi-agent without CA accepted")
+	}
+
+	mg := &Config{
+		Role:     RoleGateway,
+		Security: Security{Mode: "usm-manager-gateway", Users: []UserCfg{goodUser()}},
+		Agents:   []AgentEntry{{Name: "plc", ListenAddr: ":1161", AgentAddr: "10.0.0.1:161"}},
+	}
+	if err := mg.Validate(); err != nil {
+		t.Fatalf("valid manager-gateway multi-agent config rejected: %v", err)
+	}
+	mg.Security.Users = nil
+	if err := mg.Validate(); err == nil {
+		t.Fatal("manager-gateway multi-agent without agent users accepted")
+	}
+}
+
+func TestLoadGatewayAgentsYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTemp(t, `
+security:
+  mode: usm-gateway
+  engine_store_dir: `+dir+`
+  users:
+    - name: proxy
+      auth_protocol: sha
+      auth_passphrase: authpass
+      priv_protocol: aes
+      priv_passphrase: privpass
+agents:
+  - name: plc
+    listen_addr: ":1161"
+    agent_addr: "10.0.0.1:161"
+    access:
+      read_only: true
+    trap_listen_addr: ":1261"
+    trap_sink_addr: "10.8.0.5:162"
+  - name: ahu
+    listen_addr: ":1162"
+    agent_addr: "10.0.0.2:161"
+    security:
+      engine_store: `+filepath.Join(dir, "ahu-engine.json")+`
+`)
+	cfg, err := Load(path, RoleGateway)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.Agents) != 2 || cfg.Agents[0].Name != "plc" || cfg.Agents[1].Name != "ahu" {
+		t.Fatalf("agents = %+v", cfg.Agents)
+	}
+	if !cfg.EffectiveAccess(cfg.Agents[0]).ReadOnly {
+		t.Fatal("plc read_only not loaded")
+	}
+	if got := cfg.EffectiveSecurity(cfg.Agents[1]).EngineStore; got != filepath.Join(dir, "ahu-engine.json") {
+		t.Fatalf("ahu engine store = %q", got)
+	}
+}

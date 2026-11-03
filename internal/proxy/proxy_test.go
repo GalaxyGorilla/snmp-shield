@@ -8,10 +8,14 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -22,6 +26,7 @@ import (
 	"github.com/GalaxyGorilla/snmp-shield/internal/msg"
 	"github.com/GalaxyGorilla/snmp-shield/internal/observ"
 	"github.com/GalaxyGorilla/snmp-shield/internal/snmpmetrics"
+	"github.com/GalaxyGorilla/snmp-shield/internal/testkit"
 	"github.com/GalaxyGorilla/snmp-shield/internal/tunnel"
 	"github.com/gosnmp/gosnmp"
 	dto "github.com/prometheus/client_model/go"
@@ -1256,4 +1261,367 @@ func TestRunAgentSessionCap(t *testing.T) {
 	_ = third.Close()
 
 	stopRun(t, agCancel, agErr, "agent")
+}
+
+// startGatewayAgents runs runGateway with an agents: list and waits for
+// every front listener to bind.
+func startGatewayAgents(t *testing.T, cfg *config.Config, met *observ.Metrics, holders map[string]*access.Holder) (context.CancelFunc, chan error) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runGateway(ctx, Options{Config: cfg, Log: zap.NewNop(), AgentAccess: holders}, met)
+	}()
+	for _, a := range cfg.Agents {
+		waitBound(t, a.ListenAddr)
+		if a.TrapListenAddr != "" {
+			waitBound(t, a.TrapListenAddr)
+		}
+	}
+	return cancel, errCh
+}
+
+// TestRunGatewayAgentsUSM pins the multi-agent gateway shape end to end:
+// two front listeners, two upstream agents, independent access policies,
+// no cross-entry traffic, and per-agent Prometheus labels.
+func TestRunGatewayAgentsUSM(t *testing.T) {
+	met := observ.NewMetrics()
+	agentA, setsA := countingFakeAgent(t, "127.0.0.1:0")
+	defer agentA.Close()
+	agentB, setsB := countingFakeAgent(t, "127.0.0.1:0")
+	defer agentB.Close()
+
+	cfg := &config.Config{Role: config.RoleGateway}
+	cfg.Defaults()
+	cfg.Security.Mode = "usm-gateway"
+	cfg.Security.Users = testUsers()
+	cfg.Security.EngineStoreDir = t.TempDir()
+	cfg.Agents = []config.AgentEntry{
+		{
+			Name:       "plc",
+			ListenAddr: freeUDPPort(t),
+			AgentAddr:  agentA.LocalAddr().String(),
+			Access:     &config.Access{ReadOnly: true},
+		},
+		{
+			Name:       "ahu",
+			ListenAddr: freeUDPPort(t),
+			AgentAddr:  agentB.LocalAddr().String(),
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config validate: %v", err)
+	}
+
+	cancel, errCh := startGatewayAgents(t, cfg, met, nil)
+	defer cancel()
+
+	gA := gosnmpV3(t, cfg.Agents[0].ListenAddr)
+	defer gA.Conn.Close()
+	gB := gosnmpV3(t, cfg.Agents[1].ListenAddr)
+	defer gB.Conn.Close()
+
+	if _, err := gA.Get([]string{"1.3.6.1.2.1.1.1.0"}); err != nil {
+		t.Fatalf("GET through plc: %v", err)
+	}
+	if _, err := gB.Get([]string{"1.3.6.1.2.1.1.1.0"}); err != nil {
+		t.Fatalf("GET through ahu: %v", err)
+	}
+
+	// plc is read-only: the SET is answered notWritable and never reaches
+	// its agent.
+	res, err := gA.Set([]gosnmp.SnmpPDU{{
+		Name:  "1.3.6.1.2.1.1.5.0",
+		Type:  gosnmp.OctetString,
+		Value: "nope",
+	}})
+	if err != nil {
+		t.Fatalf("plc SET transport error: %v", err)
+	}
+	if res.Error != gosnmp.NotWritable {
+		t.Fatalf("plc SET error-status = %v, want notWritable", res.Error)
+	}
+	if n := setsA.Load(); n != 0 {
+		t.Fatalf("refused SET reached plc %d time(s)", n)
+	}
+
+	// ahu is writable: the SET reaches ahu and nowhere else.
+	res, err = gB.Set([]gosnmp.SnmpPDU{{
+		Name:  "1.3.6.1.2.1.1.5.0",
+		Type:  gosnmp.OctetString,
+		Value: "ok",
+	}})
+	if err != nil {
+		t.Fatalf("ahu SET transport error: %v", err)
+	}
+	if res.Error != gosnmp.NoError {
+		t.Fatalf("ahu SET error-status = %v, want noError", res.Error)
+	}
+	if n := setsB.Load(); n != 1 {
+		t.Fatalf("ahu SET reached ahu %d time(s), want 1", n)
+	}
+	if n := setsA.Load(); n != 0 {
+		t.Fatalf("ahu SET leaked to plc %d time(s)", n)
+	}
+
+	// The scrape carries one series per entry.
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	rec := httptest.NewRecorder()
+	met.Handler().ServeHTTP(rec, req)
+	body := rec.Body.String()
+	for _, want := range []string{`agent="plc"`, `agent="ahu"`} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("scrape is missing %s", want)
+		}
+	}
+
+	stopRun(t, cancel, errCh, "gateway agents")
+}
+
+// agentHolders builds one live access holder per agents: entry.
+func agentHolders(t *testing.T, cfg *config.Config) map[string]*access.Holder {
+	t.Helper()
+	out := make(map[string]*access.Holder, len(cfg.Agents))
+	for _, a := range cfg.Agents {
+		pol, err := cfg.EffectiveAccess(a).Policy()
+		if err != nil {
+			t.Fatalf("agent %s policy: %v", a.EffectiveName(), err)
+		}
+		out[a.EffectiveName()] = access.NewHolder(pol)
+	}
+	return out
+}
+
+// TestReloadAgentsAccessPolicy pins SIGHUP on the multi-agent shape: an
+// access-only edit changes the next datagram on that entry, does not
+// touch the other entry, and needs no restart.
+func TestReloadAgentsAccessPolicy(t *testing.T) {
+	agentA, setsA := countingFakeAgent(t, "127.0.0.1:0")
+	defer agentA.Close()
+	agentB, setsB := countingFakeAgent(t, "127.0.0.1:0")
+	defer agentB.Close()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gateway.yaml")
+	listenA := freeUDPPort(t)
+	listenB := freeUDPPort(t)
+	writeCfg := func(readOnlyA bool) {
+		accessBlock := ""
+		if readOnlyA {
+			accessBlock = "    access:\n      read_only: true\n"
+		}
+		content := fmt.Sprintf(`security:
+  mode: usm-gateway
+  engine_store_dir: %s
+  users:
+    - name: proxy
+      auth_protocol: sha
+      auth_passphrase: authpass
+      priv_protocol: aes
+      priv_passphrase: privpass
+agents:
+  - name: plc
+    listen_addr: %q
+    agent_addr: %q
+%s  - name: ahu
+    listen_addr: %q
+    agent_addr: %q
+`, dir, listenA, agentA.LocalAddr().String(), accessBlock,
+			listenB, agentB.LocalAddr().String())
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeCfg(false)
+	cfg, err := config.Load(path, config.RoleGateway)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	holders := agentHolders(t, cfg)
+
+	cancel, errCh := startGatewayAgents(t, cfg, observ.NewMetrics(), holders)
+	defer cancel()
+
+	gA := gosnmpV3(t, cfg.Agents[0].ListenAddr)
+	defer gA.Conn.Close()
+	gB := gosnmpV3(t, cfg.Agents[1].ListenAddr)
+	defer gB.Conn.Close()
+
+	set := func(g *gosnmp.GoSNMP, value string) *gosnmp.SnmpPacket {
+		t.Helper()
+		res, serr := g.Set([]gosnmp.SnmpPDU{{
+			Name:  "1.3.6.1.2.1.1.5.0",
+			Type:  gosnmp.OctetString,
+			Value: value,
+		}})
+		if serr != nil {
+			t.Fatalf("SET: %v", serr)
+		}
+		return res
+	}
+
+	if res := set(gA, "before"); res.Error != gosnmp.NoError {
+		t.Fatalf("plc SET before reload = %v", res.Error)
+	}
+	if n := setsA.Load(); n != 1 {
+		t.Fatalf("plc saw %d SETs before reload, want 1", n)
+	}
+
+	// Lock plc's write path only.
+	writeCfg(true)
+	next, err := config.Load(path, config.RoleGateway)
+	if err != nil {
+		t.Fatalf("reload load: %v", err)
+	}
+	if warnings := applyReloadAgents(cfg, next, holders); len(warnings) != 0 {
+		t.Fatalf("access-only reload warned: %v", warnings)
+	}
+
+	if res := set(gA, "after"); res.Error != gosnmp.NotWritable {
+		t.Fatalf("plc SET after reload = %v, want notWritable", res.Error)
+	}
+	if n := setsA.Load(); n != 1 {
+		t.Fatalf("refused SET reached plc: %d", n)
+	}
+	if res := set(gB, "still-open"); res.Error != gosnmp.NoError {
+		t.Fatalf("ahu SET after reload = %v, want noError", res.Error)
+	}
+	if n := setsB.Load(); n != 1 {
+		t.Fatalf("ahu saw %d SETs, want 1", n)
+	}
+
+	stopRun(t, cancel, errCh, "gateway agents")
+}
+
+// TestRunGatewayAgentsTrapLegs pins per-entry notification legs: a clear
+// trap sent to one entry's trap listener is wrapped and delivered to that
+// entry's sink only.
+func TestRunGatewayAgentsTrapLegs(t *testing.T) {
+	agentA := fakeAgent(t, "127.0.0.1:0")
+	defer agentA.Close()
+	agentB := fakeAgent(t, "127.0.0.1:0")
+	defer agentB.Close()
+
+	sinkA := testkit.NewV3Sink(t, testkit.V3SinkOptions{
+		User: "proxy", AuthPass: "authpass", PrivPass: "privpass",
+	})
+	sinkB := testkit.NewV3Sink(t, testkit.V3SinkOptions{
+		User: "proxy", AuthPass: "authpass", PrivPass: "privpass",
+	})
+
+	cfg := &config.Config{Role: config.RoleGateway}
+	cfg.Defaults()
+	cfg.Security.Mode = "usm-gateway"
+	cfg.Security.Users = testUsers()
+	cfg.Security.EngineStoreDir = t.TempDir()
+	cfg.Agents = []config.AgentEntry{
+		{
+			Name:           "plc",
+			ListenAddr:     freeUDPPort(t),
+			AgentAddr:      agentA.LocalAddr().String(),
+			TrapListenAddr: freeUDPPort(t),
+			TrapSinkAddr:   sinkA.Addr,
+		},
+		{
+			Name:           "ahu",
+			ListenAddr:     freeUDPPort(t),
+			AgentAddr:      agentB.LocalAddr().String(),
+			TrapListenAddr: freeUDPPort(t),
+			TrapSinkAddr:   sinkB.Addr,
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config validate: %v", err)
+	}
+	cancel, errCh := startGatewayAgents(t, cfg, observ.NewMetrics(), nil)
+	defer cancel()
+
+	// Build a clear v2c coldStart trap.
+	oidBytes, err := msg.EncodeOID("1.3.6.1.6.3.1.1.5.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	vb1 := msg.AppendTLV(nil, 0x30, append(
+		msg.AppendTLV(nil, 0x06, msg.OIDSysUpTime),
+		msg.AppendTLV(nil, 0x43, []byte{0, 0, 0, 1})...))
+	vb2 := msg.AppendTLV(nil, 0x30, append(
+		msg.AppendTLV(nil, 0x06, msg.OIDSnmpTrapOID),
+		msg.AppendTLV(nil, 0x06, oidBytes)...))
+	pdu := msg.BuildPDU(msg.PDUSNMPv2Trap, 0, 0, 0, append(vb1, vb2...))
+	dg, err := msg.BuildV1V2c(msg.Version2c, []byte("public"), pdu)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	dst, err := net.ResolveUDPAddr("udp", cfg.Agents[0].TrapListenAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.WriteTo(dg, dst); err != nil {
+		t.Fatal(err)
+	}
+
+	sinkA.WaitForOID(t, "1.3.6.1.6.3.1.1.5.1", 10*time.Second)
+	time.Sleep(200 * time.Millisecond)
+	if got := sinkB.Count(); got != 0 {
+		t.Fatalf("plc trap leaked to ahu sink: %d notification(s)", got)
+	}
+
+	stopRun(t, cancel, errCh, "gateway agents")
+}
+
+// TestRunGatewayAgentsTSMBinds proves the multi-agent runner builds and
+// binds one raw-DTLS front leg per tsm-gateway entry.
+func TestRunGatewayAgentsTSMBinds(t *testing.T) {
+	agentA := fakeAgent(t, "127.0.0.1:0")
+	defer agentA.Close()
+	agentB := fakeAgent(t, "127.0.0.1:0")
+	defer agentB.Close()
+
+	ca, serverCrt, serverKey, _, _ := certFiles(t)
+	cfg := &config.Config{Role: config.RoleGateway}
+	cfg.Defaults()
+	cfg.Security.Mode = "tsm-gateway"
+	cfg.Tunnel.CAFile = ca
+	cfg.Tunnel.CertFile = serverCrt
+	cfg.Tunnel.KeyFile = serverKey
+	cfg.Agents = []config.AgentEntry{
+		{Name: "plc", ListenAddr: freeUDPPort(t), AgentAddr: agentA.LocalAddr().String()},
+		{Name: "ahu", ListenAddr: freeUDPPort(t), AgentAddr: agentB.LocalAddr().String()},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config validate: %v", err)
+	}
+	cancel, errCh := startGatewayAgents(t, cfg, observ.NewMetrics(), nil)
+	defer cancel()
+	stopRun(t, cancel, errCh, "gateway agents tsm")
+}
+
+// TestRunGatewayAgentsManagerGatewayBinds proves the multi-agent runner
+// builds and binds one clear front leg per usm-manager-gateway entry.
+func TestRunGatewayAgentsManagerGatewayBinds(t *testing.T) {
+	agentA := fakeAgent(t, "127.0.0.1:0")
+	defer agentA.Close()
+	agentB := fakeAgent(t, "127.0.0.1:0")
+	defer agentB.Close()
+
+	cfg := &config.Config{Role: config.RoleGateway}
+	cfg.Defaults()
+	cfg.Security.Mode = "usm-manager-gateway"
+	cfg.Security.Users = testUsers()
+	cfg.Agents = []config.AgentEntry{
+		{Name: "plc", ListenAddr: freeUDPPort(t), AgentAddr: agentA.LocalAddr().String()},
+		{Name: "ahu", ListenAddr: freeUDPPort(t), AgentAddr: agentB.LocalAddr().String()},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("config validate: %v", err)
+	}
+	cancel, errCh := startGatewayAgents(t, cfg, observ.NewMetrics(), nil)
+	defer cancel()
+	stopRun(t, cancel, errCh, "gateway agents manager-gateway")
 }

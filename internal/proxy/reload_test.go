@@ -127,3 +127,37 @@ func TestDescribePolicy(t *testing.T) {
 		t.Errorf("describePolicy = %q", got)
 	}
 }
+
+func TestReloadAgentsWarnsOnRestartOnlyChanges(t *testing.T) {
+	cur := &config.Config{
+		Role:     config.RoleGateway,
+		Security: config.Security{Mode: "usm-gateway"},
+		Agents: []config.AgentEntry{{
+			Name: "plc", ListenAddr: ":1161", AgentAddr: "10.0.0.1:161",
+		}},
+	}
+	next := &config.Config{
+		Role:     config.RoleGateway,
+		Security: config.Security{Mode: "usm-gateway"},
+		Agents: []config.AgentEntry{{
+			Name: "plc", ListenAddr: ":1162", AgentAddr: "10.0.0.2:161",
+			Security:       &config.Security{EngineStore: "/tmp/plc.json"},
+			TrapListenAddr: ":1261", TrapSinkAddr: "10.8.0.5:162",
+		}},
+	}
+	holders := map[string]*access.Holder{"plc": access.NewHolder(nil)}
+	w := applyReloadAgents(cur, next, holders)
+	want := map[string]bool{
+		"agent plc listener/agent changed; restart required": true,
+		"agent plc security changed; restart required":       true,
+		"agent plc trap legs changed; restart required":      true,
+	}
+	if len(w) != len(want) {
+		t.Fatalf("warnings = %v, want %d", w, len(want))
+	}
+	for _, m := range w {
+		if !want[m] {
+			t.Errorf("unexpected warning %q", m)
+		}
+	}
+}

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -147,6 +148,48 @@ type GatewayRole struct {
 	TrapSinkCommunity string `yaml:"trap_sink_community"`
 }
 
+// AgentEntry is one front listener ↔ upstream agent pair in the gateway
+// role's `agents:` list. It is mutually exclusive with the single-agent
+// gateway.listen_addr / gateway.agent_addr pair. Each entry is an
+// independent security boundary: its own listener, upstream target,
+// access policy, security block and optional trap legs.
+type AgentEntry struct {
+	// Name is the stable identifier in logs, metrics, status and reload.
+	// Empty falls back to AgentAddr.
+	Name string `yaml:"name"`
+	// ListenAddr is the front listener for this agent (gateway role).
+	ListenAddr string `yaml:"listen_addr"`
+	// AgentAddr is the upstream legacy agent (or v3 agent in
+	// usm-manager-gateway mode).
+	AgentAddr string `yaml:"agent_addr"`
+	// AgentCommunity is the v1/v2c community toward the agent.
+	AgentCommunity string `yaml:"agent_community"`
+	// Access is the per-entry policy; nil falls back to the process-wide
+	// access block.
+	Access *Access `yaml:"access"`
+	// Security overrides parts of the process-wide security block. The
+	// mode is process-wide and cannot be changed per entry.
+	Security *Security `yaml:"security"`
+	// TLS is the per-entry certificate material for tsm-gateway; empty
+	// fields fall back to the process-wide tunnel block.
+	TLS *AgentTLS `yaml:"tls"`
+	// TrapListenAddr and TrapSinkAddr are this entry's optional
+	// notification legs (both or neither).
+	TrapListenAddr string `yaml:"trap_listen_addr"`
+	TrapSinkAddr   string `yaml:"trap_sink_addr"`
+	// TrapSinkCommunity is the clear v2c community toward the sink.
+	TrapSinkCommunity string `yaml:"trap_sink_community"`
+}
+
+// AgentTLS is the per-agent certificate material for tsm-gateway.
+type AgentTLS struct {
+	CAFile             string `yaml:"ca_file"`
+	CertFile           string `yaml:"cert_file"`
+	KeyFile            string `yaml:"key_file"`
+	ServerName         string `yaml:"server_name"`
+	InsecureSkipVerify bool   `yaml:"insecure_skip_verify"`
+}
+
 // Security configures the SNMP message-level security mode (USM
 // translate). When Mode is "usm-translate", the proxies speak SNMPv3
 // authPriv to each other over the tunnel and translate to/from v1/v2c on
@@ -168,6 +211,10 @@ type Security struct {
 	// the RFC 3414 replay window reopens. Only gateway modes that FOLLOW
 	// a remote engine (usm-manager-gateway) need no store.
 	EngineStore string `yaml:"engine_store"`
+	// EngineStoreDir derives a per-agent engine store path
+	// (<dir>/<agent-name>.json) when an agent entry has no explicit
+	// security.engine_store. An explicit engine_store wins.
+	EngineStoreDir string `yaml:"engine_store_dir"`
 	// EphemeralEngine explicitly accepts losing the engine state on
 	// restart. Testing and the no-YAML quick start only: a restart then
 	// resets engineBoots, which weakens replay protection.
@@ -286,6 +333,7 @@ type Config struct {
 	Manager       ManagerRole   `yaml:"manager"`
 	Agent         AgentRole     `yaml:"agent"`
 	Gateway       GatewayRole   `yaml:"gateway"`
+	Agents        []AgentEntry  `yaml:"agents"`
 	Security      Security      `yaml:"security"`
 	Notifications Notifications `yaml:"notifications"`
 	Access        Access        `yaml:"access"`
@@ -302,11 +350,15 @@ func (c *Config) TrapFilter() (*notifyfilter.Filter, error) {
 	return notifyfilter.New(f.Action, f.Oids)
 }
 
-// AccessPolicy compiles the access section into a runtime policy. A
-// zero-valued Access section yields a nil policy (allow everything), so
-// callers can install the result unconditionally.
+// AccessPolicy compiles the process-wide access section into a runtime
+// policy. A zero-valued Access section yields a nil policy (allow
+// everything), so callers can install the result unconditionally.
 func (c *Config) AccessPolicy() (*access.Policy, error) {
-	a := c.Access
+	return c.Access.Policy()
+}
+
+// Policy compiles one access section into a runtime policy.
+func (a Access) Policy() (*access.Policy, error) {
 	if len(a.Allow) == 0 && a.RatePerSec == 0 && !a.ReadOnly && a.WritePolicy == nil {
 		// Nothing configured: a nil policy is the "no restriction" value
 		// and keeps the reload path able to tell "configured" from "not".
@@ -351,11 +403,13 @@ func (c *Config) AccessPolicy() (*access.Policy, error) {
 	return access.New(a.Allow, a.RatePerSec, writes)
 }
 
-// validateAccess checks the access section before the process starts: a
-// bad allow entry or OID rule must never silently widen (or narrow) the
+// validateAccess checks the process-wide access section.
+func (c *Config) validateAccess() error { return c.Access.validate() }
+
+// validate checks one access section before the process starts: a bad
+// allow entry or OID rule must never silently widen (or narrow) the
 // policy at runtime.
-func (c *Config) validateAccess() error {
-	a := c.Access
+func (a Access) validate() error {
 	for _, e := range a.Allow {
 		if e == "" {
 			return fmt.Errorf("access.allow: empty entry")
@@ -397,7 +451,7 @@ func (c *Config) validateAccess() error {
 		}
 	}
 	// Compile once so validation and runtime can never disagree.
-	if _, err := c.AccessPolicy(); err != nil {
+	if _, err := a.Policy(); err != nil {
 		return fmt.Errorf("access: %w", err)
 	}
 	return nil
@@ -407,6 +461,111 @@ func (c *Config) validateAccess() error {
 // preferred first.
 func (c *Config) DialEndpoints() []string {
 	return c.Tunnel.DialAddrs
+}
+
+// HasAgents reports whether the gateway role uses the multi-agent list.
+func (c *Config) HasAgents() bool { return len(c.Agents) > 0 }
+
+// EffectiveName returns the entry's stable name.
+func (a AgentEntry) EffectiveName() string {
+	if a.Name != "" {
+		return a.Name
+	}
+	return a.AgentAddr
+}
+
+// EffectiveGateway returns the gateway role for one entry, with
+// process-wide defaults applied.
+func (c *Config) EffectiveGateway(a AgentEntry) GatewayRole {
+	g := c.Gateway
+	g.ListenAddr = a.ListenAddr
+	g.AgentAddr = a.AgentAddr
+	if a.AgentCommunity != "" {
+		g.AgentCommunity = a.AgentCommunity
+	}
+	if a.TrapListenAddr != "" {
+		g.TrapListenAddr = a.TrapListenAddr
+	}
+	if a.TrapSinkAddr != "" {
+		g.TrapSinkAddr = a.TrapSinkAddr
+	}
+	if a.TrapSinkCommunity != "" {
+		g.TrapSinkCommunity = a.TrapSinkCommunity
+	}
+	return g
+}
+
+// EffectiveSecurity returns the per-entry security block with process-wide
+// defaults applied. The mode is always the process mode.
+func (c *Config) EffectiveSecurity(a AgentEntry) Security {
+	s := c.Security
+	if a.Security != nil {
+		o := *a.Security
+		if o.Users != nil {
+			s.Users = o.Users
+		}
+		if o.EngineID != "" {
+			s.EngineID = o.EngineID
+		}
+		if o.EngineStore != "" {
+			s.EngineStore = o.EngineStore
+		}
+		if o.EngineStoreDir != "" {
+			s.EngineStoreDir = o.EngineStoreDir
+		}
+		if o.EphemeralEngine {
+			s.EphemeralEngine = true
+		}
+		if o.TrapCommunity != "" {
+			s.TrapCommunity = o.TrapCommunity
+		}
+		if o.TSMIdentities != nil {
+			s.TSMIdentities = o.TSMIdentities
+		}
+	}
+	if s.EngineStore == "" && s.EngineStoreDir != "" {
+		s.EngineStore = filepath.Join(s.EngineStoreDir, a.EffectiveName()+".json")
+	}
+	return s
+}
+
+// EffectiveAccess returns the per-entry access policy, falling back to the
+// process-wide block.
+func (c *Config) EffectiveAccess(a AgentEntry) Access {
+	if a.Access != nil {
+		return *a.Access
+	}
+	return c.Access
+}
+
+// EffectiveTLS returns the per-entry TLS material for tsm-gateway,
+// falling back to the process-wide tunnel block.
+func (c *Config) EffectiveTLS(a AgentEntry) AgentTLS {
+	t := AgentTLS{
+		CAFile:             c.Tunnel.CAFile,
+		CertFile:           c.Tunnel.CertFile,
+		KeyFile:            c.Tunnel.KeyFile,
+		ServerName:         c.Tunnel.ServerName,
+		InsecureSkipVerify: c.Tunnel.InsecureSkipVerify,
+	}
+	if a.TLS != nil {
+		if a.TLS.CAFile != "" {
+			t.CAFile = a.TLS.CAFile
+		}
+		if a.TLS.CertFile != "" {
+			t.CertFile = a.TLS.CertFile
+		}
+		if a.TLS.KeyFile != "" {
+			t.KeyFile = a.TLS.KeyFile
+		}
+		if a.TLS.ServerName != "" {
+			t.ServerName = a.TLS.ServerName
+		}
+		if a.TLS.InsecureSkipVerify {
+			t.InsecureSkipVerify = true
+		}
+	}
+	return t
 }
 
 // Defaults fills unset fields with sane values.
@@ -445,9 +604,11 @@ func (c *Config) Defaults() {
 // request from that manager failed with usmStatsUnknownUserNames), the
 // passphrases those protocols need must be present, and privacy may not
 // be requested without authentication.
-func (c *Config) validateSecurityUsers() error {
-	seen := make(map[string]bool, len(c.Security.Users))
-	for _, u := range c.Security.Users {
+func (c *Config) validateSecurityUsers() error { return validateUsers(c.Security.Users) }
+
+func validateUsers(users []UserCfg) error {
+	seen := make(map[string]bool, len(users))
+	for _, u := range users {
 		if u.Name == "" {
 			return fmt.Errorf("security.users: user name is required")
 		}
@@ -481,13 +642,17 @@ func (c *Config) validateSecurityUsers() error {
 // unauthenticated identity would defeat the point of the box. authNoPriv
 // stays legal (authentication without encryption).
 func (c *Config) requireAuthenticatedUsers() error {
-	for _, u := range c.Security.Users {
+	return requireAuthenticated(c.Security.Users, c.Security.Mode)
+}
+
+func requireAuthenticated(users []UserCfg, mode string) error {
+	for _, u := range users {
 		ap, err := securitylevel.ParseAuthProtocol(u.AuthProtocol)
 		if err != nil {
 			return fmt.Errorf("security.users: user %s: auth_protocol: %w", u.Name, err)
 		}
 		if ap == securitylevel.AuthNone {
-			return fmt.Errorf("security.users: user %s: auth_protocol none is not allowed in %s mode (unauthenticated traffic must never be relayed)", u.Name, c.Security.Mode)
+			return fmt.Errorf("security.users: user %s: auth_protocol none is not allowed in %s mode (unauthenticated traffic must never be relayed)", u.Name, mode)
 		}
 	}
 	return nil
@@ -499,10 +664,14 @@ func (c *Config) requireAuthenticatedUsers() error {
 // previously captured messages replay. EphemeralEngine is the explicit,
 // documented escape hatch (quick start / tests).
 func (c *Config) requireEngineStore() error {
-	if c.Security.EngineStore != "" || c.Security.EphemeralEngine {
+	return requireEngineStoreFor(c.Security, c.Security.Mode)
+}
+
+func requireEngineStoreFor(sec Security, mode string) error {
+	if sec.EngineStore != "" || sec.EphemeralEngine {
 		return nil
 	}
-	return fmt.Errorf("security.engine_store is required for security.mode %s: engineBoots must never decrease across restarts (anti-rollback). Set security.engine_store to a persistent path (e.g. /var/lib/snmp-shield/engine.json), or set security.ephemeral_engine: true to accept losing engine state (testing only)", c.Security.Mode)
+	return fmt.Errorf("security.engine_store is required for security.mode %s: engineBoots must never decrease across restarts (anti-rollback). Set security.engine_store to a persistent path (e.g. /var/lib/snmp-shield/engine.json), or set security.ephemeral_engine: true to accept losing engine state (testing only)", mode)
 }
 
 // Validate checks the configuration for the configured role.
@@ -537,6 +706,9 @@ func (c *Config) Validate() error {
 	// re-issues its clear requests as authenticated v3 toward a
 	// v3-capable agent.
 	if c.Role == RoleGateway {
+		if c.HasAgents() {
+			return c.validateGatewayAgents()
+		}
 		switch c.Security.Mode {
 		case "usm-gateway":
 			// Either leg pair (or both): the request path (front
@@ -662,6 +834,122 @@ func (c *Config) Validate() error {
 		}
 		if c.Role == RoleManager && c.Tunnel.CAFile == "" {
 			return fmt.Errorf("security.mode tsm requires tunnel.ca_file on the agent side to verify client certificates")
+		}
+	}
+	return nil
+}
+
+// validateGatewayAgents validates the multi-agent gateway shape. Every
+// entry is an independent security boundary, so a missing user, engine
+// store or TLS file fails the whole configuration.
+func (c *Config) validateGatewayAgents() error {
+	switch c.Security.Mode {
+	case "usm-gateway", "usm-manager-gateway", "tsm-gateway":
+	default:
+		return fmt.Errorf("gateway role requires security.mode usm-gateway, usm-manager-gateway or tsm-gateway, got %q", c.Security.Mode)
+	}
+	if c.Gateway.ListenAddr != "" || c.Gateway.AgentAddr != "" {
+		return fmt.Errorf("gateway.listen_addr/gateway.agent_addr are single-agent fields; use agents: entries instead")
+	}
+	if c.Gateway.TrapListenAddr != "" || c.Gateway.TrapSinkAddr != "" {
+		return fmt.Errorf("gateway.trap_listen_addr/gateway.trap_sink_addr are single-agent fields; configure trap legs per agents: entry")
+	}
+	if c.Security.EngineStoreDir != "" {
+		st, err := os.Stat(c.Security.EngineStoreDir)
+		if err != nil {
+			return fmt.Errorf("security.engine_store_dir: %w", err)
+		}
+		if !st.IsDir() {
+			return fmt.Errorf("security.engine_store_dir: %s is not a directory", c.Security.EngineStoreDir)
+		}
+	}
+
+	seenNames := make(map[string]bool, len(c.Agents))
+	seenAddrs := make(map[string]string, len(c.Agents)*3)
+	seenStores := make(map[string]string, len(c.Agents))
+	if c.Metrics.ListenAddr != "" {
+		seenAddrs[c.Metrics.ListenAddr] = "metrics.listen_addr"
+	}
+	claim := func(addr, what string) error {
+		if addr == "" {
+			return nil
+		}
+		if prev, ok := seenAddrs[addr]; ok {
+			return fmt.Errorf("%s %q is already used by %s", what, addr, prev)
+		}
+		seenAddrs[addr] = what
+		return nil
+	}
+	for i := range c.Agents {
+		a := c.Agents[i]
+		name := a.EffectiveName()
+		if name == "" {
+			return fmt.Errorf("agents[%d]: name/agent_addr is required", i)
+		}
+		if name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
+			return fmt.Errorf("agents[%d]: name %q must not contain path separators", i, name)
+		}
+		if seenNames[name] {
+			return fmt.Errorf("agents[%d]: duplicate name %q", i, name)
+		}
+		seenNames[name] = true
+		if a.ListenAddr == "" {
+			return fmt.Errorf("agents[%d] (%s): listen_addr is required", i, name)
+		}
+		if a.AgentAddr == "" {
+			return fmt.Errorf("agents[%d] (%s): agent_addr is required", i, name)
+		}
+		if (a.TrapListenAddr == "") != (a.TrapSinkAddr == "") {
+			return fmt.Errorf("agents[%d] (%s): trap_listen_addr and trap_sink_addr must be configured together", i, name)
+		}
+		if err := claim(a.ListenAddr, fmt.Sprintf("agent %s listen_addr", name)); err != nil {
+			return err
+		}
+		if err := claim(a.TrapListenAddr, fmt.Sprintf("agent %s trap_listen_addr", name)); err != nil {
+			return err
+		}
+		if a.Security != nil && a.Security.Mode != "" && a.Security.Mode != c.Security.Mode {
+			return fmt.Errorf("agents[%d] (%s): security.mode is process-wide; entry mode %q differs from %q", i, name, a.Security.Mode, c.Security.Mode)
+		}
+		sec := c.EffectiveSecurity(a)
+		if c.Security.Mode != "tsm-gateway" && sec.EngineStore != "" {
+			if prev, ok := seenStores[sec.EngineStore]; ok {
+				return fmt.Errorf("agents[%d] (%s): engine_store %q is already used by agent %s; use engine_store_dir or a unique store", i, name, sec.EngineStore, prev)
+			}
+			seenStores[sec.EngineStore] = name
+		}
+		if err := validateUsers(sec.Users); err != nil {
+			return fmt.Errorf("agents[%d] (%s): %w", i, name, err)
+		}
+		switch c.Security.Mode {
+		case "usm-gateway":
+			if len(sec.Users) == 0 {
+				return fmt.Errorf("agents[%d] (%s): security.users needs at least one user", i, name)
+			}
+			if err := requireAuthenticated(sec.Users, c.Security.Mode); err != nil {
+				return fmt.Errorf("agents[%d] (%s): %w", i, name, err)
+			}
+			if err := requireEngineStoreFor(sec, c.Security.Mode); err != nil {
+				return fmt.Errorf("agents[%d] (%s): %w", i, name, err)
+			}
+		case "usm-manager-gateway":
+			if len(sec.Users) == 0 {
+				return fmt.Errorf("agents[%d] (%s): security.users needs at least one user (the v3 agent's credentials)", i, name)
+			}
+			if err := requireAuthenticated(sec.Users, c.Security.Mode); err != nil {
+				return fmt.Errorf("agents[%d] (%s): %w", i, name, err)
+			}
+		case "tsm-gateway":
+			t := c.EffectiveTLS(a)
+			if t.CertFile == "" || t.KeyFile == "" {
+				return fmt.Errorf("agents[%d] (%s): tls.cert_file and tls.key_file are required for tsm-gateway", i, name)
+			}
+			if t.CAFile == "" {
+				return fmt.Errorf("agents[%d] (%s): tls.ca_file is required to verify client certificates", i, name)
+			}
+		}
+		if err := c.EffectiveAccess(a).validate(); err != nil {
+			return fmt.Errorf("agents[%d] (%s): %w", i, name, err)
 		}
 	}
 	return nil

@@ -39,6 +39,7 @@ a design property, not pending integration work.
 | First capability | **Passthrough tunnel**, then USM/TSM message security |
 | SNMP versions | v2c and v3 are priority; v1 tolerated on clear leg |
 | Config | YAML file per instance, role via subcommand |
+| Server scope | **Two-proxy: one upstream target per instance.** Gateway: N independent listener↔agent pairs per instance is implemented via the `agents:` list (`docs/multi-agent.md`); each entry has its own front listener, upstream target, access policy and security state; no routing. No shared front listener selecting an agent by community/context/OID: those are security identities, and the translating modes drop `contextName`. `tunnel.dial_addrs` is failover for one logical agent, not multi-agent. S1b (multi-agent over the tunnel) is closed; the sibling `devices:` shape transfers to the gateway role only |
 | HA | Manager dials a list (`tunnel.dial_addrs`, sticky last-known-good); dead peers detected via keepalive (3 misses × 3×keepalive) and per-session work is cancelled through `Session.Done()`; replicas sharing one engineID converge on the highest seen engine state: digest-verified higher boots adopted as logical reboot, manager adopts Reports from ANY engineID and follows the wire for same-engine boots/time changes |
 | Access policy | One `access` section everywhere: `allow` (client IP/CIDR allow-list), `rate_per_sec` (per-client token bucket), `read_only` XOR `write_policy {default, rules[{oid, action}]}`. Key names mirror modbus-shield so operators learn the policy once. Scope: manager clear leg + gateway front legs get all three; the **agent** role (tunnel ingress) gets the write policy only (defense in depth at the device), since tunnel frames carry no client address — `allow`/`rate_per_sec` there are warned as ignored. `passthrough` write policy sees v1/v2c only. Denials: off-list + over-rate are dropped **silently**; a write refusal is **answered** `notWritable` (v1 `noSuchName`) |
 | Write-policy semantics | Deny-overrides, allow-must-cover, evaluated as a set (order irrelevant): any matching deny rejects the whole SET; an allow wins only if one rule covers every requested OID; else `default` (deny unless configured). Undecodable/empty-varbind SET is denied; non-SET PDUs pass |
@@ -156,6 +157,7 @@ plus the short `/tmp` prefix hides it).
 | SBOM + automated vuln-DB comparison (`make sbom` → syft SPDX+CycloneDX into `dist/`; `make vulnscan` → `grype db update` + `grype --fail-on high` vs NVD/GHSA/OSV; `scripts/sbom.sh --sbom-only`) + x/crypto v0.48.0 → v0.58.0 upgrade clearing all Critical/High advisories (go directive 1.24 → 1.26, mandatory for x/crypto ≥ 0.56) | done (tested, `make vulnscan` rc=0 — only residual GO-2026-5932 is Unknown severity/unfixed deprecated-openpgp advisory, below the gate; direct symbol-precise binary scan: 0 findings) |
 | SNMP metrics interface (`internal/snmpmetrics`: read-only SNMPv2c health MIB GET/GETNEXT on `metrics.listen_addr` + v2c tunnel-lifecycle traps to `metrics.trap_sink_addr`; `Session.SetEventFunc` events, all roles; Prometheus stays alongside) | done (tested, unit tests + e2e: two-proxy chain polling + tunnel-down trap pinned) |
 | Front-leg access policy (`internal/access` + `internal/oidmatch`): client allow-list, per-client rate limit, read-only and OID-scoped write policy on the 6 client-facing request ingress sites (usm gateway/manager, tsm gateway/manager, passthrough manager, usm manager-gateway) **plus the write policy at both device-facing agent ingress sites** (usm-translate + tsm tunnel requests, answered `notWritable` back through the tunnel); 3 new Prometheus counters; `access.*` YAML + `--allow`/`--rate-per-sec`/`--read-only`/`--write-default`/`--write-allow`/`--write-deny` flags; SIGHUP access-policy reload (`internal/proxy/reload.go`) | done (tested: access unit tests pin deny-overrides/allow-must-cover/arc boundaries/undecodable-SET/fail-closed cap; wire e2e `internal/usm/access_e2e_test.go` (gosnmp: read-only→notWritable with 0 SETs at the agent, allow-list silence + live holder swap, subtree allow/deny incl. straddling SET, rate-limit burst) + `internal/tsm/access_test.go` (TSM read-only → notWritable, msgID/req-id echoed, agent untouched) + `internal/proxy/proxy_test.go TestRunAgentReadOnlyE2E` (full usm-translate chain, agent-side policy, device sees 0 SETs) + `internal/tsm/tsm_e2e_test.go TestTSMEndToEndAgentReadOnly`; reload tests; full race suite + smoke + interop green) |
+| S1a multiple agents per instance (gateway-only) — **done** (Phase 1, 2026-11-03); S1b multi-agent over the two-proxy tunnel — **closed** | S1a: one process, N independent listener↔agent pairs for all gateway modes (one mode per process); per-entry access, security (`users`/engine/TSM), optional `tls`, trap legs, `engine_store_dir` derivation, per-agent metrics label, per-entry `validate`/`selftest` and SIGHUP access reload; docs in `docs/multi-agent.md`. Tests: two-entry USM e2e, per-entry trap delivery, SIGHUP reload, TSM/manager bind smoke, config validation, per-entry selftest. S1b: one pair per agent; the custom tunnel has no agent selector. No routing by community/context/OID |
 
 ### Gateway modes (single proxy, no second proxy required)
 
@@ -407,9 +409,10 @@ usm, tsm, cache, notifyfilter, oidmatch, access, safego, snmpmetrics,
 securitylevel, cmd/snmp-shield. Still empty, reserved:
 discovery (discovery logic lives in internal/usm translate_manager.go).
 Also: configs/ example YAML (manager/agent × psk/usm/tsm +
-gateway-usm + gateway-tsm + gateway-manager-gateway +
-gateway-notifications-only
-[usm-gateway notification-only]), scripts/gen-certs.sh
+gateway-usm + gateway-usm-agents (multi-agent) + gateway-tsm +
+gateway-manager-gateway + gateway-notifications-only
+[usm-gateway notification-only]), docs/multi-agent.md (S1a design and
+implementation notes), scripts/gen-certs.sh
 throwaway test PKI into gitignored certs/, scripts/tsm-sink raw-DTLS
 test receiver for interop, scripts/interop-manager-gateway.sh real-snmpd
 manager-gateway interop, scripts/sbom.sh SBOM+vulnscan entry point,
@@ -1606,6 +1609,67 @@ the mutation note in §3).
   but only if the server actually serves the conn (see quirk above).
   Mapping lives in `internal/tunnel/ciphersuite.go`
   (`PskCipherSuiteIDs`, short names + full RFC names as aliases).
+
+### Gateway co-hosting and the S1a/S1b split
+
+Co-hosting is **not** routing. Each listener↔agent pair owns its front
+socket, upstream socket, policy, tables, security state and counters; no
+datagram crosses pairs. The front listener identifies the agent, the payload
+stays opaque, and per-agent policy/limits/state stay isolated. A client
+cannot choose an upstream target through a protocol field.
+
+SNMP multi-agent is split. **S1a (gateway-only co-hosting)** is implemented
+(`docs/multi-agent.md`): one process, N independent listener↔agent pairs, each
+with its own access policy, security state (users/engine/TSM material),
+optional `tls`, and optional trap legs; no routing. One mode per process;
+mixed modes are separate instances. `security.engine_store_dir` derives
+`<dir>/<name>.json` per entry (an explicit `engine_store` wins); duplicate
+effective engine stores are rejected. Prometheus
+request/notification/access counters carry an `agent` label; single-target
+roles use `agent="default"`. SIGHUP applies access per entry by name;
+listener/agent/security/TLS/trap changes are restart-required. **S1b
+(multi-agent over the two-proxy tunnel)** stays closed. The protocol has no
+honest target selector: community and v3 `contextName` are security
+identities, not routing keys, and the translating gateway modes build the
+outbound scopedPDU with an empty context
+(`msg.BuildScoped(..., []byte{}, ...)`), so a shared front listener would be a
+proxy forwarder/router. The two-proxy tunnel frame has no agent selector
+either; `tunnel.dial_addrs` is failover for one logical agent. For the
+two-proxy shape, run one pair per agent.
+
+**S1a implementation notes** (`internal/config`, `internal/proxy`,
+`internal/observ`, `cmd/snmp-shield/diagnostics.go`):
+
+- Config: `agents:` list with `name`, `listen_addr`, `agent_addr`,
+  `agent_community`, `access`, `security`, `tls`, and optional
+  `trap_listen_addr`/`trap_sink_addr`. `EffectiveSecurity` overlays
+  non-zero entry fields on the process defaults; `engine_store_dir`
+  derives `<dir>/<name>.json` when no explicit `engine_store` is set,
+  and duplicate effective engine stores are rejected. `EffectiveGateway`,
+  `EffectiveAccess`, `EffectiveTLS` are the runtime merge points. One
+  mode per process; an entry `security.mode` that differs is a validation
+  error.
+- Runner: `runGateway` dispatches to `runGatewaySingle` or
+  `runGatewayAgents`. The multi path builds one translator per entry,
+  each with its own access holder and `met.ForAgent(name)`, and aborts
+  all entries on the first construction/bind error.
+- Reload: `applyReloadAgents` updates each entry's access holder by name;
+  listener/agent/security/TLS/trap changes are restart-required;
+  adding/removing an entry is restart-only. `Run` creates the
+  `AgentAccess` map once; its keys do not change on reload.
+- Metrics: `observ.Metrics.ForAgent(name)` returns a view whose
+  request/notification/access counters and latency update both the
+  process aggregate (SNMP MIB) and the `agent`-labelled Prometheus
+  series. Single-target roles pass `met.ForAgent("default")`. Process
+  metrics (frames/bytes/reconnects/tunnel/session gauges) stay
+  unlabelled.
+- Diagnostics: `preflight`, `selftest` and the JSON checks iterate
+  `agents:` and set `check.Agent`; `probeAgentV3For`/`gatewayCommunityFor`
+  take the per-entry gateway/security values instead of the global
+  config.
+- Test lessons: the SIGHUP test must allocate front ports once and reuse
+  them across YAML rewrites (otherwise the diff looks like a listener
+  change); `startGatewayAgents` waits for both front and trap listeners.
 
 ## 8. AGENTS.md Maintenance Rule
 
